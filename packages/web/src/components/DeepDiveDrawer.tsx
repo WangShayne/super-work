@@ -12,6 +12,12 @@ import {
   X,
 } from "lucide-react";
 import { api } from "../api.ts";
+import {
+  formatOutboxStatus,
+  formatStage,
+  formatTicketStatus,
+  useI18n,
+} from "../i18n.tsx";
 import type {
   ChainOfRecall,
   LiveEventLogEntry,
@@ -34,6 +40,7 @@ export function DeepDiveDrawer({
   onClose,
   onRefresh,
 }: DeepDiveDrawerProps) {
+  const { locale, t } = useI18n();
   const [tab, setTab] = useState<DrawerTab>("stream");
   const [detail, setDetail] = useState<TicketDetailResponse | null>(null);
   const [recall, setRecall] = useState<ChainOfRecall | null>(null);
@@ -127,7 +134,7 @@ export function DeepDiveDrawer({
               {ticket && (
                 <>
                   <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-200">
-                    {ticket.status}
+                    {formatTicketStatus(ticket.status, locale)}
                   </span>
                   {ticket.branchName && (
                     <span className="inline-flex items-center gap-1 text-[11px] font-mono text-zinc-400">
@@ -139,7 +146,7 @@ export function DeepDiveDrawer({
               )}
             </div>
             <h2 className="text-base font-semibold text-zinc-100 truncate">
-              {ticket?.title ?? (loading ? "Loading..." : ticketId)}
+              {ticket?.title ?? (loading ? t("drawer.loading") : ticketId)}
             </h2>
           </div>
 
@@ -150,7 +157,7 @@ export function DeepDiveDrawer({
                 className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-rose-500/30 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20 text-xs"
               >
                 <Ban className="w-3 h-3" />
-                Cancel
+                {t("drawer.cancelTask")}
               </button>
             )}
             <button
@@ -165,17 +172,21 @@ export function DeepDiveDrawer({
         {/* Tabs */}
         <div className="px-5 border-b border-zinc-800 flex items-center gap-1 bg-zinc-950">
           {[
-            { id: "stream" as const, label: "Execution Stream", icon: Terminal },
-            { id: "diff" as const, label: "Diff & Mandate", icon: FileDiff },
-            { id: "recall" as const, label: "Chain of Recall", icon: History },
-            { id: "outbox" as const, label: `Outbox (${detail?.outboxEntries.length ?? 0})`, icon: Database },
-          ].map((t) => {
-            const Icon = t.icon;
-            const active = tab === t.id;
+            { id: "stream" as const, label: t("drawer.tab.stream"), icon: Terminal },
+            { id: "diff" as const, label: t("drawer.tab.diff"), icon: FileDiff },
+            { id: "recall" as const, label: t("drawer.tab.recall"), icon: History },
+            {
+              id: "outbox" as const,
+              label: `${t("drawer.tab.outbox")} (${detail?.outboxEntries.length ?? 0})`,
+              icon: Database,
+            },
+          ].map((tabItem) => {
+            const Icon = tabItem.icon;
+            const active = tab === tabItem.id;
             return (
               <button
-                key={t.id}
-                onClick={() => setTab(t.id)}
+                key={tabItem.id}
+                onClick={() => setTab(tabItem.id)}
                 className={`inline-flex items-center gap-1.5 px-3 py-2.5 text-xs font-medium border-b-2 transition ${
                   active
                     ? "border-indigo-500 text-indigo-300"
@@ -183,7 +194,7 @@ export function DeepDiveDrawer({
                 }`}
               >
                 <Icon className="w-3.5 h-3.5" />
-                {t.label}
+                {tabItem.label}
               </button>
             );
           })}
@@ -195,16 +206,16 @@ export function DeepDiveDrawer({
             <div className="space-y-5">
               {ticket?.errorMessage && (
                 <div className="p-3 rounded-lg border border-rose-500/30 bg-rose-500/10 text-xs text-rose-200">
-                  <strong>Attention:</strong> {ticket.errorMessage}
+                  <strong>{t("drawer.attention")}</strong> {ticket.errorMessage}
                 </div>
               )}
 
               <div className="space-y-2">
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
-                  Stage Pipeline Runs
+                  {t("drawer.stageRunsTitle")}
                 </h3>
                 {detail?.stageRuns.length === 0 ? (
-                  <p className="text-xs text-zinc-500">No stage runs recorded yet.</p>
+                  <p className="text-xs text-zinc-500">{t("drawer.noStageRuns")}</p>
                 ) : (
                   <div className="space-y-2">
                     {detail?.stageRuns.map((run) => (
@@ -214,8 +225,8 @@ export function DeepDiveDrawer({
                       >
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-2">
-                            <span className="font-mono font-semibold text-indigo-300 uppercase">
-                              {run.stage}
+                            <span className="font-mono font-semibold text-indigo-300">
+                              {formatStage(run.stage, locale)}
                             </span>
                             <span className="px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono text-[10px]">
                               {run.engine}
@@ -247,12 +258,12 @@ export function DeepDiveDrawer({
 
               <div className="space-y-2">
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
-                  Live SSE Event Trajectory
+                  {t("drawer.liveEventsTitle")}
                 </h3>
                 <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-3 font-mono text-[11px] space-y-1.5 max-h-80 overflow-y-auto">
                   {ticketLiveEvents.length === 0 ? (
                     <span className="text-zinc-600">
-                      Listening for live stream events on this ticket...
+                      {t("drawer.listeningEvents")}
                     </span>
                   ) : (
                     ticketLiveEvents.map((ev) => (
@@ -275,11 +286,11 @@ export function DeepDiveDrawer({
               <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4 space-y-2 text-xs">
                 <div className="flex items-center gap-2 font-semibold text-zinc-200">
                   <Shield className="w-4 h-4 text-emerald-400" />
-                  Immutable Mandate Guardrail
+                  {t("drawer.mandateTitle")}
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
                   <div>
-                    <span className="text-zinc-500 block mb-1">Allowed Paths</span>
+                    <span className="text-zinc-500 block mb-1">{t("drawer.allowedPaths")}</span>
                     <div className="flex flex-wrap gap-1">
                       {ticket.mandate.allowedPaths.map((p) => (
                         <code
@@ -292,7 +303,7 @@ export function DeepDiveDrawer({
                     </div>
                   </div>
                   <div>
-                    <span className="text-zinc-500 block mb-1">Forbidden Paths</span>
+                    <span className="text-zinc-500 block mb-1">{t("drawer.forbiddenPaths")}</span>
                     <div className="flex flex-wrap gap-1">
                       {ticket.mandate.forbiddenPaths.map((p) => (
                         <code
@@ -309,7 +320,7 @@ export function DeepDiveDrawer({
 
               <div className="space-y-2">
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
-                  Worktree Unified Git Diff
+                  {t("drawer.diffTitle")}
                 </h3>
                 <pre className="rounded-lg border border-zinc-800 bg-zinc-900/80 p-3 font-mono text-[11px] overflow-x-auto leading-relaxed">
                   {detail?.diff ? (
@@ -328,7 +339,7 @@ export function DeepDiveDrawer({
                       );
                     })
                   ) : (
-                    <span className="text-zinc-600">No diff produced in worktree yet.</span>
+                    <span className="text-zinc-600">{t("drawer.noDiff")}</span>
                   )}
                 </pre>
               </div>
@@ -345,7 +356,7 @@ export function DeepDiveDrawer({
                     type="text"
                     value={searchQ}
                     onChange={(e) => setSearchQ(e.target.value)}
-                    placeholder="Search SQLite FTS5 memory across tickets & spill..."
+                    placeholder={t("drawer.searchPlaceholder")}
                     className="w-full bg-zinc-900 border border-zinc-800 rounded-lg pl-8 pr-3 py-2 text-xs text-zinc-200 focus:outline-none focus:border-indigo-500"
                   />
                 </div>
@@ -353,14 +364,14 @@ export function DeepDiveDrawer({
                   type="submit"
                   className="px-3 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs text-zinc-200"
                 >
-                  Recall
+                  {t("drawer.recallButton")}
                 </button>
               </form>
 
               {searchHits && (
                 <div className="rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3 space-y-2">
                   <div className="text-[11px] font-semibold text-indigo-300">
-                    FTS5 Search Results ({searchHits.length})
+                    {t("drawer.ftsHitsTitle")} ({searchHits.length})
                   </div>
                   {searchHits.map((hit, idx) => (
                     <div key={idx} className="text-xs border-t border-zinc-800/60 pt-1.5">
@@ -375,18 +386,18 @@ export function DeepDiveDrawer({
               {/* Lineage: Trigger -> Thread -> Inline -> Spill */}
               <div className="space-y-3 text-xs">
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
-                  Lineage: Trigger → Thread → Inline Memory
+                  {t("drawer.lineageTitle")}
                 </h3>
                 <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3 space-y-2">
                   <div>
-                    <span className="text-zinc-500">Origin Trigger:</span>{" "}
+                    <span className="text-zinc-500">{t("drawer.originTrigger")}</span>{" "}
                     <span className="font-mono text-zinc-300">
                       {recall.trigger?.source} ({recall.thread?.threadKey})
                     </span>
                   </div>
                   {recall.ticket.inlineMemory.planSummary && (
                     <div>
-                      <span className="text-zinc-500 block">Inline Plan Summary:</span>
+                      <span className="text-zinc-500 block">{t("drawer.planSummary")}</span>
                       <p className="text-zinc-300 mt-0.5 whitespace-pre-wrap">
                         {recall.ticket.inlineMemory.planSummary}
                       </p>
@@ -394,7 +405,7 @@ export function DeepDiveDrawer({
                   )}
                   {recall.ticket.inlineMemory.threadUpdates.length > 0 && (
                     <div>
-                      <span className="text-zinc-500 block">Subscribed Thread Updates:</span>
+                      <span className="text-zinc-500 block">{t("drawer.threadUpdates")}</span>
                       <ul className="list-disc pl-4 text-zinc-300 mt-1 space-y-1">
                         {recall.ticket.inlineMemory.threadUpdates.map((u) => (
                           <li key={u.triggerId}>
@@ -410,10 +421,10 @@ export function DeepDiveDrawer({
                 </div>
 
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 pt-2">
-                  Spill Artifacts (Load On Demand)
+                  {t("drawer.spillTitle")}
                 </h3>
                 {recall.artifacts.length === 0 ? (
-                  <p className="text-zinc-500">No spill artifacts written yet.</p>
+                  <p className="text-zinc-500">{t("drawer.noSpill")}</p>
                 ) : (
                   <div className="space-y-2">
                     {recall.artifacts.map((art) => (
@@ -428,14 +439,16 @@ export function DeepDiveDrawer({
                             </span>
                             <span className="text-zinc-200">{art.summary}</span>
                             <span className="text-zinc-500 text-[11px] ml-2">
-                              ({art.byteSize} bytes)
+                              ({art.byteSize} {t("drawer.bytes")})
                             </span>
                           </div>
                           <button
                             onClick={() => handleLoadArtifact(art.id)}
                             className="text-indigo-400 hover:text-indigo-300 font-medium"
                           >
-                            {artifactContent?.id === art.id ? "Hide Spill" : "Read Spill"}
+                            {artifactContent?.id === art.id
+                              ? t("drawer.hideSpill")
+                              : t("drawer.readSpill")}
                           </button>
                         </div>
                         {artifactContent?.id === art.id && (
@@ -454,10 +467,10 @@ export function DeepDiveDrawer({
           {tab === "outbox" && (
             <div className="space-y-3">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
-                Transactional Outbox Side-Effects
+                {t("drawer.outboxTitle")}
               </h3>
               {detail?.outboxEntries.length === 0 ? (
-                <p className="text-xs text-zinc-500">No Outbox side-effects queued for this ticket yet.</p>
+                <p className="text-xs text-zinc-500">{t("drawer.noOutbox")}</p>
               ) : (
                 detail?.outboxEntries.map((obx) => (
                   <div
@@ -467,11 +480,12 @@ export function DeepDiveDrawer({
                     <div className="flex items-center justify-between">
                       <span className="font-mono font-semibold text-zinc-200">{obx.action}</span>
                       <span className="font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 text-[10px]">
-                        {obx.status}
+                        {formatOutboxStatus(obx.status, locale)}
                       </span>
                     </div>
                     <div className="font-mono text-[11px] text-zinc-500">
-                      Key: {obx.idempotencyKey} · Attempts: {obx.attempts}
+                      {t("drawer.outboxKey")}: {obx.idempotencyKey} · {t("drawer.outboxAttempts")}:{" "}
+                      {obx.attempts}
                     </div>
                     {obx.resultPayload && (
                       <pre className="p-2 rounded bg-zinc-950 border border-zinc-800 text-[11px] text-emerald-300 overflow-x-auto">
@@ -479,7 +493,9 @@ export function DeepDiveDrawer({
                       </pre>
                     )}
                     {obx.lastError && (
-                      <div className="text-rose-300 text-[11px]">Error: {obx.lastError}</div>
+                      <div className="text-rose-300 text-[11px]">
+                        {t("drawer.outboxError")} {obx.lastError}
+                      </div>
                     )}
                   </div>
                 ))
@@ -497,7 +513,7 @@ export function DeepDiveDrawer({
             type="text"
             value={followUp}
             onChange={(e) => setFollowUp(e.target.value)}
-            placeholder="Send follow-up message on subscribed Thread (routes directly to this Worker)..."
+            placeholder={t("drawer.threadPlaceholder")}
             className="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
           />
           <button
@@ -506,7 +522,7 @@ export function DeepDiveDrawer({
             className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium disabled:opacity-40 transition"
           >
             <Send className="w-3.5 h-3.5" />
-            Inject
+            {t("drawer.injectButton")}
           </button>
         </form>
       </div>

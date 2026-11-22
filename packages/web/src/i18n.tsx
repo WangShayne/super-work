@@ -1,0 +1,397 @@
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
+import type {
+  InboxItem,
+  OutboxEntry,
+  PipelineTemplateId,
+  StageKind,
+  TicketStatus,
+} from "./types.ts";
+
+export type Locale = "zh" | "en";
+
+const STORAGE_KEY = "super-work:locale";
+
+const MESSAGES = {
+  zh: {
+    "app.title": "super-work · 超级智能体决策指挥舱",
+    "brand.badge": "超级智能体系统",
+    "brand.subtitle": "路由调度 · 执行池 · 看门狗 · 事务发件箱",
+    "header.noRepo": "暂未注册仓库",
+    "header.registerRepoTitle": "注册代码仓库",
+    "header.mode.off": "关闭",
+    "header.mode.offDesc": "仅接收事件不派单",
+    "header.mode.observe": "观察",
+    "header.mode.observeDesc": "拟单入收件箱待批",
+    "header.mode.auto": "自动",
+    "header.mode.autoDesc": "全自动调度执行",
+    "header.sse.live": "实时流已连接",
+    "header.sse.reconnecting": "重连中",
+    "header.watchdog": "看门狗",
+    "header.controlPlanePrefix": "控制面",
+    "header.outboxPrefix": "发件箱",
+    "header.simulateEvent": "模拟事件",
+    "header.dispatchTask": "派发任务",
+    "header.langButton": "中文 / EN",
+    "header.langTitle": "切换界面语言 (中文 / English)",
+
+    "nav.inbox": "决策收件箱",
+    "nav.board": "态势看板",
+
+    "inbox.title": "决策收件箱",
+    "inbox.subtitle": "高信噪比人工授权队列。Worker 平时静默并发执行，仅在触发边界门禁、异常升级或交付签发时打扰你。",
+    "inbox.pendingSuffix": "项待决",
+    "inbox.emptyTitle": "注意力零阻塞",
+    "inbox.emptyDesc": "当前没有待审批方案、看门狗升级告警或授权边界拦截。可切换至态势看板或直接派发新任务。",
+    "inbox.inspectDeepDive": "查看详情抽屉 →",
+    "inbox.notePlaceholder": "可选：填写给 Worker 的指导意见或打回修改要求...",
+    "inbox.reject": "驳回",
+    "inbox.approve": "批准并继续",
+    "inbox.recentTitle": "近期决策记录",
+
+    "board.lane.triage": "评估与拟单",
+    "board.lane.queued": "排队与规划",
+    "board.lane.implementing": "编码实现中",
+    "board.lane.review": "审查与发件",
+    "board.lane.done": "待人工 / 已完成",
+    "board.empty": "暂无任务",
+    "board.waitingDepsPrefix": "等待",
+    "board.waitingDepsSuffix": "个重叠作用域任务",
+    "board.stagePrefix": "阶段",
+
+    "drawer.loading": "加载中...",
+    "drawer.cancelTask": "取消任务",
+    "drawer.tab.stream": "执行轨迹",
+    "drawer.tab.diff": "Diff 与授权边界",
+    "drawer.tab.recall": "链式召回",
+    "drawer.tab.outbox": "发件箱",
+    "drawer.attention": "注意：",
+    "drawer.stageRunsTitle": "阶段流水线记录",
+    "drawer.noStageRuns": "暂无阶段运行记录。",
+    "drawer.liveEventsTitle": "实时 SSE 事件流",
+    "drawer.listeningEvents": "正在监听当前任务的实时事件...",
+    "drawer.mandateTitle": "不可变 Mandate 授权护栏",
+    "drawer.allowedPaths": "允许修改路径",
+    "drawer.forbiddenPaths": "禁止触碰路径",
+    "drawer.diffTitle": "工作树 Git Diff",
+    "drawer.noDiff": "当前工作树暂无代码变更。",
+    "drawer.searchPlaceholder": "跨任务与 Spill 产物检索 SQLite FTS5 记忆...",
+    "drawer.recallButton": "召回",
+    "drawer.ftsHitsTitle": "FTS5 检索命中",
+    "drawer.lineageTitle": "记忆血缘：触发器 → 会话串 → 内联记忆",
+    "drawer.originTrigger": "来源触发器：",
+    "drawer.planSummary": "内联方案摘要：",
+    "drawer.threadUpdates": "已订阅 Thread 追加记录：",
+    "drawer.spillTitle": "Spill 溢出产物（按需加载）",
+    "drawer.noSpill": "暂无溢出产物。",
+    "drawer.bytes": "字节",
+    "drawer.hideSpill": "收起产物",
+    "drawer.readSpill": "读取产物",
+    "drawer.outboxTitle": "Transactional Outbox 外部副作用记录",
+    "drawer.noOutbox": "当前任务暂无发件箱记录。",
+    "drawer.outboxKey": "幂等键",
+    "drawer.outboxAttempts": "尝试次数",
+    "drawer.outboxError": "错误：",
+    "drawer.threadPlaceholder": "向已订阅 Thread 发送追加指令（直通当前 Worker）...",
+    "drawer.injectButton": "注入",
+
+    "modal.dispatch.title": "派发研发任务",
+    "modal.dispatch.taskTitle": "任务标题",
+    "modal.dispatch.taskPlaceholder": "例如：为 API 网关添加限流中间件",
+    "modal.dispatch.goalLabel": "目标与验收说明",
+    "modal.dispatch.goalPlaceholder": "描述预期实现效果与自测验证要求...",
+    "modal.dispatch.pipeline": "流水线模板",
+    "modal.dispatch.engine": "执行引擎",
+    "modal.dispatch.budget": "预算上限 ($)",
+    "modal.dispatch.paths": "Mandate 允许修改路径（逗号分隔）",
+    "modal.dispatch.pathsPlaceholder": "packages/core/**, packages/drivers/**",
+    "modal.dispatch.cancel": "取消",
+    "modal.dispatch.submitting": "派发中...",
+    "modal.dispatch.submit": "立即派发",
+
+    "modal.simulate.title": "模拟外部事件",
+    "modal.simulate.descPrefix": "无需外部 Webhook，直接测试 Router 意图评估、",
+    "modal.simulate.descMiddle": "与",
+    "modal.simulate.descSuffix": "模式门禁以及 Thread 订阅直通路由。",
+    "modal.simulate.source": "事件源",
+    "modal.simulate.threadKey": "会话串标识 (Thread Key)",
+    "modal.simulate.eventTitle": "事件标题",
+    "modal.simulate.eventPlaceholder": "例如：#42 auth 中间件 CI 校验失败",
+    "modal.simulate.eventBody": "事件内容（支持 scope:path/** 指定范围）",
+    "modal.simulate.bodyPlaceholder": "描述故障现象或需求内容，可使用 scope:src/auth/** 提示授权路径。",
+    "modal.simulate.cancel": "取消",
+    "modal.simulate.submitting": "发送中...",
+    "modal.simulate.submit": "触发事件",
+
+    "modal.repo.title": "注册 Git 代码仓库",
+    "modal.repo.name": "显示名称",
+    "modal.repo.namePlaceholder": "my-service",
+    "modal.repo.path": "本地仓库绝对路径",
+    "modal.repo.pathPlaceholder": "/Users/you/work/my-service",
+    "modal.repo.baseBranch": "基准分支",
+    "modal.repo.initialMode": "初始自治模式",
+    "modal.repo.githubRepo": "GitHub 仓库（可选，owner/repo）",
+    "modal.repo.githubPlaceholder": "owner/repo",
+    "modal.repo.cancel": "取消",
+    "modal.repo.submit": "注册仓库",
+  },
+  en: {
+    "app.title": "super-work · Super-Agent Orchestrator",
+    "brand.badge": "Super-Agent OS",
+    "brand.subtitle": "Router · Worker Pool · Watchdog · Outbox",
+    "header.noRepo": "No repo registered",
+    "header.registerRepoTitle": "Register repository",
+    "header.mode.off": "OFF",
+    "header.mode.offDesc": "Ingest only",
+    "header.mode.observe": "OBSERVE",
+    "header.mode.observeDesc": "Propose to Inbox",
+    "header.mode.auto": "AUTO",
+    "header.mode.autoDesc": "Autonomous dispatch",
+    "header.sse.live": "Live SSE",
+    "header.sse.reconnecting": "Reconnecting",
+    "header.watchdog": "Watchdog",
+    "header.controlPlanePrefix": "Control Plane",
+    "header.outboxPrefix": "Outbox",
+    "header.simulateEvent": "Simulate Event",
+    "header.dispatchTask": "Dispatch Task",
+    "header.langButton": "EN / 中文",
+    "header.langTitle": "Switch UI Language (English / 中文)",
+
+    "nav.inbox": "Attention Inbox",
+    "nav.board": "Mission Board",
+
+    "inbox.title": "Attention Inbox",
+    "inbox.subtitle": "High-signal decisions requiring human authorization. Workers execute silently until blocked or awaiting sign-off.",
+    "inbox.pendingSuffix": "pending",
+    "inbox.emptyTitle": "Attention Clear",
+    "inbox.emptyDesc": "No pending approvals, Watchdog escalations, or Mandate blocks. Switch to Mission Board or dispatch a task to begin.",
+    "inbox.inspectDeepDive": "Inspect Deep Dive →",
+    "inbox.notePlaceholder": "Optional guidance / feedback note for the Worker...",
+    "inbox.reject": "Reject",
+    "inbox.approve": "Approve & Continue",
+    "inbox.recentTitle": "Recent Decisions",
+
+    "board.lane.triage": "Triage & Proposed",
+    "board.lane.queued": "Queued & Planning",
+    "board.lane.implementing": "Implementing",
+    "board.lane.review": "Review & Outbox",
+    "board.lane.done": "Needs Human / Done",
+    "board.empty": "Empty",
+    "board.waitingDepsPrefix": "Waiting on",
+    "board.waitingDepsSuffix": "overlapping scope(s)",
+    "board.stagePrefix": "Stage",
+
+    "drawer.loading": "Loading...",
+    "drawer.cancelTask": "Cancel",
+    "drawer.tab.stream": "Execution Stream",
+    "drawer.tab.diff": "Diff & Mandate",
+    "drawer.tab.recall": "Chain of Recall",
+    "drawer.tab.outbox": "Outbox",
+    "drawer.attention": "Attention:",
+    "drawer.stageRunsTitle": "Stage Pipeline Runs",
+    "drawer.noStageRuns": "No stage runs recorded yet.",
+    "drawer.liveEventsTitle": "Live SSE Event Trajectory",
+    "drawer.listeningEvents": "Listening for live stream events on this ticket...",
+    "drawer.mandateTitle": "Immutable Mandate Guardrail",
+    "drawer.allowedPaths": "Allowed Paths",
+    "drawer.forbiddenPaths": "Forbidden Paths",
+    "drawer.diffTitle": "Worktree Unified Git Diff",
+    "drawer.noDiff": "No diff produced in worktree yet.",
+    "drawer.searchPlaceholder": "Search SQLite FTS5 memory across tickets & spill...",
+    "drawer.recallButton": "Recall",
+    "drawer.ftsHitsTitle": "FTS5 Search Results",
+    "drawer.lineageTitle": "Lineage: Trigger → Thread → Inline Memory",
+    "drawer.originTrigger": "Origin Trigger:",
+    "drawer.planSummary": "Inline Plan Summary:",
+    "drawer.threadUpdates": "Subscribed Thread Updates:",
+    "drawer.spillTitle": "Spill Artifacts (Load On Demand)",
+    "drawer.noSpill": "No spill artifacts written yet.",
+    "drawer.bytes": "bytes",
+    "drawer.hideSpill": "Hide Spill",
+    "drawer.readSpill": "Read Spill",
+    "drawer.outboxTitle": "Transactional Outbox Side-Effects",
+    "drawer.noOutbox": "No Outbox side-effects queued for this ticket yet.",
+    "drawer.outboxKey": "Key",
+    "drawer.outboxAttempts": "Attempts",
+    "drawer.outboxError": "Error:",
+    "drawer.threadPlaceholder": "Send follow-up message on subscribed Thread (routes directly to this Worker)...",
+    "drawer.injectButton": "Inject",
+
+    "modal.dispatch.title": "Dispatch Task",
+    "modal.dispatch.taskTitle": "Task Title",
+    "modal.dispatch.taskPlaceholder": "e.g. Add rate limiter middleware",
+    "modal.dispatch.goalLabel": "Goal & Acceptance Instructions",
+    "modal.dispatch.goalPlaceholder": "Describe expected behavior and verification...",
+    "modal.dispatch.pipeline": "Pipeline",
+    "modal.dispatch.engine": "Worker Engine",
+    "modal.dispatch.budget": "Max Budget ($)",
+    "modal.dispatch.paths": "Mandate Allowed Paths (comma-separated)",
+    "modal.dispatch.pathsPlaceholder": "packages/core/**, packages/drivers/**",
+    "modal.dispatch.cancel": "Cancel",
+    "modal.dispatch.submitting": "Dispatching...",
+    "modal.dispatch.submit": "Dispatch",
+
+    "modal.simulate.title": "Simulate External Event",
+    "modal.simulate.descPrefix": "Test Router triage,",
+    "modal.simulate.descMiddle": "vs",
+    "modal.simulate.descSuffix": "gating, and Thread Subscription routing without waiting for external GitHub webhooks.",
+    "modal.simulate.source": "Source",
+    "modal.simulate.threadKey": "Thread Key",
+    "modal.simulate.eventTitle": "Event Title",
+    "modal.simulate.eventPlaceholder": "e.g. #42 CI failed on auth middleware",
+    "modal.simulate.eventBody": "Event Body (supports scope:path/**)",
+    "modal.simulate.bodyPlaceholder": "Describe bug report or CI failure. Use scope:src/auth/** to hint Mandate.",
+    "modal.simulate.cancel": "Cancel",
+    "modal.simulate.submitting": "Sending...",
+    "modal.simulate.submit": "Emit Trigger",
+
+    "modal.repo.title": "Register Git Repository",
+    "modal.repo.name": "Display Name",
+    "modal.repo.namePlaceholder": "my-service",
+    "modal.repo.path": "Local Repository Path",
+    "modal.repo.pathPlaceholder": "/Users/you/work/my-service",
+    "modal.repo.baseBranch": "Base Branch",
+    "modal.repo.initialMode": "Initial Mode",
+    "modal.repo.githubRepo": "GitHub Repo (optional, owner/repo)",
+    "modal.repo.githubPlaceholder": "owner/repo",
+    "modal.repo.cancel": "Cancel",
+    "modal.repo.submit": "Register",
+  },
+} as const;
+
+export type TranslationKey = keyof typeof MESSAGES.zh;
+
+interface I18nContextValue {
+  locale: Locale;
+  setLocale: (locale: Locale) => void;
+  toggleLocale: () => void;
+  t: (key: TranslationKey) => string;
+}
+
+const I18nContext = createContext<I18nContextValue | null>(null);
+
+function readInitialLocale(): Locale {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved === "zh" || saved === "en") return saved;
+  } catch {
+    // Ignore storage access errors
+  }
+  return "zh";
+}
+
+export function I18nProvider({ children }: { children: ReactNode }) {
+  const [locale, setLocaleState] = useState<Locale>(readInitialLocale);
+
+  const setLocale = useCallback((next: Locale) => {
+    setLocaleState(next);
+    try {
+      localStorage.setItem(STORAGE_KEY, next);
+    } catch {
+      // Ignore storage access errors
+    }
+  }, []);
+
+  const toggleLocale = useCallback(() => {
+    setLocale(locale === "zh" ? "en" : "zh");
+  }, [locale, setLocale]);
+
+  useEffect(() => {
+    document.documentElement.lang = locale === "zh" ? "zh-CN" : "en";
+    document.title = MESSAGES[locale]["app.title"];
+  }, [locale]);
+
+  const t = useCallback((key: TranslationKey): string => MESSAGES[locale][key], [locale]);
+
+  return (
+    <I18nContext.Provider value={{ locale, setLocale, toggleLocale, t }}>
+      {children}
+    </I18nContext.Provider>
+  );
+}
+
+export function useI18n(): I18nContextValue {
+  const ctx = useContext(I18nContext);
+  if (!ctx) {
+    throw new Error("useI18n must be used inside I18nProvider");
+  }
+  return ctx;
+}
+
+const TICKET_STATUS_LABELS: Record<TicketStatus, { zh: string; en: string }> = {
+  triaging: { zh: "评估中", en: "triaging" },
+  proposed: { zh: "拟单待批", en: "proposed" },
+  queued: { zh: "排队中", en: "queued" },
+  waiting_deps: { zh: "等待依赖", en: "waiting_deps" },
+  planning: { zh: "规划中", en: "planning" },
+  awaiting_plan_approval: { zh: "待批方案", en: "awaiting_plan_approval" },
+  implementing: { zh: "编码实现", en: "implementing" },
+  reviewing: { zh: "交叉审查", en: "reviewing" },
+  rebasing: { zh: "变基验证", en: "rebasing" },
+  watchdog_intervention: { zh: "看门狗介入", en: "watchdog_intervention" },
+  needs_human: { zh: "待人工介入", en: "needs_human" },
+  outbox_pending: { zh: "待发件交付", en: "outbox_pending" },
+  delivered: { zh: "已交付", en: "delivered" },
+  failed: { zh: "已失败", en: "failed" },
+  cancelled: { zh: "已取消", en: "cancelled" },
+};
+
+const STAGE_LABELS: Record<StageKind, { zh: string; en: string }> = {
+  plan: { zh: "规划 (plan)", en: "plan" },
+  implement: { zh: "实现 (implement)", en: "implement" },
+  review: { zh: "审查 (review)", en: "review" },
+  rebase: { zh: "变基 (rebase)", en: "rebase" },
+};
+
+const TEMPLATE_LABELS: Record<PipelineTemplateId, { zh: string; en: string }> = {
+  fast: { zh: "fast · 快速修复", en: "fast" },
+  standard: { zh: "standard · 标准流程", en: "standard" },
+  strict: { zh: "strict · 严格门禁", en: "strict" },
+};
+
+const INBOX_KIND_LABELS: Record<InboxItem["kind"], { zh: string; en: string }> = {
+  mandate_violation: { zh: "越界授权拦截", en: "MANDATE VIOLATION" },
+  watchdog_escalation: { zh: "看门狗升级告警", en: "WATCHDOG ESCALATION" },
+  merge_conflict: { zh: "合并冲突待解", en: "MERGE CONFLICT" },
+  plan_approval: { zh: "方案审批门禁", en: "PLAN APPROVAL" },
+  outbox_signoff: { zh: "PR 交付签发", en: "PR SIGNOFF" },
+  observe_proposal: { zh: "观察模式拟单", en: "OBSERVE PROPOSAL" },
+};
+
+const INBOX_STATUS_LABELS: Record<InboxItem["status"], { zh: string; en: string }> = {
+  pending: { zh: "待处理", en: "PENDING" },
+  approved: { zh: "已批准", en: "APPROVED" },
+  rejected: { zh: "已驳回", en: "REJECTED" },
+};
+
+const OUTBOX_STATUS_LABELS: Record<OutboxEntry["status"], { zh: string; en: string }> = {
+  awaiting_approval: { zh: "待签发", en: "awaiting_approval" },
+  pending: { zh: "待投递", en: "pending" },
+  processing: { zh: "投递中", en: "processing" },
+  sent: { zh: "已投递", en: "sent" },
+  failed: { zh: "投递失败", en: "failed" },
+  cancelled: { zh: "已取消", en: "cancelled" },
+};
+
+export function formatTicketStatus(status: TicketStatus, locale: Locale): string {
+  return TICKET_STATUS_LABELS[status][locale];
+}
+
+export function formatStage(stage: StageKind, locale: Locale): string {
+  return STAGE_LABELS[stage][locale];
+}
+
+export function formatTemplate(template: PipelineTemplateId, locale: Locale): string {
+  return TEMPLATE_LABELS[template][locale];
+}
+
+export function formatInboxKind(kind: InboxItem["kind"], locale: Locale): string {
+  return INBOX_KIND_LABELS[kind][locale];
+}
+
+export function formatInboxStatus(status: InboxItem["status"], locale: Locale): string {
+  return INBOX_STATUS_LABELS[status][locale];
+}
+
+export function formatOutboxStatus(status: OutboxEntry["status"], locale: Locale): string {
+  return OUTBOX_STATUS_LABELS[status][locale];
+}

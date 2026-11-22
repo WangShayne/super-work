@@ -1,4 +1,5 @@
-import { Activity, Cpu, FolderGit2, Plus, Radio, Send, ShieldCheck } from "lucide-react";
+import { Activity, Cpu, FolderGit2, Languages, Plus, Radio, Send, ShieldCheck } from "lucide-react";
+import { useI18n } from "../i18n.tsx";
 import type { HealthResponse, OperatingMode, RepoConfig } from "../types.ts";
 
 interface HeaderBarProps {
@@ -13,12 +14,6 @@ interface HeaderBarProps {
   onOpenAddRepo: () => void;
 }
 
-const MODES: Array<{ id: OperatingMode; label: string; desc: string }> = [
-  { id: "off", label: "OFF", desc: "Ingest only" },
-  { id: "observe", label: "OBSERVE", desc: "Propose to Inbox" },
-  { id: "auto", label: "AUTO", desc: "Autonomous dispatch" },
-];
-
 export function HeaderBar({
   repos,
   selectedRepoId,
@@ -30,7 +25,14 @@ export function HeaderBar({
   onOpenSimulate,
   onOpenAddRepo,
 }: HeaderBarProps) {
+  const { t, toggleLocale } = useI18n();
   const activeRepo = repos.find((r) => r.id === selectedRepoId) ?? repos[0];
+
+  const modes: Array<{ id: OperatingMode; label: string; desc: string }> = [
+    { id: "off", label: t("header.mode.off"), desc: t("header.mode.offDesc") },
+    { id: "observe", label: t("header.mode.observe"), desc: t("header.mode.observeDesc") },
+    { id: "auto", label: t("header.mode.auto"), desc: t("header.mode.autoDesc") },
+  ];
 
   return (
     <header className="border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur px-5 py-3 flex flex-wrap items-center justify-between gap-4 sticky top-0 z-20">
@@ -43,11 +45,11 @@ export function HeaderBar({
             <div className="flex items-center gap-2">
               <span className="font-semibold tracking-tight text-zinc-100 text-sm">super-work</span>
               <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700/60">
-                Super-Agent OS
+                {t("brand.badge")}
               </span>
             </div>
             <p className="text-[11px] text-zinc-500">
-              Router · Worker Pool · Watchdog · Outbox
+              {t("brand.subtitle")}
             </p>
           </div>
         </div>
@@ -62,7 +64,7 @@ export function HeaderBar({
             className="bg-zinc-900 border border-zinc-800 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-indigo-500"
           >
             {repos.length === 0 ? (
-              <option value="">No repo registered</option>
+              <option value="">{t("header.noRepo")}</option>
             ) : (
               repos.map((r) => (
                 <option key={r.id} value={r.id}>
@@ -73,7 +75,7 @@ export function HeaderBar({
           </select>
           <button
             onClick={onOpenAddRepo}
-            title="Register repository"
+            title={t("header.registerRepoTitle")}
             className="p-1.5 rounded-md border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-100 hover:border-zinc-700 transition"
           >
             <Plus className="w-3.5 h-3.5" />
@@ -82,7 +84,7 @@ export function HeaderBar({
 
         {activeRepo && (
           <div className="flex items-center bg-zinc-900 rounded-lg p-0.5 border border-zinc-800">
-            {MODES.map((m) => {
+            {modes.map((m) => {
               const selected = activeRepo.mode === m.id;
               const activeColors =
                 m.id === "auto"
@@ -119,7 +121,7 @@ export function HeaderBar({
             }`}
           >
             <Radio className="w-3 h-3" />
-            {sseConnected ? "Live SSE" : "Reconnecting"}
+            {sseConnected ? t("header.sse.live") : t("header.sse.reconnecting")}
           </span>
 
           {health?.availableEngines.map((eng) => (
@@ -133,21 +135,30 @@ export function HeaderBar({
 
           {health && (
             <span
-              title={`Control Plane: ${health.llmProvider}`}
+              title={`${t("header.controlPlanePrefix")}: ${health.llmProvider}`}
               className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-zinc-900 border border-zinc-800 text-zinc-400"
             >
               <ShieldCheck className="w-3 h-3 text-indigo-400" />
-              Watchdog
+              {t("header.watchdog")}
             </span>
           )}
 
           {health && (
             <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-zinc-900 border border-zinc-800 text-zinc-400">
               <Activity className="w-3 h-3 text-sky-400" />
-              Outbox: {health.counts.pendingOutbox}
+              {t("header.outboxPrefix")}: {health.counts.pendingOutbox}
             </span>
           )}
         </div>
+
+        <button
+          onClick={toggleLocale}
+          title={t("header.langTitle")}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-zinc-800 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 text-xs font-medium transition"
+        >
+          <Languages className="w-3.5 h-3.5 text-indigo-400" />
+          {t("header.langButton")}
+        </button>
 
         <button
           onClick={onOpenSimulate}
@@ -155,7 +166,7 @@ export function HeaderBar({
           className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 text-xs font-medium disabled:opacity-40 transition"
         >
           <Send className="w-3.5 h-3.5 text-amber-400" />
-          Simulate Event
+          {t("header.simulateEvent")}
         </button>
 
         <button
@@ -164,7 +175,7 @@ export function HeaderBar({
           className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium disabled:opacity-40 transition shadow-sm shadow-indigo-950"
         >
           <Plus className="w-3.5 h-3.5" />
-          Dispatch Task
+          {t("header.dispatchTask")}
         </button>
       </div>
     </header>

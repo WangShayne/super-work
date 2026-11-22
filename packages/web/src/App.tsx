@@ -4,6 +4,7 @@ import { api } from "./api.ts";
 import { DeepDiveDrawer } from "./components/DeepDiveDrawer.tsx";
 import { HeaderBar } from "./components/HeaderBar.tsx";
 import { AddRepoModal, DispatchTaskModal, SimulateEventModal } from "./components/Modals.tsx";
+import { useI18n } from "./i18n.tsx";
 import type {
   HealthResponse,
   InboxItem,
@@ -18,6 +19,7 @@ import { InboxView } from "./views/InboxView.tsx";
 type MainTab = "inbox" | "board";
 
 export function App() {
+  const { t } = useI18n();
   const [activeTab, setActiveTab] = useState<MainTab>("inbox");
   const [repos, setRepos] = useState<RepoConfig[]>([]);
   const [selectedRepoId, setSelectedRepoId] = useState<string>("");
@@ -187,7 +189,7 @@ export function App() {
           }`}
         >
           <Inbox className="w-3.5 h-3.5" />
-          Attention Inbox
+          {t("nav.inbox")}
           {pendingInboxCount > 0 && (
             <span className="px-1.5 py-0.2 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-mono">
               {pendingInboxCount}
@@ -204,7 +206,7 @@ export function App() {
           }`}
         >
           <Kanban className="w-3.5 h-3.5" />
-          Mission Board
+          {t("nav.board")}
           <span className="px-1.5 py-0.2 rounded-full bg-zinc-800 text-zinc-400 text-[10px] font-mono">
             {tickets.length}
           </span>

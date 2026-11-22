@@ -10,6 +10,7 @@ import {
   ShieldAlert,
   X,
 } from "lucide-react";
+import { formatInboxKind, formatInboxStatus, useI18n } from "../i18n.tsx";
 import type { InboxItem, Ticket } from "../types.ts";
 
 interface InboxViewProps {
@@ -19,43 +20,35 @@ interface InboxViewProps {
   onInspectTicket: (ticketId: string) => void;
 }
 
-const KIND_META: Record<
-  InboxItem["kind"],
-  { label: string; color: string; icon: typeof Eye }
-> = {
+const KIND_STYLE: Record<InboxItem["kind"], { color: string; icon: typeof Eye }> = {
   mandate_violation: {
-    label: "MANDATE VIOLATION",
     color: "bg-rose-500/15 text-rose-300 border-rose-500/30",
     icon: ShieldAlert,
   },
   watchdog_escalation: {
-    label: "WATCHDOG ESCALATION",
     color: "bg-orange-500/15 text-orange-300 border-orange-500/30",
     icon: AlertTriangle,
   },
   merge_conflict: {
-    label: "MERGE CONFLICT",
     color: "bg-amber-500/15 text-amber-300 border-amber-500/30",
     icon: GitMerge,
   },
   plan_approval: {
-    label: "PLAN APPROVAL",
     color: "bg-sky-500/15 text-sky-300 border-sky-500/30",
     icon: FileCode2,
   },
   outbox_signoff: {
-    label: "PR SIGNOFF",
     color: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
     icon: Send,
   },
   observe_proposal: {
-    label: "OBSERVE PROPOSAL",
     color: "bg-indigo-500/15 text-indigo-300 border-indigo-500/30",
     icon: Eye,
   },
 };
 
 export function InboxView({ items, ticketsById, onResolve, onInspectTicket }: InboxViewProps) {
+  const { locale, t } = useI18n();
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -75,29 +68,29 @@ export function InboxView({ items, ticketsById, onResolve, onInspectTicket }: In
     <div className="max-w-5xl mx-auto p-6 space-y-8">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-lg font-semibold text-zinc-100">Attention Inbox</h2>
+          <h2 className="text-lg font-semibold text-zinc-100">{t("inbox.title")}</h2>
           <p className="text-xs text-zinc-400 mt-0.5">
-            High-signal decisions requiring human authorization. Workers execute silently until blocked or awaiting sign-off.
+            {t("inbox.subtitle")}
           </p>
         </div>
         <span className="text-xs font-mono px-2.5 py-1 rounded-full bg-zinc-900 border border-zinc-800 text-zinc-300">
-          {pending.length} pending
+          {pending.length} {t("inbox.pendingSuffix")}
         </span>
       </div>
 
       {pending.length === 0 ? (
         <div className="rounded-xl border border-dashed border-zinc-800 bg-zinc-900/30 p-12 text-center">
           <CheckCircle2 className="w-10 h-10 text-emerald-400/80 mx-auto mb-3" />
-          <h3 className="text-sm font-medium text-zinc-200">Attention Clear</h3>
+          <h3 className="text-sm font-medium text-zinc-200">{t("inbox.emptyTitle")}</h3>
           <p className="text-xs text-zinc-500 mt-1 max-w-md mx-auto">
-            No pending approvals, Watchdog escalations, or Mandate blocks. Switch to Mission Board or dispatch a task to begin.
+            {t("inbox.emptyDesc")}
           </p>
         </div>
       ) : (
         <div className="space-y-4">
           {pending.map((item) => {
-            const meta = KIND_META[item.kind];
-            const Icon = meta.icon;
+            const style = KIND_STYLE[item.kind];
+            const Icon = style.icon;
             const ticket = ticketsById.get(item.ticketId);
             const isBusy = busyId === item.id;
 
@@ -110,10 +103,10 @@ export function InboxView({ items, ticketsById, onResolve, onInspectTicket }: In
                   <div className="space-y-1.5">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span
-                        className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-mono font-semibold border ${meta.color}`}
+                        className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-mono font-semibold border ${style.color}`}
                       >
                         <Icon className="w-3 h-3" />
-                        {meta.label}
+                        {formatInboxKind(item.kind, locale)}
                       </span>
                       <span className="text-xs font-mono text-zinc-500">{item.ticketId}</span>
                       {ticket && (
@@ -129,7 +122,7 @@ export function InboxView({ items, ticketsById, onResolve, onInspectTicket }: In
                     onClick={() => onInspectTicket(item.ticketId)}
                     className="text-xs text-indigo-400 hover:text-indigo-300 font-medium"
                   >
-                    Inspect Deep Dive →
+                    {t("inbox.inspectDeepDive")}
                   </button>
                 </div>
 
@@ -140,7 +133,7 @@ export function InboxView({ items, ticketsById, onResolve, onInspectTicket }: In
                 <div className="flex flex-wrap items-center gap-2.5">
                   <input
                     type="text"
-                    placeholder="Optional guidance / feedback note for the Worker..."
+                    placeholder={t("inbox.notePlaceholder")}
                     value={notes[item.id] ?? ""}
                     onChange={(e) => setNotes((prev) => ({ ...prev, [item.id]: e.target.value }))}
                     className="flex-1 min-w-[220px] bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
@@ -151,7 +144,7 @@ export function InboxView({ items, ticketsById, onResolve, onInspectTicket }: In
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 text-xs font-medium disabled:opacity-50 transition"
                   >
                     <X className="w-3.5 h-3.5" />
-                    Reject
+                    {t("inbox.reject")}
                   </button>
                   <button
                     disabled={isBusy}
@@ -159,7 +152,7 @@ export function InboxView({ items, ticketsById, onResolve, onInspectTicket }: In
                     className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium disabled:opacity-50 transition"
                   >
                     <Check className="w-3.5 h-3.5" />
-                    Approve & Continue
+                    {t("inbox.approve")}
                   </button>
                 </div>
               </div>
@@ -171,7 +164,7 @@ export function InboxView({ items, ticketsById, onResolve, onInspectTicket }: In
       {resolved.length > 0 && (
         <div className="space-y-3 pt-4 border-t border-zinc-900">
           <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
-            Recent Decisions
+            {t("inbox.recentTitle")}
           </h3>
           <div className="space-y-2">
             {resolved.map((item) => (
@@ -188,7 +181,7 @@ export function InboxView({ items, ticketsById, onResolve, onInspectTicket }: In
                         : "bg-rose-500/15 text-rose-300"
                     }`}
                   >
-                    {item.status.toUpperCase()}
+                    {formatInboxStatus(item.status, locale)}
                   </span>
                   <span className="text-zinc-200">{item.title}</span>
                   {item.resolutionNote && (

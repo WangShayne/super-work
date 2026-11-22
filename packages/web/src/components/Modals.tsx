@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { X } from "lucide-react";
+import { formatTemplate, useI18n } from "../i18n.tsx";
 import type { OperatingMode, PipelineTemplateId, WorkerEngineId } from "../types.ts";
 
 interface DispatchModalProps {
@@ -26,6 +27,7 @@ export function DispatchTaskModal({
   onClose,
   onSubmit,
 }: DispatchModalProps) {
+  const { locale, t } = useI18n();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [template, setTemplate] = useState<PipelineTemplateId>(defaultTemplate);
@@ -71,7 +73,7 @@ export function DispatchTaskModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
       <div className="w-full max-w-lg rounded-xl border border-zinc-800 bg-zinc-950 p-5 space-y-4 shadow-2xl">
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-zinc-100">Dispatch Task</h3>
+          <h3 className="text-sm font-semibold text-zinc-100">{t("modal.dispatch.title")}</h3>
           <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200">
             <X className="w-4 h-4" />
           </button>
@@ -79,41 +81,41 @@ export function DispatchTaskModal({
 
         <form onSubmit={handleSubmit} className="space-y-3 text-xs">
           <div>
-            <label className="block text-zinc-400 mb-1">Task Title</label>
+            <label className="block text-zinc-400 mb-1">{t("modal.dispatch.taskTitle")}</label>
             <input
               required
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder="e.g. Add rate limiter middleware"
+              placeholder={t("modal.dispatch.taskPlaceholder")}
               className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-100 focus:outline-none focus:border-indigo-500"
             />
           </div>
           <div>
-            <label className="block text-zinc-400 mb-1">Goal & Acceptance Instructions</label>
+            <label className="block text-zinc-400 mb-1">{t("modal.dispatch.goalLabel")}</label>
             <textarea
               required
               rows={3}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="Describe expected behavior and verification..."
+              placeholder={t("modal.dispatch.goalPlaceholder")}
               className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-100 focus:outline-none focus:border-indigo-500"
             />
           </div>
           <div className="grid grid-cols-3 gap-3">
             <div>
-              <label className="block text-zinc-400 mb-1">Pipeline</label>
+              <label className="block text-zinc-400 mb-1">{t("modal.dispatch.pipeline")}</label>
               <select
                 value={template}
                 onChange={(e) => setTemplate(e.target.value as PipelineTemplateId)}
                 className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-2 text-zinc-100"
               >
-                <option value="fast">fast</option>
-                <option value="standard">standard</option>
-                <option value="strict">strict</option>
+                <option value="fast">{formatTemplate("fast", locale)}</option>
+                <option value="standard">{formatTemplate("standard", locale)}</option>
+                <option value="strict">{formatTemplate("strict", locale)}</option>
               </select>
             </div>
             <div>
-              <label className="block text-zinc-400 mb-1">Worker Engine</label>
+              <label className="block text-zinc-400 mb-1">{t("modal.dispatch.engine")}</label>
               <select
                 value={engine}
                 onChange={(e) => setEngine(e.target.value as WorkerEngineId)}
@@ -127,7 +129,7 @@ export function DispatchTaskModal({
               </select>
             </div>
             <div>
-              <label className="block text-zinc-400 mb-1">Max Budget ($)</label>
+              <label className="block text-zinc-400 mb-1">{t("modal.dispatch.budget")}</label>
               <input
                 type="number"
                 step="0.25"
@@ -138,11 +140,11 @@ export function DispatchTaskModal({
             </div>
           </div>
           <div>
-            <label className="block text-zinc-400 mb-1">Mandate Allowed Paths (comma-separated)</label>
+            <label className="block text-zinc-400 mb-1">{t("modal.dispatch.paths")}</label>
             <input
               value={paths}
               onChange={(e) => setPaths(e.target.value)}
-              placeholder="packages/core/**, packages/drivers/**"
+              placeholder={t("modal.dispatch.pathsPlaceholder")}
               className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
             />
           </div>
@@ -153,14 +155,14 @@ export function DispatchTaskModal({
               onClick={onClose}
               className="px-3 py-1.5 rounded-lg border border-zinc-800 text-zinc-400 hover:text-zinc-200"
             >
-              Cancel
+              {t("modal.dispatch.cancel")}
             </button>
             <button
               type="submit"
               disabled={submitting}
               className="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium disabled:opacity-50"
             >
-              {submitting ? "Dispatching..." : "Dispatch"}
+              {submitting ? t("modal.dispatch.submitting") : t("modal.dispatch.submit")}
             </button>
           </div>
         </form>
@@ -181,6 +183,7 @@ interface SimulateModalProps {
 }
 
 export function SimulateEventModal({ open, onClose, onSubmit }: SimulateModalProps) {
+  const { t } = useI18n();
   const [source, setSource] = useState<"github_issue" | "github_pr" | "github_ci" | "cli">(
     "github_issue",
   );
@@ -214,20 +217,21 @@ export function SimulateEventModal({ open, onClose, onSubmit }: SimulateModalPro
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
       <div className="w-full max-w-lg rounded-xl border border-zinc-800 bg-zinc-950 p-5 space-y-4 shadow-2xl">
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-zinc-100">Simulate External Event</h3>
+          <h3 className="text-sm font-semibold text-zinc-100">{t("modal.simulate.title")}</h3>
           <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200">
             <X className="w-4 h-4" />
           </button>
         </div>
         <p className="text-[11px] text-zinc-400">
-          Test Router triage, <code className="text-amber-300">observe</code> vs{" "}
-          <code className="text-emerald-300">auto</code> gating, and Thread Subscription routing without waiting for external GitHub webhooks.
+          {t("modal.simulate.descPrefix")}{" "}
+          <code className="text-amber-300">observe</code> {t("modal.simulate.descMiddle")}{" "}
+          <code className="text-emerald-300">auto</code> {t("modal.simulate.descSuffix")}
         </p>
 
         <form onSubmit={handleSubmit} className="space-y-3 text-xs">
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-zinc-400 mb-1">Source</label>
+              <label className="block text-zinc-400 mb-1">{t("modal.simulate.source")}</label>
               <select
                 value={source}
                 onChange={(e) => setSource(e.target.value as typeof source)}
@@ -240,7 +244,7 @@ export function SimulateEventModal({ open, onClose, onSubmit }: SimulateModalPro
               </select>
             </div>
             <div>
-              <label className="block text-zinc-400 mb-1">Thread Key</label>
+              <label className="block text-zinc-400 mb-1">{t("modal.simulate.threadKey")}</label>
               <input
                 required
                 value={threadKey}
@@ -250,23 +254,23 @@ export function SimulateEventModal({ open, onClose, onSubmit }: SimulateModalPro
             </div>
           </div>
           <div>
-            <label className="block text-zinc-400 mb-1">Event Title</label>
+            <label className="block text-zinc-400 mb-1">{t("modal.simulate.eventTitle")}</label>
             <input
               required
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder="e.g. #42 CI failed on auth middleware"
+              placeholder={t("modal.simulate.eventPlaceholder")}
               className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-100"
             />
           </div>
           <div>
-            <label className="block text-zinc-400 mb-1">Event Body (supports scope:path/**)</label>
+            <label className="block text-zinc-400 mb-1">{t("modal.simulate.eventBody")}</label>
             <textarea
               required
               rows={3}
               value={rawText}
               onChange={(e) => setRawText(e.target.value)}
-              placeholder="Describe bug report or CI failure. Use scope:src/auth/** to hint Mandate."
+              placeholder={t("modal.simulate.bodyPlaceholder")}
               className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-100"
             />
           </div>
@@ -277,14 +281,14 @@ export function SimulateEventModal({ open, onClose, onSubmit }: SimulateModalPro
               onClick={onClose}
               className="px-3 py-1.5 rounded-lg border border-zinc-800 text-zinc-400 hover:text-zinc-200"
             >
-              Cancel
+              {t("modal.simulate.cancel")}
             </button>
             <button
               type="submit"
               disabled={submitting}
               className="px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium disabled:opacity-50"
             >
-              {submitting ? "Sending..." : "Emit Trigger"}
+              {submitting ? t("modal.simulate.submitting") : t("modal.simulate.submit")}
             </button>
           </div>
         </form>
@@ -306,6 +310,7 @@ interface AddRepoModalProps {
 }
 
 export function AddRepoModal({ open, onClose, onSubmit }: AddRepoModalProps) {
+  const { t } = useI18n();
   const [name, setName] = useState("");
   const [rootPath, setRootPath] = useState("");
   const [baseBranch, setBaseBranch] = useState("main");
@@ -340,7 +345,7 @@ export function AddRepoModal({ open, onClose, onSubmit }: AddRepoModalProps) {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
       <div className="w-full max-w-md rounded-xl border border-zinc-800 bg-zinc-950 p-5 space-y-4 shadow-2xl">
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-zinc-100">Register Git Repository</h3>
+          <h3 className="text-sm font-semibold text-zinc-100">{t("modal.repo.title")}</h3>
           <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200">
             <X className="w-4 h-4" />
           </button>
@@ -348,28 +353,28 @@ export function AddRepoModal({ open, onClose, onSubmit }: AddRepoModalProps) {
 
         <form onSubmit={handleSubmit} className="space-y-3 text-xs">
           <div>
-            <label className="block text-zinc-400 mb-1">Display Name</label>
+            <label className="block text-zinc-400 mb-1">{t("modal.repo.name")}</label>
             <input
               required
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="my-service"
+              placeholder={t("modal.repo.namePlaceholder")}
               className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-100"
             />
           </div>
           <div>
-            <label className="block text-zinc-400 mb-1">Local Repository Path</label>
+            <label className="block text-zinc-400 mb-1">{t("modal.repo.path")}</label>
             <input
               required
               value={rootPath}
               onChange={(e) => setRootPath(e.target.value)}
-              placeholder="/Users/you/work/my-service"
+              placeholder={t("modal.repo.pathPlaceholder")}
               className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
             />
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-zinc-400 mb-1">Base Branch</label>
+              <label className="block text-zinc-400 mb-1">{t("modal.repo.baseBranch")}</label>
               <input
                 value={baseBranch}
                 onChange={(e) => setBaseBranch(e.target.value)}
@@ -377,24 +382,24 @@ export function AddRepoModal({ open, onClose, onSubmit }: AddRepoModalProps) {
               />
             </div>
             <div>
-              <label className="block text-zinc-400 mb-1">Initial Mode</label>
+              <label className="block text-zinc-400 mb-1">{t("modal.repo.initialMode")}</label>
               <select
                 value={mode}
                 onChange={(e) => setMode(e.target.value as OperatingMode)}
                 className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-2 text-zinc-100"
               >
-                <option value="observe">observe</option>
-                <option value="auto">auto</option>
-                <option value="off">off</option>
+                <option value="observe">{t("header.mode.observe")} (observe)</option>
+                <option value="auto">{t("header.mode.auto")} (auto)</option>
+                <option value="off">{t("header.mode.off")} (off)</option>
               </select>
             </div>
           </div>
           <div>
-            <label className="block text-zinc-400 mb-1">GitHub Repo (optional, owner/repo)</label>
+            <label className="block text-zinc-400 mb-1">{t("modal.repo.githubRepo")}</label>
             <input
               value={githubRepo}
               onChange={(e) => setGithubRepo(e.target.value)}
-              placeholder="owner/repo"
+              placeholder={t("modal.repo.githubPlaceholder")}
               className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
             />
           </div>
@@ -404,14 +409,14 @@ export function AddRepoModal({ open, onClose, onSubmit }: AddRepoModalProps) {
               onClick={onClose}
               className="px-3 py-1.5 rounded-lg border border-zinc-800 text-zinc-400 hover:text-zinc-200"
             >
-              Cancel
+              {t("modal.repo.cancel")}
             </button>
             <button
               type="submit"
               disabled={submitting}
               className="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium disabled:opacity-50"
             >
-              Register
+              {t("modal.repo.submit")}
             </button>
           </div>
         </form>
