@@ -5,25 +5,80 @@ import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
 import type {
   ArtifactStore,
+  CliScanReport,
+  EngineModelProfile,
   InboxItemStatus,
+  LlmProviderPreset,
   OutboxStatus,
+  PublicSetupStatus,
+  ReasoningEffort,
   RepoConfig,
   StateStore,
   SuperWorkKernel,
+  SystemSetupConfig,
   TicketStatus,
+  WorkerEngineId,
 } from "@super-work/core";
 import { newId, nowIso } from "@super-work/core";
+import {
+  CliEnvironmentScanner,
+  MutableControlPlaneLLM,
+  buildControlPlaneLLMFromSetup,
+  testControlPlaneLLMConnection,
+} from "@super-work/drivers";
 
 export interface ServerAppDeps {
   kernel: SuperWorkKernel;
   stateStore: StateStore;
   artifactStore: ArtifactStore;
-  llmProviderName: string;
+  llmProviderName?: string;
+  mutableLlm?: MutableControlPlaneLLM;
+  cliScanner?: CliEnvironmentScanner;
   webDistDir?: string;
 }
 
+export function maskApiKey(key?: string): string | undefined {
+  const trimmed = key?.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.length <= 8) return `${trimmed.slice(0, 2)}****`;
+  return `${trimmed.slice(0, 3)}****${trimmed.slice(-4)}`;
+}
+
+export function toPublicSetupStatus(
+  savedConfig: SystemSetupConfig | null,
+  scanReport: CliScanReport,
+  activeLlmProvider: string,
+): PublicSetupStatus {
+  const cfg: SystemSetupConfig = savedConfig ?? {
+    initialized: false,
+    llmPreset: "deepseek",
+    llmBaseUrl: "https://api.deepseek.com/v1",
+    llmModel: "deepseek-chat",
+    llmEffort: "low",
+    preferredImplementEngine: scanReport.recommendedImplementEngine,
+    preferredReviewEngine: scanReport.recommendedReviewEngine,
+    claudeProfile: {},
+    codexProfile: {},
+    updatedAt: scanReport.scannedAt,
+  };
+  const { llmApiKey, ...rest } = cfg;
+  return {
+    initialized: cfg.initialized,
+    activeLlmProvider,
+    config: {
+      ...rest,
+      hasApiKey: Boolean(llmApiKey?.trim()),
+      maskedApiKey: maskApiKey(llmApiKey),
+    },
+    scanReport,
+  };
+}
+
 export function createServerApp(deps: ServerAppDeps): Hono {
-  const { kernel, stateStore, artifactStore, llmProviderName, webDistDir } = deps;
+  const { kernel, stateStore, artifactStore, webDistDir } = deps;
+  const scanner = deps.cliScanner ?? new CliEnvironmentScanner();
+  const getActiveProviderName = () =>
+    deps.mutableLlm?.providerName ?? deps.llmProviderName ?? "heuristic:local";
   const app = new Hono();
 
   app.use("/api/*", cors());
@@ -38,7 +93,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     ]);
     return c.json({
       ok: true,
-      llmProvider: llmProviderName,
+      llmProvider: getActiveProviderName(),
       availableEngines,
       counts: {
         repos: repos.length,
@@ -48,6 +103,126 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       },
       timestamp: nowIso(),
     });
+  });
+
+  // --- First-Run Setup & CLI Scan ---
+  app.get("/api/setup/status", async (c) => {
+    const savedConfig = await stateStore.getSystemSetting<SystemSetupConfig>("setup_config");
+    let scanReport = await stateStore.getSystemSetting<CliScanReport>("last_cli_scan");
+    if (!scanReport) {
+      scanReport = await scanner.scanAll();
+      await stateStore.setSystemSetting("last_cli_scan", scanReport);
+    }
+    return c.json(toPublicSetupStatus(savedConfig, scanReport, getActiveProviderName()));
+  });
+
+  app.post("/api/setup/scan", async (c) => {
+    const scanReport = await scanner.scanAll();
+    await stateStore.setSystemSetting("last_cli_scan", scanReport);
+    return c.json({ scanReport });
+  });
+
+  app.post("/api/setup/test-llm", async (c) => {
+    const body = (await c.req.json()) as {
+      llmPreset?: LlmProviderPreset;
+      llmBaseUrl?: string;
+      llmModel?: string;
+      llmEffort?: ReasoningEffort;
+      llmApiKey?: string;
+      useSavedKey?: boolean;
+    };
+    const preset: LlmProviderPreset = body.llmPreset ?? "heuristic";
+    let apiKey = body.llmApiKey?.trim();
+    if (!apiKey && body.useSavedKey) {
+      const saved = await stateStore.getSystemSetting<SystemSetupConfig>("setup_config");
+      apiKey = saved?.llmApiKey;
+    }
+
+    const result = await testControlPlaneLLMConnection({
+      llmPreset: preset,
+      llmBaseUrl: body.llmBaseUrl ?? "",
+      llmModel: body.llmModel ?? "",
+      llmEffort: body.llmEffort,
+      llmApiKey: apiKey,
+    });
+    return c.json(result);
+  });
+
+  app.post("/api/setup/configure", async (c) => {
+    const body = (await c.req.json()) as {
+      llmPreset?: LlmProviderPreset;
+      llmBaseUrl?: string;
+      llmModel?: string;
+      llmEffort?: ReasoningEffort;
+      llmApiKey?: string;
+      clearApiKey?: boolean;
+      preferredImplementEngine?: WorkerEngineId;
+      preferredReviewEngine?: WorkerEngineId;
+      claudeProfile?: EngineModelProfile;
+      codexProfile?: EngineModelProfile;
+    };
+
+    const existing = await stateStore.getSystemSetting<SystemSetupConfig>("setup_config");
+    let scanReport = await stateStore.getSystemSetting<CliScanReport>("last_cli_scan");
+    if (!scanReport) {
+      scanReport = await scanner.scanAll();
+      await stateStore.setSystemSetting("last_cli_scan", scanReport);
+    }
+
+    const finalApiKey = body.clearApiKey
+      ? undefined
+      : body.llmApiKey?.trim()
+        ? body.llmApiKey.trim()
+        : existing?.llmApiKey;
+
+    const cleanProfile = (p?: EngineModelProfile): EngineModelProfile => ({
+      model: p?.model?.trim() || undefined,
+      effort: p?.effort || undefined,
+    });
+
+    const nextConfig: SystemSetupConfig = {
+      initialized: true,
+      llmPreset: body.llmPreset ?? existing?.llmPreset ?? "heuristic",
+      llmBaseUrl: body.llmBaseUrl?.trim() ?? existing?.llmBaseUrl ?? "",
+      llmModel: body.llmModel?.trim() ?? existing?.llmModel ?? "",
+      llmEffort: body.llmEffort ?? existing?.llmEffort ?? "low",
+      llmApiKey: finalApiKey,
+      preferredImplementEngine:
+        body.preferredImplementEngine ??
+        existing?.preferredImplementEngine ??
+        scanReport.recommendedImplementEngine,
+      preferredReviewEngine:
+        body.preferredReviewEngine ??
+        existing?.preferredReviewEngine ??
+        scanReport.recommendedReviewEngine,
+      claudeProfile:
+        body.claudeProfile !== undefined
+          ? cleanProfile(body.claudeProfile)
+          : (existing?.claudeProfile ?? {}),
+      codexProfile:
+        body.codexProfile !== undefined
+          ? cleanProfile(body.codexProfile)
+          : (existing?.codexProfile ?? {}),
+      updatedAt: nowIso(),
+    };
+
+    await stateStore.setSystemSetting("setup_config", nextConfig);
+
+    if (deps.mutableLlm) {
+      deps.mutableLlm.reconfigure(buildControlPlaneLLMFromSetup(nextConfig));
+    }
+
+    const repos = await stateStore.listRepos();
+    for (const repo of repos) {
+      await stateStore.upsertRepo({
+        ...repo,
+        preferredImplementEngine: nextConfig.preferredImplementEngine,
+        preferredReviewEngine: nextConfig.preferredReviewEngine,
+        updatedAt: nowIso(),
+      });
+    }
+
+    return c.json(toPublicSetupStatus(nextConfig, scanReport, getActiveProviderName()));
   });
 
   // --- Repositories ---
@@ -145,6 +320,8 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       forbiddenPaths?: string[];
       maxCostUsd?: number;
       preferredEngine?: RepoConfig["preferredImplementEngine"];
+      modelOverride?: string;
+      effortOverride?: ReasoningEffort;
       acceptanceCriteria?: string[];
     };
 
@@ -161,6 +338,8 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       forbiddenPaths: body.forbiddenPaths,
       maxCostUsd: body.maxCostUsd,
       preferredEngine: body.preferredEngine,
+      modelOverride: body.modelOverride,
+      effortOverride: body.effortOverride,
       acceptanceCriteria: body.acceptanceCriteria,
     });
 

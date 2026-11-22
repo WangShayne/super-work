@@ -1,11 +1,33 @@
-import type { WorkerDriver, WorkerStreamEvent, WorkerTurnInput } from "@super-work/core";
+import type {
+  ReasoningEffort,
+  WorkerDriver,
+  WorkerStreamEvent,
+  WorkerTurnInput,
+} from "@super-work/core";
 import { nowIso } from "@super-work/core";
 import { readLinesFromStream, truncateText } from "./stream-utils.ts";
 
+export function normalizeCodexEffort(
+  effort: ReasoningEffort,
+): "low" | "medium" | "high" | "xhigh" {
+  return effort === "max" ? "xhigh" : effort;
+}
+
 export function buildCodexCliArgs(input: WorkerTurnInput): string[] {
+  const extraFlags: string[] = [];
+  if (input.model?.trim()) {
+    extraFlags.push("-m", input.model.trim());
+  }
+  if (input.effort) {
+    extraFlags.push(
+      "-c",
+      `model_reasoning_effort="${normalizeCodexEffort(input.effort)}"`,
+    );
+  }
+
   if (input.nativeSessionId) {
     // codex exec resume does NOT accept -s or -C; cwd is passed to Bun.spawn
-    return ["exec", "resume", "--json", input.nativeSessionId, input.prompt];
+    return ["exec", "resume", "--json", ...extraFlags, input.nativeSessionId, input.prompt];
   }
 
   const readOnly = input.stage === "plan" || input.stage === "review";
@@ -13,6 +35,7 @@ export function buildCodexCliArgs(input: WorkerTurnInput): string[] {
   return [
     "exec",
     "--json",
+    ...extraFlags,
     "-s",
     sandboxMode,
     "--approve-for-me",

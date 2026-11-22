@@ -7,6 +7,7 @@ import type {
   MemorySearchHit,
   OutboxEntry,
   OutboxStatus,
+  ReasoningEffort,
   RepoConfig,
   SpillArtifact,
   StageKind,
@@ -108,6 +109,10 @@ export interface StateStore {
   }): Promise<void>;
   searchMemory(query: string, limit?: number, repoId?: string): Promise<MemorySearchHit[]>;
   recallChain(ticketId: string): Promise<ChainOfRecall | null>;
+
+  // System Settings
+  getSystemSetting<T>(key: string): Promise<T | null>;
+  setSystemSetting<T>(key: string, value: T): Promise<void>;
 }
 
 export interface ArtifactStore {
@@ -136,6 +141,8 @@ export interface DirectTicketInput {
   maxCostUsd?: number;
   maxDurationSec?: number;
   preferredEngine?: WorkerEngineId;
+  modelOverride?: string;
+  effortOverride?: ReasoningEffort;
   acceptanceCriteria?: string[];
   threadKey?: string;
 }

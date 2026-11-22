@@ -1,15 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Inbox, Kanban } from "lucide-react";
 import { api } from "./api.ts";
 import { DeepDiveDrawer } from "./components/DeepDiveDrawer.tsx";
 import { HeaderBar } from "./components/HeaderBar.tsx";
 import { AddRepoModal, DispatchTaskModal, SimulateEventModal } from "./components/Modals.tsx";
+import { SetupWizardModal } from "./components/SetupWizardModal.tsx";
 import { useI18n } from "./i18n.tsx";
 import type {
   HealthResponse,
   InboxItem,
   LiveEventLogEntry,
   OperatingMode,
+  PublicSetupStatus,
   RepoConfig,
   Ticket,
 } from "./types.ts";
@@ -33,11 +35,21 @@ export function App() {
   const [dispatchOpen, setDispatchOpen] = useState(false);
   const [simulateOpen, setSimulateOpen] = useState(false);
   const [addRepoOpen, setAddRepoOpen] = useState(false);
+  const [setupStatus, setSetupStatus] = useState<PublicSetupStatus | null>(null);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const setupAutoCheckedRef = useRef(false);
 
   const refreshAll = useCallback(async (repoFilter?: string) => {
-    const [h, r] = await Promise.all([api.getHealth(), api.listRepos()]);
+    const [h, r, s] = await Promise.all([api.getHealth(), api.listRepos(), api.getSetupStatus()]);
     setHealth(h);
     setRepos(r.repos);
+    setSetupStatus(s);
+    if (!setupAutoCheckedRef.current) {
+      setupAutoCheckedRef.current = true;
+      if (!s.initialized) {
+        setSetupOpen(true);
+      }
+    }
 
     const activeRepo = repoFilter || r.repos[0]?.id || "";
     if (!repoFilter && activeRepo) {
@@ -148,6 +160,22 @@ export function App() {
     [inboxItems],
   );
 
+  const runningTicketCount = useMemo(
+    () =>
+      tickets.filter((tkt) =>
+        ["planning", "implementing", "reviewing", "rebasing"].includes(tkt.status),
+      ).length,
+    [tickets],
+  );
+
+  const attentionTicketCount = useMemo(
+    () =>
+      tickets.filter((tkt) =>
+        ["watchdog_intervention", "needs_human"].includes(tkt.status),
+      ).length,
+    [tickets],
+  );
+
   const activeRepo = repos.find((r) => r.id === selectedRepoId) ?? repos[0];
 
   const handleChangeMode = async (repoId: string, mode: OperatingMode) => {
@@ -173,9 +201,12 @@ export function App() {
         onChangeMode={handleChangeMode}
         health={health}
         sseConnected={sseConnected}
+        runningTicketCount={runningTicketCount}
+        attentionTicketCount={attentionTicketCount}
         onOpenDispatch={() => setDispatchOpen(true)}
         onOpenSimulate={() => setSimulateOpen(true)}
         onOpenAddRepo={() => setAddRepoOpen(true)}
+        onOpenSetup={() => setSetupOpen(true)}
       />
 
       {/* Primary View Switcher */}
@@ -269,6 +300,17 @@ export function App() {
           const res = await api.createRepo(data);
           setSelectedRepoId(res.repo.id);
           await refreshAll(res.repo.id);
+        }}
+      />
+
+      <SetupWizardModal
+        open={setupOpen}
+        setupStatus={setupStatus}
+        availableEngines={health?.availableEngines ?? ["mock"]}
+        onClose={() => setSetupOpen(false)}
+        onSaved={async (next) => {
+          setSetupStatus(next);
+          await refreshAll(selectedRepoId || undefined);
         }}
       />
     </div>

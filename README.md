@@ -60,10 +60,13 @@ bun test
 # 3. Typecheck all four workspace packages
 bun run typecheck
 
-# 4. Build production frontend bundle into packages/web/dist
+# 4. Run interactive first-run CLI scan & Control-Plane LLM setup (or configure in the Web wizard)
+bun run setup
+
+# 5. Build production frontend bundle into packages/web/dist
 bun run build
 
-# 5. Start daemon (http://localhost:4318) + Vite dashboard (http://localhost:5173)
+# 6. Start daemon (http://localhost:4318) + Vite dashboard (http://localhost:5173)
 bun run dev
 ```
 
@@ -73,7 +76,7 @@ bun run dev:server   # Hono daemon with --watch on port 4318
 bun run dev:web      # Vite dev server on port 5173 (proxies /api -> 4318)
 ```
 
-> **Self-hosting note**: Before dispatching tasks against the `super-work` repository itself, create an initial `git commit` so `HEAD` exists for `git worktree add`.
+> **First-Run Wizard & Self-hosting note**: On first startup, `super-work` automatically scans installed CLIs (`claude`, `codex`, `opencode`, `gh`, `git`, `bun`) and pops up the setup wizard in the Web UI to configure your Control-Plane LLM. Before dispatching worktree tasks against any repository, ensure it has at least an initial `git commit` (`HEAD`). See [USAGE.md](./USAGE.md) for the complete user guide.
 
 ---
 
@@ -101,6 +104,7 @@ When no API key is configured, the control plane automatically uses the built-in
 - `GET /api/inbox`, `POST /api/inbox/:id/resolve` — Approve or reject pending Attention Inbox decisions
 - `GET /api/tickets/:id/recall`, `GET /api/memory/search?q=...`, `GET /api/artifacts/:id` — `Chain of Recall` lineage, FTS5 search, and Spill artifact reader
 - `GET /api/outbox` — Inspect `Transactional Outbox` delivery entries
+- `GET /api/setup/status`, `POST /api/setup/scan`, `POST /api/setup/test-llm`, `POST /api/setup/configure` — CLI environment scan, connection test, and dynamic Control-Plane LLM setup
 - `GET /api/events` — Real-time Server-Sent Events (SSE) stream of `KernelEvent` updates
 
-For architectural deep dives, state machines, and interface contracts, see [ARCHITECTURE.md](./ARCHITECTURE.md).
+For step-by-step workflows see [USAGE.md](./USAGE.md); for architectural deep dives and core contracts see [ARCHITECTURE.md](./ARCHITECTURE.md).

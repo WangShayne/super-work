@@ -28,6 +28,14 @@ export function buildClaudeCliArgs(input: WorkerTurnInput): string[] {
     args.push("--max-budget-usd", String(input.mandate.maxCostUsd));
   }
 
+  if (input.model?.trim()) {
+    args.push("--model", input.model.trim());
+  }
+
+  if (input.effort) {
+    args.push("--effort", input.effort);
+  }
+
   if (input.nativeSessionId) {
     args.push("--resume", input.nativeSessionId);
   }

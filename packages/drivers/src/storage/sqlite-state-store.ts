@@ -108,7 +108,10 @@ export class SqliteStateStore implements StateStore {
         worktree_path TEXT,
         branch_name TEXT,
         native_sessions_json TEXT NOT NULL,
+        preferred_engine TEXT,
         active_engine TEXT,
+        model_override TEXT,
+        effort_override TEXT,
         inline_memory_json TEXT NOT NULL,
         cost_usd REAL NOT NULL DEFAULT 0,
         priority INTEGER NOT NULL DEFAULT 1,
@@ -190,7 +193,27 @@ export class SqliteStateStore implements StateStore {
         title,
         body
       );
+
+      CREATE TABLE IF NOT EXISTS system_settings (
+        key TEXT PRIMARY KEY,
+        value_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
+
+    const cols = this.db
+      .query("PRAGMA table_info(tickets)")
+      .all() as Array<{ name: string }>;
+    const existingCols = new Set(cols.map((c) => c.name));
+    if (!existingCols.has("preferred_engine")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN preferred_engine TEXT;");
+    }
+    if (!existingCols.has("model_override")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN model_override TEXT;");
+    }
+    if (!existingCols.has("effort_override")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN effort_override TEXT;");
+    }
   }
 
   // --- Repos ---
@@ -320,9 +343,9 @@ export class SqliteStateStore implements StateStore {
         `INSERT INTO tickets (
           id, repo_id, thread_id, source_trigger_id, title, description, status, template,
           current_stage, stage_retries, mandate_json, depends_on_json, worktree_path, branch_name,
-          native_sessions_json, active_engine, inline_memory_json, cost_usd, priority, error_message,
-          created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          native_sessions_json, preferred_engine, active_engine, model_override, effort_override,
+          inline_memory_json, cost_usd, priority, error_message, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           status = excluded.status,
           template = excluded.template,
@@ -333,7 +356,10 @@ export class SqliteStateStore implements StateStore {
           worktree_path = excluded.worktree_path,
           branch_name = excluded.branch_name,
           native_sessions_json = excluded.native_sessions_json,
+          preferred_engine = excluded.preferred_engine,
           active_engine = excluded.active_engine,
+          model_override = excluded.model_override,
+          effort_override = excluded.effort_override,
           inline_memory_json = excluded.inline_memory_json,
           cost_usd = excluded.cost_usd,
           priority = excluded.priority,
@@ -356,7 +382,10 @@ export class SqliteStateStore implements StateStore {
         ticket.worktreePath ?? null,
         ticket.branchName ?? null,
         JSON.stringify(ticket.nativeSessions),
+        ticket.preferredEngine ?? null,
         ticket.activeEngine ?? null,
+        ticket.modelOverride ?? null,
+        ticket.effortOverride ?? null,
         JSON.stringify(ticket.inlineMemory),
         ticket.costUsd,
         ticket.priority,
@@ -747,6 +776,31 @@ export class SqliteStateStore implements StateStore {
       relatedTickets,
     };
   }
+
+  // --- System Settings ---
+  async getSystemSetting<T>(key: string): Promise<T | null> {
+    const row = this.db
+      .query("SELECT value_json FROM system_settings WHERE key = ?")
+      .get(key) as { value_json: string } | null;
+    if (!row) return null;
+    try {
+      return JSON.parse(row.value_json) as T;
+    } catch {
+      return null;
+    }
+  }
+
+  async setSystemSetting<T>(key: string, value: T): Promise<void> {
+    this.db
+      .query(
+        `INSERT INTO system_settings (key, value_json, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET
+           value_json = excluded.value_json,
+           updated_at = excluded.updated_at`,
+      )
+      .run(key, JSON.stringify(value), new Date().toISOString());
+  }
 }
 
 function mapRepoRow(r: Record<string, unknown>): RepoConfig {
@@ -808,7 +862,14 @@ function mapTicketRow(r: Record<string, unknown>): Ticket {
     worktreePath: r.worktree_path ? String(r.worktree_path) : undefined,
     branchName: r.branch_name ? String(r.branch_name) : undefined,
     nativeSessions: JSON.parse(String(r.native_sessions_json)),
+    preferredEngine: r.preferred_engine
+      ? (String(r.preferred_engine) as Ticket["preferredEngine"])
+      : undefined,
     activeEngine: r.active_engine ? (String(r.active_engine) as Ticket["activeEngine"]) : undefined,
+    modelOverride: r.model_override ? String(r.model_override) : undefined,
+    effortOverride: r.effort_override
+      ? (String(r.effort_override) as Ticket["effortOverride"])
+      : undefined,
     inlineMemory: JSON.parse(String(r.inline_memory_json)),
     costUsd: Number(r.cost_usd),
     priority: Number(r.priority),

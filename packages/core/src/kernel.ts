@@ -28,6 +28,7 @@ import type {
   RepoConfig,
   StageKind,
   StageRun,
+  SystemSetupConfig,
   Ticket,
   WatchdogDecision,
   WatchdogSignal,
@@ -453,6 +454,24 @@ export class SuperWorkKernel {
     const relatedMemory = await this.stateStore.searchMemory(ticket.title, 4, repo.id);
     const prompt = this.memory.buildWorkerPromptContext(ticket, stage, relatedMemory);
 
+    const setupConfig = await this.stateStore.getSystemSetting<SystemSetupConfig>("setup_config");
+    const engineProfile =
+      driver.engine === "claude"
+        ? setupConfig?.claudeProfile
+        : driver.engine === "codex"
+          ? setupConfig?.codexProfile
+          : undefined;
+    const canApplyModelOverride = Boolean(
+      ticket.modelOverride &&
+        stage !== "review" &&
+        (!ticket.preferredEngine || ticket.preferredEngine === driver.engine),
+    );
+    const effectiveModel = canApplyModelOverride ? ticket.modelOverride : engineProfile?.model;
+    const effectiveEffort =
+      stage !== "review" && ticket.effortOverride
+        ? ticket.effortOverride
+        : engineProfile?.effort;
+
     const existingSessionId = ticket.nativeSessions[driver.engine];
     const abortController = new AbortController();
     this.abortControllers.set(ticket.id, abortController);
@@ -514,6 +533,8 @@ export class SuperWorkKernel {
           mandate: ticket.mandate,
           nativeSessionId: existingSessionId,
           isResume: Boolean(existingSessionId),
+          model: effectiveModel,
+          effort: effectiveEffort,
         },
         abortController.signal,
       );

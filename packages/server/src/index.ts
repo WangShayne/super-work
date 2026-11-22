@@ -2,17 +2,19 @@ import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SuperWorkKernel, nowIso } from "@super-work/core";
+import { SuperWorkKernel, type CliScanReport, type SystemSetupConfig, nowIso } from "@super-work/core";
 import {
   ClaudeCodeDriver,
+  CliEnvironmentScanner,
   CodexDriver,
   FsArtifactStore,
   GhCliPollingSource,
   GhOutboxExecutor,
   GitWorktreeProvider,
   MockWorkerDriver,
+  MutableControlPlaneLLM,
   SqliteStateStore,
-  createControlPlaneLLMFromEnv,
+  buildControlPlaneLLMFromSetup,
   runGit,
 } from "@super-work/drivers";
 import { createServerApp } from "./app.ts";
@@ -46,7 +48,22 @@ export async function startDaemon(options?: {
   const stateStore = new SqliteStateStore(join(dataDir, "super-work.db"));
   const artifactStore = new FsArtifactStore(join(dataDir, "artifacts"));
   const workspace = new GitWorktreeProvider(join(dataDir, "worktrees"));
-  const llm = createControlPlaneLLMFromEnv();
+  const cliScanner = new CliEnvironmentScanner();
+
+  const savedSetup = await stateStore.getSystemSetting<SystemSetupConfig>("setup_config");
+  const mutableLlm = new MutableControlPlaneLLM(buildControlPlaneLLMFromSetup(savedSetup));
+
+  const scanReport: CliScanReport = await cliScanner.scanAll();
+  await stateStore.setSystemSetting("last_cli_scan", scanReport);
+  const summary = scanReport.tools
+    .map(
+      (t) =>
+        `${t.id}=${!t.installed ? "missing" : t.authenticated === false ? "unauth" : "ready"}`,
+    )
+    .join(", ");
+  console.log(
+    `[super-work] CLI scan (${summary}) | recommended: impl=${scanReport.recommendedImplementEngine}, review=${scanReport.recommendedReviewEngine}`,
+  );
 
   const drivers = [
     new ClaudeCodeDriver(),
@@ -58,7 +75,7 @@ export async function startDaemon(options?: {
     stateStore,
     artifactStore,
     workspace,
-    llm,
+    llm: mutableLlm,
     drivers,
     outboxExecutor: new GhOutboxExecutor(),
   });
@@ -76,7 +93,6 @@ export async function startDaemon(options?: {
       const remoteRes = await runGit(["remote", "get-url", "origin"], candidateRoot);
       const githubRepo =
         remoteRes.exitCode === 0 ? parseGithubRepoFromRemote(remoteRes.stdout) : undefined;
-      const available = await kernel.getAvailableEngines();
       const ts = nowIso();
       await stateStore.upsertRepo({
         id: "repo_default",
@@ -86,8 +102,10 @@ export async function startDaemon(options?: {
         mode: "observe",
         githubRepo,
         defaultTemplate: "standard",
-        preferredImplementEngine: available.includes("claude") ? "claude" : "mock",
-        preferredReviewEngine: available.includes("codex") ? "codex" : "mock",
+        preferredImplementEngine:
+          savedSetup?.preferredImplementEngine ?? scanReport.recommendedImplementEngine,
+        preferredReviewEngine:
+          savedSetup?.preferredReviewEngine ?? scanReport.recommendedReviewEngine,
         createdAt: ts,
         updatedAt: ts,
       });
@@ -101,7 +119,8 @@ export async function startDaemon(options?: {
     kernel,
     stateStore,
     artifactStore,
-    llmProviderName: llm.providerName,
+    mutableLlm,
+    cliScanner,
     webDistDir,
   });
 

@@ -32,20 +32,35 @@ describe("Worker CLI flag mapping and JSONL stream parsers", () => {
       stage: "implement",
       nativeSessionId: "sess_abc",
       isResume: true,
+      model: "opus",
+      effort: "high",
     });
     expect(implArgs).toContain("acceptEdits");
     expect(implArgs).toContain("--disallowedTools");
     expect(implArgs).toContain("--max-budget-usd");
     expect(implArgs).toContain("1.5");
+    expect(implArgs).toContain("--model");
+    expect(implArgs).toContain("opus");
+    expect(implArgs).toContain("--effort");
+    expect(implArgs).toContain("high");
     expect(implArgs).toContain("--resume");
     expect(implArgs).toContain("sess_abc");
   });
 
   it("builds valid codex 0.166.0 fresh and resume flags without -s/-C on resume", () => {
-    const freshReview = buildCodexCliArgs({ ...baseInput, stage: "review" });
+    const freshReview = buildCodexCliArgs({
+      ...baseInput,
+      stage: "review",
+      model: "gpt-5.6-sol",
+      effort: "max",
+    });
     expect(freshReview).toEqual([
       "exec",
       "--json",
+      "-m",
+      "gpt-5.6-sol",
+      "-c",
+      'model_reasoning_effort="xhigh"',
       "-s",
       "read-only",
       "--approve-for-me",
@@ -56,11 +71,17 @@ describe("Worker CLI flag mapping and JSONL stream parsers", () => {
       ...baseInput,
       nativeSessionId: "019d-thread-uuid",
       isResume: true,
+      model: "gpt-5.6-sol",
+      effort: "medium",
     });
     expect(resumeArgs).toEqual([
       "exec",
       "resume",
       "--json",
+      "-m",
+      "gpt-5.6-sol",
+      "-c",
+      'model_reasoning_effort="medium"',
       "019d-thread-uuid",
       "Implement feature X",
     ]);

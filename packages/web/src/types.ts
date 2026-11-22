@@ -1,7 +1,13 @@
 export type OperatingMode = "off" | "observe" | "auto";
 export type WorkerEngineId = "claude" | "codex" | "opencode" | "mock";
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 export type PipelineTemplateId = "fast" | "standard" | "strict";
 export type StageKind = "plan" | "implement" | "review" | "rebase";
+
+export interface EngineModelProfile {
+  model?: string;
+  effort?: ReasoningEffort;
+}
 
 export type TicketStatus =
   | "triaging"
@@ -221,4 +227,61 @@ export interface LiveEventLogEntry {
   summary: string;
   timestamp: string;
   raw?: unknown;
+}
+
+export type CliToolId = "claude" | "codex" | "opencode" | "gh" | "git" | "bun";
+
+export interface DetectedCliTool {
+  id: CliToolId;
+  name: string;
+  installed: boolean;
+  binaryPath?: string;
+  version?: string;
+  authenticated: boolean | null;
+  authSummary?: string;
+  localDefaultModel?: string;
+  localDefaultEffort?: string;
+  workerSupported: boolean;
+}
+
+export interface CliScanReport {
+  scannedAt: string;
+  tools: DetectedCliTool[];
+  recommendedImplementEngine: WorkerEngineId;
+  recommendedReviewEngine: WorkerEngineId;
+}
+
+export type LlmProviderPreset =
+  | "deepseek"
+  | "openai"
+  | "custom"
+  | "claude_cli"
+  | "codex_cli"
+  | "heuristic";
+
+export interface PublicSetupStatus {
+  initialized: boolean;
+  activeLlmProvider: string;
+  config: {
+    initialized: boolean;
+    llmPreset: LlmProviderPreset;
+    llmBaseUrl: string;
+    llmModel: string;
+    llmEffort?: ReasoningEffort;
+    preferredImplementEngine: WorkerEngineId;
+    preferredReviewEngine: WorkerEngineId;
+    claudeProfile?: EngineModelProfile;
+    codexProfile?: EngineModelProfile;
+    updatedAt: string;
+    hasApiKey: boolean;
+    maskedApiKey?: string;
+  };
+  scanReport: CliScanReport;
+}
+
+export interface LlmConnectionTestResult {
+  ok: boolean;
+  providerName: string;
+  latencyMs: number;
+  message: string;
 }

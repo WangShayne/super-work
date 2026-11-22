@@ -1,10 +1,16 @@
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { getAlternateEngine } from "@super-work/core";
 import type {
   ControlPlaneLLM,
+  LlmProviderPreset,
   MemorySearchHit,
   PipelineTemplateId,
+  ReasoningEffort,
   RepoConfig,
   StageRun,
+  SystemSetupConfig,
   Ticket,
   TriageProposal,
   Trigger,
@@ -160,9 +166,17 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
 }
 
 export class CliFallbackControlLLM implements ControlPlaneLLM {
-  readonly providerName = "cli:claude-restricted";
+  readonly providerName: string;
+  private readonly claudeBin: string;
+  private readonly model?: string;
+  private readonly effort: ReasoningEffort;
 
-  constructor(private readonly claudeBin = "claude") {}
+  constructor(options?: { claudeBin?: string; model?: string; effort?: ReasoningEffort }) {
+    this.claudeBin = options?.claudeBin ?? "claude";
+    this.model = options?.model?.trim() || undefined;
+    this.effort = options?.effort ?? "low";
+    this.providerName = `cli:claude(${this.model ?? "default"},${this.effort})`;
+  }
 
   async triageTrigger(input: {
     repo: RepoConfig;
@@ -201,21 +215,25 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
     if (!Bun.which(this.claudeBin)) {
       throw new Error("claude CLI not found on PATH");
     }
-    const proc = Bun.spawn(
-      [
-        this.claudeBin,
-        "-p",
-        "--output-format",
-        "json",
-        "--tools",
-        "",
-        "--no-session-persistence",
-        "--json-schema",
-        JSON.stringify(schema),
-        prompt,
-      ],
-      { stdout: "pipe", stderr: "pipe", stdin: "ignore" },
-    );
+    const args = [
+      this.claudeBin,
+      "-p",
+      "--output-format",
+      "json",
+      "--tools",
+      "",
+      "--no-session-persistence",
+      "--effort",
+      this.effort,
+      "--json-schema",
+      JSON.stringify(schema),
+    ];
+    if (this.model) {
+      args.push("--model", this.model);
+    }
+    args.push(prompt);
+
+    const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
 
     const [stdout, stderr, code] = await Promise.all([
       new Response(proc.stdout).text(),
@@ -233,6 +251,94 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
       return extractJsonObject<T>(envelope.result);
     }
     throw new Error("CLI LLM returned no structured output");
+  }
+}
+
+export class CodexCliControlLLM implements ControlPlaneLLM {
+  readonly providerName: string;
+  private readonly codexBin: string;
+  private readonly model?: string;
+  private readonly effort: "low" | "medium" | "high" | "xhigh";
+
+  constructor(options?: { codexBin?: string; model?: string; effort?: ReasoningEffort }) {
+    this.codexBin = options?.codexBin ?? "codex";
+    this.model = options?.model?.trim() || undefined;
+    const rawEffort = options?.effort ?? "low";
+    this.effort = rawEffort === "max" ? "xhigh" : rawEffort;
+    this.providerName = `cli:codex(${this.model ?? "default"},${this.effort})`;
+  }
+
+  async triageTrigger(input: {
+    repo: RepoConfig;
+    trigger: Trigger;
+    activeTickets: Ticket[];
+    relatedMemory: MemorySearchHit[];
+  }): Promise<TriageProposal> {
+    const prompt = [
+      "Evaluate this development trigger and return structured JSON triage proposal.",
+      `Repo: ${input.repo.name}, DefaultTemplate: ${input.repo.defaultTemplate}`,
+      `Source: ${input.trigger.source}, Title: ${input.trigger.title}`,
+      `Body: ${input.trigger.rawText}`,
+    ].join("\n");
+    const parsed = await this.runCodexJson<TriageProposal>(prompt, TRIAGE_SCHEMA);
+    return normalizeTriageProposal(parsed, input.trigger, input.repo.defaultTemplate);
+  }
+
+  async diagnoseWatchdog(input: {
+    ticket: Ticket;
+    stageRun: StageRun;
+    signal: WatchdogSignal;
+    recentEvents: WorkerStreamEvent[];
+    availableEngines: WorkerEngineId[];
+  }): Promise<WatchdogDecision> {
+    const prompt = [
+      "Evaluate Watchdog L1 alert and return JSON decision.",
+      `Ticket: ${input.ticket.title}, Stage: ${input.stageRun.stage}, Engine: ${input.stageRun.engine}`,
+      `Signal: ${input.signal.kind} — ${input.signal.details}`,
+      `AvailableEngines: ${input.availableEngines.join(", ")}`,
+    ].join("\n");
+    const parsed = await this.runCodexJson<WatchdogDecision>(prompt, WATCHDOG_SCHEMA);
+    return normalizeWatchdogDecision(parsed, input.stageRun.engine, input.availableEngines);
+  }
+
+  private async runCodexJson<T>(prompt: string, schema: Record<string, unknown>): Promise<T> {
+    if (!Bun.which(this.codexBin)) {
+      throw new Error("codex CLI not found on PATH");
+    }
+    const dir = await mkdtemp(join(tmpdir(), "sw-codex-llm-"));
+    const schemaPath = join(dir, "schema.json");
+    const outPath = join(dir, "out.json");
+    try {
+      await writeFile(schemaPath, JSON.stringify({ ...schema, additionalProperties: false }), "utf8");
+      const args = [
+        this.codexBin,
+        "exec",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "-s",
+        "read-only",
+        "-c",
+        `model_reasoning_effort="${this.effort}"`,
+        "--output-schema",
+        schemaPath,
+        "-o",
+        outPath,
+      ];
+      if (this.model) {
+        args.push("-m", this.model);
+      }
+      args.push(prompt);
+
+      const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+      const [stderr, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+      if (code !== 0) {
+        throw new Error(`Codex CLI LLM failed (${code}): ${stderr.slice(0, 200)}`);
+      }
+      const rawOut = await readFile(outPath, "utf8");
+      return extractJsonObject<T>(rawOut);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   }
 }
 
@@ -415,6 +521,256 @@ export function createControlPlaneLLMFromEnv(): ControlPlaneLLM {
 
   chain.push(new HeuristicControlLLM());
   return new CompositeControlPlaneLLM(chain);
+}
+
+export function buildControlPlaneLLMFromSetup(config?: SystemSetupConfig | null): ControlPlaneLLM {
+  if (!config || !config.initialized) {
+    return createControlPlaneLLMFromEnv();
+  }
+
+  if (
+    (config.llmPreset === "deepseek" ||
+      config.llmPreset === "openai" ||
+      config.llmPreset === "custom") &&
+    config.llmApiKey?.trim()
+  ) {
+    const baseUrl =
+      config.llmBaseUrl.trim() ||
+      (config.llmPreset === "deepseek"
+        ? "https://api.deepseek.com/v1"
+        : "https://api.openai.com/v1");
+    const model =
+      config.llmModel.trim() ||
+      (config.llmPreset === "deepseek" ? "deepseek-chat" : "gpt-4o-mini");
+
+    return new CompositeControlPlaneLLM([
+      new OpenAICompatibleControlLLM({
+        apiKey: config.llmApiKey.trim(),
+        baseUrl,
+        model,
+        providerLabel: `${config.llmPreset}:${model}`,
+      }),
+      new HeuristicControlLLM(),
+    ]);
+  }
+
+  if (config.llmPreset === "claude_cli") {
+    return new CompositeControlPlaneLLM([
+      new CliFallbackControlLLM({
+        model: config.llmModel?.trim() || undefined,
+        effort: config.llmEffort ?? "low",
+      }),
+      new HeuristicControlLLM(),
+    ]);
+  }
+
+  if (config.llmPreset === "codex_cli") {
+    return new CompositeControlPlaneLLM([
+      new CodexCliControlLLM({
+        model: config.llmModel?.trim() || undefined,
+        effort: config.llmEffort ?? "low",
+      }),
+      new HeuristicControlLLM(),
+    ]);
+  }
+
+  return new HeuristicControlLLM();
+}
+
+export class MutableControlPlaneLLM implements ControlPlaneLLM {
+  private current: ControlPlaneLLM;
+
+  constructor(initial: ControlPlaneLLM) {
+    this.current = initial;
+  }
+
+  get providerName(): string {
+    return this.current.providerName;
+  }
+
+  reconfigure(next: ControlPlaneLLM): void {
+    this.current = next;
+  }
+
+  triageTrigger(input: {
+    repo: RepoConfig;
+    trigger: Trigger;
+    activeTickets: Ticket[];
+    relatedMemory: MemorySearchHit[];
+  }): Promise<TriageProposal> {
+    return this.current.triageTrigger(input);
+  }
+
+  diagnoseWatchdog(input: {
+    ticket: Ticket;
+    stageRun: StageRun;
+    signal: WatchdogSignal;
+    recentEvents: WorkerStreamEvent[];
+    availableEngines: WorkerEngineId[];
+  }): Promise<WatchdogDecision> {
+    return this.current.diagnoseWatchdog(input);
+  }
+}
+
+export async function testControlPlaneLLMConnection(input: {
+  llmPreset: LlmProviderPreset;
+  llmBaseUrl: string;
+  llmModel: string;
+  llmEffort?: ReasoningEffort;
+  llmApiKey?: string;
+}): Promise<{ ok: boolean; providerName: string; latencyMs: number; message: string }> {
+  const started = Date.now();
+
+  if (input.llmPreset === "heuristic") {
+    return {
+      ok: true,
+      providerName: "heuristic:local",
+      latencyMs: Date.now() - started,
+      message: "Built-in heuristic control plane is ready (zero API cost).",
+    };
+  }
+
+  if (input.llmPreset === "claude_cli") {
+    const label = `cli:claude(${input.llmModel.trim() || "default"},${input.llmEffort ?? "low"})`;
+    const bin = Bun.which("claude");
+    if (!bin) {
+      return {
+        ok: false,
+        providerName: label,
+        latencyMs: Date.now() - started,
+        message: "claude CLI not found on PATH.",
+      };
+    }
+    const proc = Bun.spawn([bin, "auth", "status", "--json"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "ignore",
+    });
+    const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    try {
+      const parsed = JSON.parse(stdout) as { loggedIn?: boolean; authMethod?: string };
+      if (parsed.loggedIn) {
+        return {
+          ok: true,
+          providerName: label,
+          latencyMs: Date.now() - started,
+          message: `claude CLI authenticated (${parsed.authMethod ?? "ok"}).`,
+        };
+      }
+    } catch {
+      if (code === 0) {
+        return {
+          ok: true,
+          providerName: label,
+          latencyMs: Date.now() - started,
+          message: "claude CLI authenticated.",
+        };
+      }
+    }
+    return {
+      ok: false,
+      providerName: label,
+      latencyMs: Date.now() - started,
+      message: "claude CLI is installed but not logged in (run `claude auth login`).",
+    };
+  }
+
+  if (input.llmPreset === "codex_cli") {
+    const rawEffort = input.llmEffort ?? "low";
+    const normEffort = rawEffort === "max" ? "xhigh" : rawEffort;
+    const label = `cli:codex(${input.llmModel.trim() || "default"},${normEffort})`;
+    const bin = Bun.which("codex");
+    if (!bin) {
+      return {
+        ok: false,
+        providerName: label,
+        latencyMs: Date.now() - started,
+        message: "codex CLI not found on PATH.",
+      };
+    }
+    const proc = Bun.spawn([bin, "login", "status"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "ignore",
+    });
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    if (code === 0) {
+      return {
+        ok: true,
+        providerName: label,
+        latencyMs: Date.now() - started,
+        message: (stdout || stderr).trim() || "codex CLI authenticated.",
+      };
+    }
+    return {
+      ok: false,
+      providerName: label,
+      latencyMs: Date.now() - started,
+      message: "codex CLI is installed but not logged in (run `codex login`).",
+    };
+  }
+
+  const apiKey = input.llmApiKey?.trim();
+  if (!apiKey) {
+    return {
+      ok: false,
+      providerName: `${input.llmPreset}:${input.llmModel}`,
+      latencyMs: Date.now() - started,
+      message: "API Key is required for this provider.",
+    };
+  }
+
+  const baseUrl =
+    input.llmBaseUrl.trim().replace(/\/$/, "") ||
+    (input.llmPreset === "deepseek" ? "https://api.deepseek.com/v1" : "https://api.openai.com/v1");
+  const model =
+    input.llmModel.trim() || (input.llmPreset === "deepseek" ? "deepseek-chat" : "gpt-4o-mini");
+
+  try {
+    const res = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 16,
+        temperature: 0,
+        messages: [{ role: "user", content: 'Reply with JSON {"ok":true}' }],
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    const latencyMs = Date.now() - started;
+    if (!res.ok) {
+      const errText = await res.text();
+      return {
+        ok: false,
+        providerName: `${input.llmPreset}:${model}`,
+        latencyMs,
+        message: `HTTP ${res.status}: ${errText.slice(0, 180)}`,
+      };
+    }
+
+    return {
+      ok: true,
+      providerName: `${input.llmPreset}:${model}`,
+      latencyMs,
+      message: `Connected to ${model} in ${latencyMs}ms.`,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      providerName: `${input.llmPreset}:${model}`,
+      latencyMs: Date.now() - started,
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 function extractJsonObject<T>(raw: string): T {

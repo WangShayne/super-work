@@ -2,6 +2,13 @@ export type OperatingMode = "off" | "observe" | "auto";
 
 export type WorkerEngineId = "claude" | "codex" | "opencode" | "mock";
 
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
+export interface EngineModelProfile {
+  model?: string;
+  effort?: ReasoningEffort;
+}
+
 export type PipelineTemplateId = "fast" | "standard" | "strict";
 
 export type StageKind = "plan" | "implement" | "review" | "rebase";
@@ -114,7 +121,10 @@ export interface Ticket {
   worktreePath?: string;
   branchName?: string;
   nativeSessions: Partial<Record<WorkerEngineId, string>>;
+  preferredEngine?: WorkerEngineId;
   activeEngine?: WorkerEngineId;
+  modelOverride?: string;
+  effortOverride?: ReasoningEffort;
   inlineMemory: InlineMemory;
   costUsd: number;
   priority: number;
@@ -227,6 +237,8 @@ export interface WorkerTurnInput {
   mandate: Mandate;
   nativeSessionId?: string;
   isResume: boolean;
+  model?: string;
+  effort?: ReasoningEffort;
 }
 
 export type WatchdogSignalKind =
@@ -313,3 +325,57 @@ export type KernelEvent =
   | { type: "outbox_queued"; entry: OutboxEntry; timestamp: string }
   | { type: "outbox_sent"; entry: OutboxEntry; timestamp: string }
   | { type: "outbox_failed"; entry: OutboxEntry; timestamp: string };
+
+export type CliToolId = "claude" | "codex" | "opencode" | "gh" | "git" | "bun";
+
+export interface DetectedCliTool {
+  id: CliToolId;
+  name: string;
+  installed: boolean;
+  binaryPath?: string;
+  version?: string;
+  authenticated: boolean | null;
+  authSummary?: string;
+  localDefaultModel?: string;
+  localDefaultEffort?: string;
+  workerSupported: boolean;
+}
+
+export interface CliScanReport {
+  scannedAt: string;
+  tools: DetectedCliTool[];
+  recommendedImplementEngine: WorkerEngineId;
+  recommendedReviewEngine: WorkerEngineId;
+}
+
+export type LlmProviderPreset =
+  | "deepseek"
+  | "openai"
+  | "custom"
+  | "claude_cli"
+  | "codex_cli"
+  | "heuristic";
+
+export interface SystemSetupConfig {
+  initialized: boolean;
+  llmPreset: LlmProviderPreset;
+  llmBaseUrl: string;
+  llmModel: string;
+  llmEffort?: ReasoningEffort;
+  llmApiKey?: string;
+  preferredImplementEngine: WorkerEngineId;
+  preferredReviewEngine: WorkerEngineId;
+  claudeProfile?: EngineModelProfile;
+  codexProfile?: EngineModelProfile;
+  updatedAt: string;
+}
+
+export interface PublicSetupStatus {
+  initialized: boolean;
+  activeLlmProvider: string;
+  config: Omit<SystemSetupConfig, "llmApiKey"> & {
+    hasApiKey: boolean;
+    maskedApiKey?: string;
+  };
+  scanReport: CliScanReport;
+}

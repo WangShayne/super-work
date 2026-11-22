@@ -1,5 +1,22 @@
-import { Activity, Cpu, FolderGit2, Languages, Plus, Radio, Send, ShieldCheck } from "lucide-react";
-import { useI18n } from "../i18n.tsx";
+import type { ReactNode } from "react";
+import {
+  Activity,
+  Bot,
+  BrainCircuit,
+  Cpu,
+  FolderGit2,
+  Languages,
+  Plus,
+  Radio,
+  Send,
+  Settings,
+  ShieldCheck,
+} from "lucide-react";
+import {
+  formatEngineDisplayName,
+  formatLlmProviderDisplay,
+  useI18n,
+} from "../i18n.tsx";
 import type { HealthResponse, OperatingMode, RepoConfig } from "../types.ts";
 
 interface HeaderBarProps {
@@ -9,9 +26,95 @@ interface HeaderBarProps {
   onChangeMode: (repoId: string, mode: OperatingMode) => void;
   health: HealthResponse | null;
   sseConnected: boolean;
+  runningTicketCount: number;
+  attentionTicketCount: number;
   onOpenDispatch: () => void;
   onOpenSimulate: () => void;
   onOpenAddRepo: () => void;
+  onOpenSetup: () => void;
+}
+
+interface StatusCapsuleProps {
+  icon: ReactNode;
+  label: string;
+  value: string;
+  extra?: string;
+  tone?: "neutral" | "good" | "warn" | "accent";
+  align?: "left" | "right";
+  tooltipTitle: string;
+  tooltipBody: string;
+  tooltipFooter?: string;
+  onClick?: () => void;
+}
+
+function StatusCapsule({
+  icon,
+  label,
+  value,
+  extra,
+  tone = "neutral",
+  align = "left",
+  tooltipTitle,
+  tooltipBody,
+  tooltipFooter,
+  onClick,
+}: StatusCapsuleProps) {
+  const toneClasses =
+    tone === "good"
+      ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-200"
+      : tone === "warn"
+        ? "border-amber-500/35 bg-amber-500/10 text-amber-200"
+        : tone === "accent"
+          ? "border-indigo-500/30 bg-indigo-500/10 text-indigo-200"
+          : "border-zinc-800 bg-zinc-900/80 text-zinc-200";
+
+  const alignClass = align === "right" ? "right-0" : "left-0";
+  const interactiveClass = onClick
+    ? "cursor-pointer hover:border-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/60"
+    : "cursor-help";
+
+  const content = (
+    <>
+      <span className="shrink-0">{icon}</span>
+      <span className="text-zinc-400">{label}：</span>
+      <span className="font-medium text-zinc-100">{value}</span>
+      {extra && <span className="text-zinc-400 font-mono text-[10px]">{extra}</span>}
+    </>
+  );
+
+  return (
+    <div className="relative group">
+      {onClick ? (
+        <button
+          type="button"
+          onClick={onClick}
+          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[11px] transition ${toneClasses} ${interactiveClass}`}
+        >
+          {content}
+        </button>
+      ) : (
+        <div
+          tabIndex={0}
+          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[11px] transition ${toneClasses} ${interactiveClass}`}
+        >
+          {content}
+        </div>
+      )}
+
+      <div
+        role="tooltip"
+        className={`pointer-events-none invisible opacity-0 group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100 transition-opacity duration-150 absolute top-full mt-1.5 ${alignClass} w-72 rounded-xl border border-zinc-700/80 bg-zinc-900/95 backdrop-blur p-3 shadow-2xl z-40 text-left space-y-1.5`}
+      >
+        <div className="text-[11px] font-semibold text-zinc-100">{tooltipTitle}</div>
+        <p className="text-[11px] text-zinc-300 leading-relaxed">{tooltipBody}</p>
+        {tooltipFooter && (
+          <div className="pt-1 border-t border-zinc-800 text-[10px] font-mono text-indigo-300">
+            {tooltipFooter}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export function HeaderBar({
@@ -21,11 +124,14 @@ export function HeaderBar({
   onChangeMode,
   health,
   sseConnected,
+  runningTicketCount,
+  attentionTicketCount,
   onOpenDispatch,
   onOpenSimulate,
   onOpenAddRepo,
+  onOpenSetup,
 }: HeaderBarProps) {
-  const { t, toggleLocale } = useI18n();
+  const { locale, t, toggleLocale } = useI18n();
   const activeRepo = repos.find((r) => r.id === selectedRepoId) ?? repos[0];
 
   const modes: Array<{ id: OperatingMode; label: string; desc: string }> = [
@@ -34,149 +140,204 @@ export function HeaderBar({
     { id: "auto", label: t("header.mode.auto"), desc: t("header.mode.autoDesc") },
   ];
 
+  const implEngine = activeRepo?.preferredImplementEngine ?? "claude";
+  const reviewEngine = activeRepo?.preferredReviewEngine ?? "codex";
+  const availableList = (health?.availableEngines ?? []).map((e) =>
+    formatEngineDisplayName(e, locale),
+  );
+  const llmDisplay = formatLlmProviderDisplay(health?.llmProvider, locale);
+
   return (
-    <header className="border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur px-5 py-3 flex flex-wrap items-center justify-between gap-4 sticky top-0 z-20">
-      <div className="flex items-center gap-4">
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-indigo-500/15 border border-indigo-400/30 flex items-center justify-center text-indigo-400">
-            <Cpu className="w-4 h-4" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="font-semibold tracking-tight text-zinc-100 text-sm">super-work</span>
-              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700/60">
-                {t("brand.badge")}
-              </span>
+    <header className="border-b border-zinc-800/80 bg-zinc-950/95 backdrop-blur sticky top-0 z-20">
+      {/* Row 1: Primary Bar */}
+      <div className="px-5 py-3 flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-4 flex-wrap">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-indigo-500/15 border border-indigo-400/30 flex items-center justify-center text-indigo-400">
+              <Cpu className="w-4 h-4" />
             </div>
-            <p className="text-[11px] text-zinc-500">
-              {t("brand.subtitle")}
-            </p>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-semibold tracking-tight text-zinc-100 text-sm">super-work</span>
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700/60">
+                  {t("brand.badge")}
+                </span>
+              </div>
+              <p className="text-[11px] text-zinc-500">{t("brand.subtitle")}</p>
+            </div>
           </div>
+
+          <div className="h-6 w-px bg-zinc-800 hidden sm:block" />
+
+          <div className="flex items-center gap-2">
+            <FolderGit2 className="w-4 h-4 text-zinc-400" />
+            <select
+              value={activeRepo?.id ?? ""}
+              onChange={(e) => onSelectRepo(e.target.value)}
+              className="bg-zinc-900 border border-zinc-800 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-indigo-500"
+            >
+              {repos.length === 0 ? (
+                <option value="">{t("header.noRepo")}</option>
+              ) : (
+                repos.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.name} ({r.baseBranch})
+                  </option>
+                ))
+              )}
+            </select>
+            <button
+              onClick={onOpenAddRepo}
+              title={t("header.registerRepoTitle")}
+              className="p-1.5 rounded-md border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-100 hover:border-zinc-700 transition"
+            >
+              <Plus className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {activeRepo && (
+            <div className="flex items-center bg-zinc-900 rounded-lg p-0.5 border border-zinc-800">
+              {modes.map((m) => {
+                const selected = activeRepo.mode === m.id;
+                const activeColors =
+                  m.id === "auto"
+                    ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
+                    : m.id === "observe"
+                      ? "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                      : "bg-zinc-800 text-zinc-300 border-zinc-700";
+                return (
+                  <button
+                    key={m.id}
+                    title={m.desc}
+                    onClick={() => onChangeMode(activeRepo.id, m.id)}
+                    className={`px-2.5 py-1 rounded-md text-[11px] font-medium border transition ${
+                      selected
+                        ? activeColors
+                        : "border-transparent text-zinc-500 hover:text-zinc-300"
+                    }`}
+                  >
+                    {m.label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
 
-        <div className="h-6 w-px bg-zinc-800 hidden sm:block" />
-
-        <div className="flex items-center gap-2">
-          <FolderGit2 className="w-4 h-4 text-zinc-400" />
-          <select
-            value={activeRepo?.id ?? ""}
-            onChange={(e) => onSelectRepo(e.target.value)}
-            className="bg-zinc-900 border border-zinc-800 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-indigo-500"
-          >
-            {repos.length === 0 ? (
-              <option value="">{t("header.noRepo")}</option>
-            ) : (
-              repos.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.name} ({r.baseBranch})
-                </option>
-              ))
-            )}
-          </select>
+        <div className="flex items-center gap-2.5 flex-wrap">
           <button
-            onClick={onOpenAddRepo}
-            title={t("header.registerRepoTitle")}
-            className="p-1.5 rounded-md border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-100 hover:border-zinc-700 transition"
+            onClick={onOpenSetup}
+            title={t("header.settingsTitle")}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-zinc-800 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 text-xs font-medium transition"
+          >
+            <Settings className="w-3.5 h-3.5 text-zinc-400" />
+            {t("header.settings")}
+          </button>
+
+          <button
+            onClick={toggleLocale}
+            title={t("header.langTitle")}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-zinc-800 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 text-xs font-medium transition"
+          >
+            <Languages className="w-3.5 h-3.5 text-indigo-400" />
+            {t("header.langButton")}
+          </button>
+
+          <button
+            onClick={onOpenSimulate}
+            disabled={!activeRepo}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 text-xs font-medium disabled:opacity-40 transition"
+          >
+            <Send className="w-3.5 h-3.5 text-amber-400" />
+            {t("header.simulateEvent")}
+          </button>
+
+          <button
+            onClick={onOpenDispatch}
+            disabled={!activeRepo}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium disabled:opacity-40 transition shadow-sm shadow-indigo-950"
           >
             <Plus className="w-3.5 h-3.5" />
+            {t("header.dispatchTask")}
           </button>
         </div>
-
-        {activeRepo && (
-          <div className="flex items-center bg-zinc-900 rounded-lg p-0.5 border border-zinc-800">
-            {modes.map((m) => {
-              const selected = activeRepo.mode === m.id;
-              const activeColors =
-                m.id === "auto"
-                  ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
-                  : m.id === "observe"
-                    ? "bg-amber-500/20 text-amber-300 border-amber-500/40"
-                    : "bg-zinc-800 text-zinc-300 border-zinc-700";
-              return (
-                <button
-                  key={m.id}
-                  title={m.desc}
-                  onClick={() => onChangeMode(activeRepo.id, m.id)}
-                  className={`px-2.5 py-1 rounded-md text-[11px] font-medium border transition ${
-                    selected
-                      ? activeColors
-                      : "border-transparent text-zinc-500 hover:text-zinc-300"
-                  }`}
-                >
-                  {m.label}
-                </button>
-              );
-            })}
-          </div>
-        )}
       </div>
 
-      <div className="flex items-center gap-3 flex-wrap">
-        <div className="hidden lg:flex items-center gap-2 text-[11px]">
-          <span
-            className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-full border ${
-              sseConnected
-                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
-                : "border-rose-500/30 bg-rose-500/10 text-rose-300"
-            }`}
-          >
-            <Radio className="w-3 h-3" />
-            {sseConnected ? t("header.sse.live") : t("header.sse.reconnecting")}
-          </span>
+      {/* Row 2: Self-Explanatory System Status Strip */}
+      <div className="px-5 py-2 border-t border-zinc-800/60 bg-zinc-900/40 flex flex-wrap items-center gap-2">
+        <StatusCapsule
+          icon={
+            <Radio
+              className={`w-3 h-3 ${sseConnected ? "text-emerald-400" : "text-rose-400"}`}
+            />
+          }
+          label={t("strip.sse.label")}
+          value={sseConnected ? t("strip.sse.live") : t("strip.sse.reconnecting")}
+          tone={sseConnected ? "good" : "warn"}
+          align="left"
+          tooltipTitle={t("strip.sse.label")}
+          tooltipBody={t("strip.sse.desc")}
+        />
 
-          {health?.availableEngines.map((eng) => (
-            <span
-              key={eng}
-              className="px-2 py-1 rounded-md bg-zinc-900 border border-zinc-800 text-zinc-300 font-mono"
-            >
-              {eng}
-            </span>
-          ))}
+        <StatusCapsule
+          icon={<BrainCircuit className="w-3 h-3 text-indigo-400" />}
+          label={t("strip.llm.label")}
+          value={llmDisplay}
+          tone="accent"
+          align="left"
+          onClick={onOpenSetup}
+          tooltipTitle={t("strip.llm.label")}
+          tooltipBody={t("strip.llm.desc")}
+          tooltipFooter={`${t("header.controlPlanePrefix")}: ${health?.llmProvider ?? "heuristic:local"}`}
+        />
 
-          {health && (
-            <span
-              title={`${t("header.controlPlanePrefix")}: ${health.llmProvider}`}
-              className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-zinc-900 border border-zinc-800 text-zinc-400"
-            >
-              <ShieldCheck className="w-3 h-3 text-indigo-400" />
-              {t("header.watchdog")}
-            </span>
-          )}
+        <StatusCapsule
+          icon={<Bot className="w-3 h-3 text-sky-400" />}
+          label={t("strip.engines.label")}
+          value={`${t("strip.engines.coding")} ${formatEngineDisplayName(implEngine, locale)} · ${t(
+            "strip.engines.review",
+          )} ${formatEngineDisplayName(reviewEngine, locale)}`}
+          extra={`(${health?.availableEngines.length ?? 0} ${t("strip.engines.availableSuffix")})`}
+          align="left"
+          onClick={onOpenSetup}
+          tooltipTitle={t("strip.engines.label")}
+          tooltipBody={t("strip.engines.desc")}
+          tooltipFooter={`${t("strip.engines.detectedPrefix")} ${availableList.join(", ") || "—"}`}
+        />
 
-          {health && (
-            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-zinc-900 border border-zinc-800 text-zinc-400">
-              <Activity className="w-3 h-3 text-sky-400" />
-              {t("header.outboxPrefix")}: {health.counts.pendingOutbox}
-            </span>
-          )}
-        </div>
+        <StatusCapsule
+          icon={
+            <ShieldCheck
+              className={`w-3 h-3 ${
+                attentionTicketCount > 0 ? "text-amber-400" : "text-emerald-400"
+              }`}
+            />
+          }
+          label={t("strip.watchdog.label")}
+          value={
+            attentionTicketCount > 0
+              ? `${attentionTicketCount} ${t("strip.watchdog.alertSuffix")}`
+              : t("strip.watchdog.guarding")
+          }
+          extra={
+            attentionTicketCount === 0
+              ? `(${runningTicketCount} ${t("strip.watchdog.runningSuffix")})`
+              : undefined
+          }
+          tone={attentionTicketCount > 0 ? "warn" : "neutral"}
+          align="right"
+          tooltipTitle={t("strip.watchdog.label")}
+          tooltipBody={t("strip.watchdog.desc")}
+        />
 
-        <button
-          onClick={toggleLocale}
-          title={t("header.langTitle")}
-          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-zinc-800 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 text-xs font-medium transition"
-        >
-          <Languages className="w-3.5 h-3.5 text-indigo-400" />
-          {t("header.langButton")}
-        </button>
-
-        <button
-          onClick={onOpenSimulate}
-          disabled={!activeRepo}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 text-xs font-medium disabled:opacity-40 transition"
-        >
-          <Send className="w-3.5 h-3.5 text-amber-400" />
-          {t("header.simulateEvent")}
-        </button>
-
-        <button
-          onClick={onOpenDispatch}
-          disabled={!activeRepo}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium disabled:opacity-40 transition shadow-sm shadow-indigo-950"
-        >
-          <Plus className="w-3.5 h-3.5" />
-          {t("header.dispatchTask")}
-        </button>
+        <StatusCapsule
+          icon={<Activity className="w-3 h-3 text-sky-400" />}
+          label={t("strip.outbox.label")}
+          value={`${health?.counts.pendingOutbox ?? 0} ${t("strip.outbox.pendingSuffix")}`}
+          align="right"
+          tooltipTitle={t("strip.outbox.label")}
+          tooltipBody={t("strip.outbox.desc")}
+        />
       </div>
     </header>
   );

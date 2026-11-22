@@ -1,7 +1,12 @@
 import { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import { formatTemplate, useI18n } from "../i18n.tsx";
-import type { OperatingMode, PipelineTemplateId, WorkerEngineId } from "../types.ts";
+import type {
+  OperatingMode,
+  PipelineTemplateId,
+  ReasoningEffort,
+  WorkerEngineId,
+} from "../types.ts";
 
 interface DispatchModalProps {
   open: boolean;
@@ -15,6 +20,8 @@ interface DispatchModalProps {
     template: PipelineTemplateId;
     allowedPaths: string[];
     preferredEngine: WorkerEngineId;
+    modelOverride?: string;
+    effortOverride?: ReasoningEffort;
     maxCostUsd: number;
   }) => Promise<void>;
 }
@@ -33,6 +40,8 @@ export function DispatchTaskModal({
   const [template, setTemplate] = useState<PipelineTemplateId>(defaultTemplate);
   const [paths, setPaths] = useState("**");
   const [engine, setEngine] = useState<WorkerEngineId>(defaultEngine);
+  const [modelOverride, setModelOverride] = useState("");
+  const [effortOverride, setEffortOverride] = useState<ReasoningEffort | "">("");
   const [budget, setBudget] = useState("2.0");
   const [submitting, setSubmitting] = useState(false);
 
@@ -40,10 +49,14 @@ export function DispatchTaskModal({
     if (open) {
       setTemplate(defaultTemplate);
       setEngine(defaultEngine);
+      setModelOverride("");
+      setEffortOverride("");
     }
   }, [open, defaultTemplate, defaultEngine]);
 
   if (!open) return null;
+
+  const isCliEngine = engine === "claude" || engine === "codex";
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -59,6 +72,8 @@ export function DispatchTaskModal({
           .map((s) => s.trim())
           .filter(Boolean),
         preferredEngine: engine,
+        modelOverride: isCliEngine ? modelOverride.trim() || undefined : undefined,
+        effortOverride: isCliEngine ? effortOverride || undefined : undefined,
         maxCostUsd: Number(budget) || 2.0,
       });
       setTitle("");
@@ -139,6 +154,47 @@ export function DispatchTaskModal({
               />
             </div>
           </div>
+          {isCliEngine && (
+            <div className="grid grid-cols-2 gap-3 rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-3">
+              <div>
+                <label className="block text-zinc-400 mb-1">
+                  {t("modal.dispatch.modelOverride")}
+                </label>
+                <input
+                  list={engine === "claude" ? "dispatch-claude-models" : undefined}
+                  value={modelOverride}
+                  onChange={(e) => setModelOverride(e.target.value)}
+                  placeholder={t("modal.dispatch.inheritGlobal")}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-2.5 py-1.5 font-mono text-zinc-100 focus:outline-none focus:border-indigo-500"
+                />
+                {engine === "claude" && (
+                  <datalist id="dispatch-claude-models">
+                    <option value="sonnet" />
+                    <option value="opus" />
+                    <option value="fable" />
+                  </datalist>
+                )}
+              </div>
+              <div>
+                <label className="block text-zinc-400 mb-1">
+                  {t("modal.dispatch.effortOverride")}
+                </label>
+                <select
+                  value={effortOverride}
+                  onChange={(e) => setEffortOverride(e.target.value as ReasoningEffort | "")}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-zinc-100"
+                >
+                  <option value="">{t("modal.dispatch.inheritGlobal")}</option>
+                  <option value="low">{t("setup.effort.low")}</option>
+                  <option value="medium">{t("setup.effort.medium")}</option>
+                  <option value="high">{t("setup.effort.high")}</option>
+                  <option value="xhigh">{t("setup.effort.xhigh")}</option>
+                  {engine === "claude" && <option value="max">{t("setup.effort.max")}</option>}
+                </select>
+              </div>
+            </div>
+          )}
+
           <div>
             <label className="block text-zinc-400 mb-1">{t("modal.dispatch.paths")}</label>
             <input

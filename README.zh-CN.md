@@ -60,10 +60,13 @@ bun test
 # 3. 全工作区 TypeScript 严格类型检查
 bun run typecheck
 
-# 4. 构建生产环境 Web 看板静态产物至 packages/web/dist
+# 4. 运行首次启动 CLI 环境扫描与控制面大模型配置（也可启动后直接在 Web 向导中配置）
+bun run setup
+
+# 5. 构建生产环境 Web 看板静态产物至 packages/web/dist
 bun run build
 
-# 5. 一键启动守护进程 (http://localhost:4318) 与 Vite 看板 (http://localhost:5173)
+# 6. 一键启动守护进程 (http://localhost:4318) 与 Vite 看板 (http://localhost:5173)
 bun run dev
 ```
 
@@ -73,7 +76,7 @@ bun run dev:server   # 监听 4318 端口的 Hono 守护进程 (--watch)
 bun run dev:web      # 监听 5173 端口的 Vite 开发服务器（自动代理 /api -> 4318）
 ```
 
-> **自举使用提示**：若要在 `super-work` 自身仓库上派发基于 `git worktree` 的任务，请先执行一次初始 `git commit` 以建立 `HEAD` 提交。
+> **首次运行向导与自举提示**：首次启动打开看板时，系统会自动扫描本机 CLI（`claude`、`codex`、`opencode`、`gh`、`git`、`bun`）并弹出配置向导帮助你选择控制面 LLM；对任意仓库派发 `git worktree` 任务前，请确保该仓库已有至少一次初始 `git commit`（`HEAD`）。完整操作手册见 [USAGE.zh-CN.md](./USAGE.zh-CN.md)。
 
 ---
 
@@ -101,6 +104,7 @@ bun run dev:web      # 监听 5173 端口的 Vite 开发服务器（自动代理
 - `GET /api/inbox`、`POST /api/inbox/:id/resolve` — 审批或驳回 Attention Inbox 待决项
 - `GET /api/tickets/:id/recall`、`GET /api/memory/search?q=...`、`GET /api/artifacts/:id` — 获取 `Chain of Recall` 全链路、FTS5 记忆检索与按需读取 Spill 产物
 - `GET /api/outbox` — 查询 `Transactional Outbox` 外发队列状态
+- `GET /api/setup/status`、`POST /api/setup/scan`、`POST /api/setup/test-llm`、`POST /api/setup/configure` — 本机 CLI 环境扫描、大模型连通性测试与控制面动态配置
 - `GET /api/events` — 推送实时 `KernelEvent` 的 Server-Sent Events（SSE）事件流
 
-关于内部状态机流转与核心契约，请参阅 [ARCHITECTURE.zh-CN.md](./ARCHITECTURE.zh-CN.md)（英文版见 [ARCHITECTURE.md](./ARCHITECTURE.md)）。
+完整操作说明与工作流实战指南见 [USAGE.zh-CN.md](./USAGE.zh-CN.md)（英文版 [USAGE.md](./USAGE.md)）；架构设计与核心契约见 [ARCHITECTURE.zh-CN.md](./ARCHITECTURE.zh-CN.md)（英文版 [ARCHITECTURE.md](./ARCHITECTURE.md)）。

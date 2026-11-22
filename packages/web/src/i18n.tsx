@@ -5,6 +5,7 @@ import type {
   PipelineTemplateId,
   StageKind,
   TicketStatus,
+  WorkerEngineId,
 } from "./types.ts";
 
 export type Locale = "zh" | "en";
@@ -20,9 +21,9 @@ const MESSAGES = {
     "header.registerRepoTitle": "注册代码仓库",
     "header.mode.off": "关闭",
     "header.mode.offDesc": "仅接收事件不派单",
-    "header.mode.observe": "观察",
+    "header.mode.observe": "观察·需审批",
     "header.mode.observeDesc": "拟单入收件箱待批",
-    "header.mode.auto": "自动",
+    "header.mode.auto": "自动·免审",
     "header.mode.autoDesc": "全自动调度执行",
     "header.sse.live": "实时流已连接",
     "header.sse.reconnecting": "重连中",
@@ -33,6 +34,29 @@ const MESSAGES = {
     "header.dispatchTask": "派发任务",
     "header.langButton": "中文 / EN",
     "header.langTitle": "切换界面语言 (中文 / English)",
+    "header.settings": "环境与模型",
+    "header.settingsTitle": "本机 CLI 扫描与控制面模型配置",
+
+    "strip.sse.label": "实时同步",
+    "strip.sse.live": "已连接",
+    "strip.sse.reconnecting": "重连中",
+    "strip.sse.desc": "通过 SSE 长连接实时推送任务阶段切换、Agent 终端流式输出与收件箱审批提醒。",
+    "strip.llm.label": "总控大脑",
+    "strip.llm.desc": "控制面大模型：负责评估新事件意图、划分允许修改范围（Mandate）及看门狗异常诊断。点击即可切换模型。",
+    "strip.engines.label": "Agent 分工",
+    "strip.engines.coding": "编码",
+    "strip.engines.review": "审查",
+    "strip.engines.availableSuffix": "引擎可用",
+    "strip.engines.desc": "流水线中默认由「编码引擎」在独立工作树编写代码并自测，再交由「审查引擎」独立交叉 Code Review。点击即可调整分工。",
+    "strip.engines.detectedPrefix": "本机可用执行器：",
+    "strip.watchdog.label": "防卡死巡检",
+    "strip.watchdog.guarding": "守护中",
+    "strip.watchdog.runningSuffix": "运行中",
+    "strip.watchdog.alertSuffix": "项需介入",
+    "strip.watchdog.desc": "Watchdog 看门狗：自动监测任务静默超时、连续相同报错死循环或代码 Diff 反复横跳；异常时先自动注入纠偏或换引擎重试，无效则升级到收件箱由你裁决。",
+    "strip.outbox.label": "PR 交付队列",
+    "strip.outbox.pendingSuffix": "待推送",
+    "strip.outbox.desc": "Transactional Outbox：禁止 Agent 私自 git push 或建 PR；所有对外交付动作统一在此事务队列校验并自动 Rebase 后幂等发送。",
 
     "nav.inbox": "决策收件箱",
     "nav.board": "态势看板",
@@ -133,6 +157,59 @@ const MESSAGES = {
     "modal.repo.githubPlaceholder": "owner/repo",
     "modal.repo.cancel": "取消",
     "modal.repo.submit": "注册仓库",
+
+    "setup.title": "首次运行环境扫描与模型配置",
+    "setup.settingsTitle": "系统环境与控制面模型设置",
+    "setup.firstRunBanner": "检测到当前为首次启动：系统已自动扫描本机 CLI 工具链并给出引擎建议，请确认或配置控制面 LLM 后启用。",
+    "setup.cliSectionTitle": "本机 CLI 工具链扫描",
+    "setup.rescan": "重新扫描",
+    "setup.scanning": "扫描中...",
+    "setup.status.ready": "已就绪",
+    "setup.status.detected": "已安装",
+    "setup.status.unauth": "未登录",
+    "setup.status.missing": "未安装",
+    "setup.defaultImplEngine": "默认编码引擎",
+    "setup.defaultReviewEngine": "默认交叉审查引擎",
+    "setup.llmSectionTitle": "控制面大模型配置（Router / Watchdog）",
+    "setup.preset.deepseek.title": "DeepSeek API",
+    "setup.preset.deepseek.desc": "推荐 · 快速低成本结构化路由与 Watchdog 诊断",
+    "setup.preset.openai.title": "OpenAI / 兼容接口",
+    "setup.preset.openai.desc": "支持 OpenAI、Azure、OneAPI、Ollama 或任意兼容地址",
+    "setup.preset.claude_cli.title": "复用本地 Claude CLI",
+    "setup.preset.claude_cli.desc": "无工具受限模式 · 免额外 API Key",
+    "setup.preset.codex_cli.title": "复用本地 Codex CLI",
+    "setup.preset.codex_cli.desc": "只读沙箱结构化输出 · 免额外 API Key",
+    "setup.preset.heuristic.title": "本地启发式引擎 (免配置)",
+    "setup.preset.heuristic.desc": "零 Token 消耗 · 离线确定性规则路由与自愈",
+    "setup.localDefaultPrefix": "本机默认:",
+    "setup.workerProfilesTitle": "Worker CLI 模型与思考强度（全局默认）",
+    "setup.workerProfilesHint": "留空则跟随你本机 ~/.claude 或 ~/.codex 的全局默认配置；填选后由 super-work 派发时按单透传覆盖，不改动原配置文件。",
+    "setup.claudeProfileTitle": "Claude Code 默认参数",
+    "setup.codexProfileTitle": "Codex CLI 默认参数",
+    "setup.modelLabel": "模型（可选）",
+    "setup.followLocalDefault": "跟随本机默认",
+    "setup.effortLabel": "思考强度 (Effort)",
+    "setup.effort.inherit": "跟随本机默认",
+    "setup.effort.low": "low · 极速轻量",
+    "setup.effort.medium": "medium · 均衡",
+    "setup.effort.high": "high · 深度推理",
+    "setup.effort.xhigh": "xhigh · 超高强度",
+    "setup.effort.max": "max · 极限推理",
+    "setup.cliLlmModel": "控制面 CLI 模型（可选）",
+    "setup.cliLlmEffort": "控制面思考强度（推荐 low）",
+    "modal.dispatch.modelOverride": "单任务模型覆盖（可选）",
+    "modal.dispatch.effortOverride": "单任务思考强度",
+    "modal.dispatch.inheritGlobal": "继承全局配置",
+    "setup.baseUrl": "接口地址 (Base URL)",
+    "setup.model": "模型名称 (Model)",
+    "setup.apiKey": "API Key",
+    "setup.apiKeySavedHint": "已安全保存密钥（留空保留现有密钥，输入新密钥将覆盖）",
+    "setup.apiKeyPlaceholder": "输入 sk-... 密钥（仅保存在本地 SQLite 状态库，不会回传明文）",
+    "setup.testConnection": "测试连接",
+    "setup.testing": "检测中...",
+    "setup.later": "暂不保存",
+    "setup.saveActivate": "完成配置并启用",
+    "setup.saving": "保存中...",
   },
   en: {
     "app.title": "super-work · Super-Agent Orchestrator",
@@ -155,6 +232,29 @@ const MESSAGES = {
     "header.dispatchTask": "Dispatch Task",
     "header.langButton": "EN / 中文",
     "header.langTitle": "Switch UI Language (English / 中文)",
+    "header.settings": "Env & LLM",
+    "header.settingsTitle": "CLI Environment Scan & Control-Plane LLM Configuration",
+
+    "strip.sse.label": "Live Sync",
+    "strip.sse.live": "Connected",
+    "strip.sse.reconnecting": "Reconnecting",
+    "strip.sse.desc": "Streams real-time ticket state transitions, worker logs, and Attention Inbox notifications via Server-Sent Events.",
+    "strip.llm.label": "Control Brain",
+    "strip.llm.desc": "Control-Plane LLM: triages incoming triggers, defines Mandate path boundaries, and diagnoses Watchdog alerts. Click to switch models.",
+    "strip.engines.label": "Agent Roles",
+    "strip.engines.coding": "Coding",
+    "strip.engines.review": "Review",
+    "strip.engines.availableSuffix": "engines ready",
+    "strip.engines.desc": "By default, the Coding engine implements and tests inside an isolated git worktree, then the Review engine runs an independent cross-check. Click to adjust.",
+    "strip.engines.detectedPrefix": "Detected workers:",
+    "strip.watchdog.label": "Anti-Stall Watchdog",
+    "strip.watchdog.guarding": "Guarding",
+    "strip.watchdog.runningSuffix": "running",
+    "strip.watchdog.alertSuffix": "need attention",
+    "strip.watchdog.desc": "Monitors stream silence timeouts, repeated identical errors, and A->B->A diff oscillation. Auto-injects hints or switches engines before escalating to your Inbox.",
+    "strip.outbox.label": "PR Delivery Queue",
+    "strip.outbox.pendingSuffix": "pending",
+    "strip.outbox.desc": "Transactional Outbox: workers are blocked from running git push or creating PRs directly; all external side effects queue here after clean rebase.",
 
     "nav.inbox": "Attention Inbox",
     "nav.board": "Mission Board",
@@ -255,6 +355,59 @@ const MESSAGES = {
     "modal.repo.githubPlaceholder": "owner/repo",
     "modal.repo.cancel": "Cancel",
     "modal.repo.submit": "Register",
+
+    "setup.title": "First-Run CLI Scan & LLM Setup",
+    "setup.settingsTitle": "Environment & Control-Plane Settings",
+    "setup.firstRunBanner": "First launch detected: super-work scanned your local CLI tools and recommended default engines. Confirm or configure your Control-Plane LLM below.",
+    "setup.cliSectionTitle": "Local CLI Toolchain Scan",
+    "setup.rescan": "Rescan",
+    "setup.scanning": "Scanning...",
+    "setup.status.ready": "Ready",
+    "setup.status.detected": "Installed",
+    "setup.status.unauth": "Not Logged In",
+    "setup.status.missing": "Not Found",
+    "setup.defaultImplEngine": "Default Implement Engine",
+    "setup.defaultReviewEngine": "Default Review Engine",
+    "setup.llmSectionTitle": "Control-Plane LLM (Router / Watchdog)",
+    "setup.preset.deepseek.title": "DeepSeek API",
+    "setup.preset.deepseek.desc": "Recommended · Fast, low-cost structured routing & Watchdog L2",
+    "setup.preset.openai.title": "OpenAI / Compatible API",
+    "setup.preset.openai.desc": "Works with OpenAI, custom gateways, or local Ollama endpoints",
+    "setup.preset.claude_cli.title": "Reuse Local Claude CLI",
+    "setup.preset.claude_cli.desc": "Restricted tool-less mode · Zero extra API key required",
+    "setup.preset.codex_cli.title": "Reuse Local Codex CLI",
+    "setup.preset.codex_cli.desc": "Read-only structured JSON exec · Zero extra API key",
+    "setup.preset.heuristic.title": "Local Heuristic Engine (Zero-Config)",
+    "setup.preset.heuristic.desc": "Zero token cost · Offline deterministic triage & recovery",
+    "setup.localDefaultPrefix": "Local default:",
+    "setup.workerProfilesTitle": "Worker CLI Model & Reasoning Effort (Global Defaults)",
+    "setup.workerProfilesHint": "Leave unset to inherit ~/.claude or ~/.codex defaults. Overrides are passed per-invocation via CLI flags without modifying your local config files.",
+    "setup.claudeProfileTitle": "Claude Code Defaults",
+    "setup.codexProfileTitle": "Codex CLI Defaults",
+    "setup.modelLabel": "Model (optional)",
+    "setup.followLocalDefault": "Follow local CLI default",
+    "setup.effortLabel": "Reasoning Effort",
+    "setup.effort.inherit": "Follow local CLI default",
+    "setup.effort.low": "low · Fast",
+    "setup.effort.medium": "medium · Balanced",
+    "setup.effort.high": "high · Deep",
+    "setup.effort.xhigh": "xhigh · Extra High",
+    "setup.effort.max": "max · Maximum",
+    "setup.cliLlmModel": "Control-Plane CLI Model (optional)",
+    "setup.cliLlmEffort": "Control-Plane Effort (recommend low)",
+    "modal.dispatch.modelOverride": "Per-Task Model Override (optional)",
+    "modal.dispatch.effortOverride": "Per-Task Effort",
+    "modal.dispatch.inheritGlobal": "Inherit global default",
+    "setup.baseUrl": "Base URL",
+    "setup.model": "Model Name",
+    "setup.apiKey": "API Key",
+    "setup.apiKeySavedHint": "API key already stored locally (leave blank to keep existing key)",
+    "setup.apiKeyPlaceholder": "Enter sk-... (persisted in local SQLite, masked in API responses)",
+    "setup.testConnection": "Test Connection",
+    "setup.testing": "Testing...",
+    "setup.later": "Close",
+    "setup.saveActivate": "Save & Activate",
+    "setup.saving": "Saving...",
   },
 } as const;
 
@@ -394,4 +547,42 @@ export function formatInboxStatus(status: InboxItem["status"], locale: Locale): 
 
 export function formatOutboxStatus(status: OutboxEntry["status"], locale: Locale): string {
   return OUTBOX_STATUS_LABELS[status][locale];
+}
+
+export function formatEngineDisplayName(engine: WorkerEngineId, locale: Locale): string {
+  switch (engine) {
+    case "claude":
+      return "Claude Code";
+    case "codex":
+      return "Codex";
+    case "opencode":
+      return "OpenCode";
+    case "mock":
+      return locale === "zh" ? "Mock 演练" : "Mock";
+  }
+}
+
+export function formatLlmProviderDisplay(rawProvider: string | undefined, locale: Locale): string {
+  if (!rawProvider) {
+    return locale === "zh" ? "未检测" : "Unknown";
+  }
+  if (rawProvider === "heuristic:local") {
+    return locale === "zh" ? "本地规则 (免配置)" : "Local Heuristic";
+  }
+  if (rawProvider === "cli:claude-restricted" || rawProvider.startsWith("cli:claude")) {
+    return rawProvider.includes("(") ? rawProvider.replace("cli:claude", "Claude CLI ") : "Claude CLI";
+  }
+  if (rawProvider.startsWith("cli:codex")) {
+    return rawProvider.includes("(") ? rawProvider.replace("cli:codex", "Codex CLI ") : "Codex CLI";
+  }
+  if (rawProvider.startsWith("deepseek:")) {
+    return `DeepSeek (${rawProvider.slice("deepseek:".length)})`;
+  }
+  if (rawProvider.startsWith("openai:")) {
+    return `OpenAI (${rawProvider.slice("openai:".length)})`;
+  }
+  if (rawProvider.startsWith("custom:")) {
+    return rawProvider.slice("custom:".length);
+  }
+  return rawProvider;
 }

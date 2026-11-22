@@ -276,7 +276,10 @@ export class EventIntakeRouter {
       mandate,
       dependsOn,
       nativeSessions: {},
+      preferredEngine: input.preferredEngine,
       activeEngine: input.preferredEngine,
+      modelOverride: input.modelOverride?.trim() || undefined,
+      effortOverride: input.effortOverride,
       inlineMemory: {
         goal: input.description,
         acceptanceCriteria: input.acceptanceCriteria ?? [],

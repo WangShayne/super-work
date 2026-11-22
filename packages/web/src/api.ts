@@ -1,11 +1,17 @@
 import type {
   ChainOfRecall,
+  CliScanReport,
+  EngineModelProfile,
   HealthResponse,
   InboxItem,
+  LlmConnectionTestResult,
+  LlmProviderPreset,
   MemorySearchHit,
   OperatingMode,
   OutboxEntry,
   PipelineTemplateId,
+  PublicSetupStatus,
+  ReasoningEffort,
   RepoConfig,
   SpillArtifact,
   Ticket,
@@ -61,6 +67,8 @@ export const api = {
     allowedPaths?: string[];
     maxCostUsd?: number;
     preferredEngine?: WorkerEngineId;
+    modelOverride?: string;
+    effortOverride?: ReasoningEffort;
   }) => request<{ ticket: Ticket }>("/api/tickets", { method: "POST", body: JSON.stringify(payload) }),
 
   getTicketDetail: (id: string) => request<TicketDetailResponse>(`/api/tickets/${id}`),
@@ -110,4 +118,39 @@ export const api = {
     request<{ entries: OutboxEntry[] }>(
       repoId ? `/api/outbox?repoId=${encodeURIComponent(repoId)}` : "/api/outbox",
     ),
+
+  getSetupStatus: () => request<PublicSetupStatus>("/api/setup/status"),
+
+  scanCliEnvironment: () =>
+    request<{ scanReport: CliScanReport }>("/api/setup/scan", { method: "POST", body: "{}" }),
+
+  testLlmConnection: (payload: {
+    llmPreset: LlmProviderPreset;
+    llmBaseUrl: string;
+    llmModel: string;
+    llmEffort?: ReasoningEffort;
+    llmApiKey?: string;
+    useSavedKey?: boolean;
+  }) =>
+    request<LlmConnectionTestResult>("/api/setup/test-llm", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  configureSetup: (payload: {
+    llmPreset: LlmProviderPreset;
+    llmBaseUrl: string;
+    llmModel: string;
+    llmEffort?: ReasoningEffort;
+    llmApiKey?: string;
+    clearApiKey?: boolean;
+    preferredImplementEngine: WorkerEngineId;
+    preferredReviewEngine: WorkerEngineId;
+    claudeProfile?: EngineModelProfile;
+    codexProfile?: EngineModelProfile;
+  }) =>
+    request<PublicSetupStatus>("/api/setup/configure", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
 };
