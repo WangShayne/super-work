@@ -10,6 +10,8 @@ import type {
   InboxItemStatus,
   LlmProviderPreset,
   OutboxStatus,
+  PluginLoaderPort,
+  PluginRegistryReader,
   PublicSetupStatus,
   ReasoningEffort,
   RepoConfig,
@@ -26,6 +28,7 @@ import {
   buildControlPlaneLLMFromSetup,
   testControlPlaneLLMConnection,
 } from "@super-work/drivers";
+import { registerPluginRoutes } from "./plugin-routes.ts";
 
 export interface ServerAppDeps {
   kernel: SuperWorkKernel;
@@ -35,6 +38,9 @@ export interface ServerAppDeps {
   mutableLlm?: MutableControlPlaneLLM;
   cliScanner?: CliEnvironmentScanner;
   webDistDir?: string;
+  /** Plugin management routes are registered only when both are provided. */
+  pluginRegistry?: PluginRegistryReader;
+  pluginLoader?: PluginLoaderPort;
 }
 
 export function maskApiKey(key?: string): string | undefined {
@@ -289,6 +295,11 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     await stateStore.upsertRepo(updated);
     return c.json({ repo: updated });
   });
+
+  // --- Plugin Management ---
+  if (deps.pluginRegistry && deps.pluginLoader) {
+    registerPluginRoutes(app, { registry: deps.pluginRegistry, loader: deps.pluginLoader });
+  }
 
   // --- Triggers ---
   app.post("/api/triggers", async (c) => {

@@ -19,6 +19,7 @@ import {
   runGit,
 } from "@super-work/drivers";
 import { createServerApp } from "./app.ts";
+import { InMemoryPluginRegistry, RegistryBackedPluginLoader } from "./in-memory-plugins.ts";
 
 export { createServerApp };
 
@@ -33,6 +34,7 @@ export interface StartedDaemon {
   kernel: SuperWorkKernel;
   stateStore: SqliteStateStore;
   ghPoller: GhCliPollingSource;
+  pluginRegistry: InMemoryPluginRegistry;
   stop: () => Promise<void>;
 }
 
@@ -118,6 +120,9 @@ export async function startDaemon(options?: {
   const here = dirname(fileURLToPath(import.meta.url));
   const webDistDir = resolve(here, "../../web/dist");
 
+  const pluginRegistry = new InMemoryPluginRegistry();
+  const pluginLoader = new RegistryBackedPluginLoader(pluginRegistry);
+
   const app = createServerApp({
     kernel,
     stateStore,
@@ -125,6 +130,8 @@ export async function startDaemon(options?: {
     mutableLlm,
     cliScanner,
     webDistDir,
+    pluginRegistry,
+    pluginLoader,
   });
 
   const ghPoller = new GhCliPollingSource(kernel);
@@ -144,7 +151,7 @@ export async function startDaemon(options?: {
     stateStore.close();
   };
 
-  return { server, kernel, stateStore, ghPoller, stop };
+  return { server, kernel, stateStore, ghPoller, pluginRegistry, stop };
 }
 
 if (import.meta.main) {
