@@ -3,8 +3,11 @@ import { createDefaultMandate, type WorkerTurnInput } from "@super-work/core";
 import {
   buildClaudeCliArgs,
   buildCodexCliArgs,
+  buildOpenCodeCliArgs,
+  formatOpenCodeModelArg,
   parseClaudeStreamLine,
   parseCodexStreamLine,
+  parseOpenCodeStreamLine,
 } from "../src/index.ts";
 
 describe("Worker CLI flag mapping and JSONL stream parsers", () => {
@@ -130,5 +133,125 @@ describe("Worker CLI flag mapping and JSONL stream parsers", () => {
       JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1000, output_tokens: 500 } }),
     );
     expect(completed.map((e) => e.type)).toEqual(["usage", "completed"]);
+  });
+
+  it("builds valid opencode run flags and safely skips variant without a model", () => {
+    expect(formatOpenCodeModelArg(undefined, "high")).toBeUndefined();
+    expect(formatOpenCodeModelArg("openai/gpt-5.6-sol", "xhigh")).toBe(
+      "openai/gpt-5.6-sol#xhigh",
+    );
+    expect(formatOpenCodeModelArg("anthropic/claude-opus-5#max", "low")).toBe(
+      "anthropic/claude-opus-5#max",
+    );
+
+    const planArgs = buildOpenCodeCliArgs({
+      ...baseInput,
+      stage: "plan",
+      effort: "high",
+    });
+    expect(planArgs).toEqual(["run", "--format", "json", "--thinking", "--agent", "plan"]);
+    expect(planArgs).not.toContain("--auto");
+    expect(planArgs).not.toContain("--model");
+
+    const buildArgs = buildOpenCodeCliArgs({
+      ...baseInput,
+      stage: "implement",
+      model: "openai/gpt-5.6-sol",
+      effort: "xhigh",
+      nativeSessionId: "ses_opencode_123",
+      isResume: true,
+    });
+    expect(buildArgs).toEqual([
+      "run",
+      "--format",
+      "json",
+      "--thinking",
+      "--agent",
+      "build",
+      "--auto",
+      "--model",
+      "openai/gpt-5.6-sol#xhigh",
+      "--session",
+      "ses_opencode_123",
+    ]);
+  });
+
+  it("normalizes opencode --format json events", () => {
+    const state = { sessionEmitted: false };
+    const start = parseOpenCodeStreamLine(
+      JSON.stringify({ type: "step_start", sessionID: "ses_1", part: { type: "step-start" } }),
+      state,
+    );
+    expect(start).toHaveLength(1);
+    expect(start[0]).toMatchObject({ type: "session_started", nativeSessionId: "ses_1" });
+
+    const thought = parseOpenCodeStreamLine(
+      JSON.stringify({
+        type: "reasoning",
+        sessionID: "ses_1",
+        part: { type: "reasoning", text: "Inspecting codegraph" },
+      }),
+      state,
+    );
+    expect(thought).toHaveLength(1);
+    expect(thought[0]).toMatchObject({ type: "thought", text: "Inspecting codegraph" });
+
+    const toolOk = parseOpenCodeStreamLine(
+      JSON.stringify({
+        type: "tool_use",
+        sessionID: "ses_1",
+        part: {
+          type: "tool",
+          tool: "bash",
+          state: { status: "completed", input: { command: "bun test" }, output: "23 pass" },
+        },
+      }),
+      state,
+    );
+    expect(toolOk.map((e) => e.type)).toEqual(["tool_use", "tool_result"]);
+    expect(toolOk[1]).toMatchObject({ isError: false, outputSummary: "23 pass" });
+
+    const toolErr = parseOpenCodeStreamLine(
+      JSON.stringify({
+        type: "tool_use",
+        sessionID: "ses_1",
+        part: {
+          type: "tool",
+          tool: "edit",
+          state: { status: "error", input: { filePath: "a.ts" }, error: "Permission denied" },
+        },
+      }),
+      state,
+    );
+    expect(toolErr[1]).toMatchObject({ isError: true, outputSummary: "Permission denied" });
+
+    const usage = parseOpenCodeStreamLine(
+      JSON.stringify({
+        type: "step_finish",
+        sessionID: "ses_1",
+        part: { type: "step-finish", cost: 0.04, tokens: { input: 200, output: 50 } },
+      }),
+      state,
+    );
+    expect(usage[0]).toMatchObject({
+      type: "usage",
+      costUsd: 0.04,
+      inputTokens: 200,
+      outputTokens: 50,
+    });
+
+    const err = parseOpenCodeStreamLine(
+      JSON.stringify({
+        type: "error",
+        sessionID: "ses_1",
+        error: { type: "unknown", message: "Provider rate limited" },
+      }),
+      state,
+    );
+    expect(err[0]).toMatchObject({
+      type: "error",
+      fatal: true,
+      message: "Provider rate limited",
+    });
   });
 });

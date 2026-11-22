@@ -35,6 +35,7 @@ flowchart TB
         MandateGuard["Mandate 护栏与 GitWorktreeProvider"]
         Claude["ClaudeCodeDriver"]
         Codex["CodexDriver"]
+        OpenCode["OpenCodeDriver"]
         Mock["MockWorkerDriver"]
     end
 
@@ -47,6 +48,7 @@ flowchart TB
     Scheduler --> MandateGuard
     MandateGuard --> Claude
     MandateGuard --> Codex
+    MandateGuard --> OpenCode
     MandateGuard --> Mock
     Watchdog -.->|"监控事件流与 Diff 进展"| MandateGuard
     Watchdog -.->|"纠偏 / 换引擎 / 升级交人"| Scheduler
@@ -109,8 +111,8 @@ stateDiagram-v2
 ### 3.2 统一 `WorkerDriver` 协议与跨引擎接力
 接口定义于 [ports.ts](./packages/core/src/ports.ts)，驱动实现于 `packages/drivers/src/workers/`：
 - 所有执行器统一产出归一化 `WorkerStreamEvent` 流（`session_started`、`thought`、`tool_use`、`tool_result`、`text`、`usage`、`completed`、`error`）。
-- **同引擎原生续跑**：捕获并持久化 `nativeSessions[engine]`（`ClaudeCodeDriver` 的 `session_id` / `CodexDriver` 的 `thread_id`），下轮同引擎优先通过 `--resume` / `exec resume` 复用提示词缓存。
-- **跨引擎无缝交接**：在不同阶段（如 `ClaudeCodeDriver` 编码 → `CodexDriver` 独立审查）或 Watchdog 触发 `SWITCH_ENGINE` 时，`MemoryManager` 自动提炼紧凑的 `InlineMemory` 阶段交接摘要，避免将巨量原始历史塞入新引擎上下文窗口。
+- **同引擎原生续跑**：捕获并持久化 `nativeSessions[engine]`（`ClaudeCodeDriver` 的 `session_id` / `CodexDriver` 的 `thread_id` / `OpenCodeDriver` 的 `sessionID`），下轮同引擎优先通过 `--resume` / `exec resume` / `--session` 复用上下文与缓存。
+- **跨引擎无缝交接**：在不同阶段（如 `ClaudeCodeDriver` 编码 → `CodexDriver` / `OpenCodeDriver` 独立审查）或 Watchdog 触发 `SWITCH_ENGINE` 时，`MemoryManager` 自动提炼紧凑的 `InlineMemory` 阶段交接摘要，避免将巨量原始历史塞入新引擎上下文窗口。
 
 ### 3.3 `Inline & Spill` 分层记忆与 `Chain of Recall`
 实现于 [memory.ts](./packages/core/src/memory.ts)、[sqlite-state-store.ts](./packages/drivers/src/storage/sqlite-state-store.ts) 与 [fs-artifact-store.ts](./packages/drivers/src/storage/fs-artifact-store.ts)：
@@ -127,3 +129,4 @@ stateDiagram-v2
 实现于 [outbox.ts](./packages/core/src/outbox.ts) 与 [gh-cli-source.ts](./packages/drivers/src/sources/gh-cli-source.ts)：
 - 交付前由 `SuperWorkKernel` 自动执行 `GitWorktreeProvider.rebaseOntoBase(...)`；若发生冲突则优先注入冲突文件摘要唤醒 Worker 自愈，超出重试上限再升级人工处理。
 - Rebase 干净后写入带 SQLite `UNIQUE(idempotency_key)` 约束的 `OutboxEntry`；`OutboxProcessor.processDueEntries()` 通过事务方法 `claimNextOutboxEntries` 原子认领任务并交由 `GhOutboxExecutor` 执行（有远端及 `gh` 授权时自动 Push 分支并建 PR，纯本地仓库则完成本地分支交付汇总）。
+- **Worktree 生命周期与 GC**：启用仓库 `autoCleanupWorktree`（默认开启）时，任务到达 `delivered` 或被 `cancelTicket` 取消后会自动移除工作树目录并保留提交分支；即使清理后，`GET /api/tickets/:id` 仍可通过 `GitWorktreeProvider.getBranchDiff(...)` 回看分支 Diff，也可通过 `/api/worktrees/gc` 回收历史或孤儿目录。

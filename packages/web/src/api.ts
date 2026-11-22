@@ -6,6 +6,7 @@ import type {
   InboxItem,
   LlmConnectionTestResult,
   LlmProviderPreset,
+  ManagedWorktreeItem,
   MemorySearchHit,
   OperatingMode,
   OutboxEntry,
@@ -17,6 +18,7 @@ import type {
   Ticket,
   TicketDetailResponse,
   WorkerEngineId,
+  WorktreeGcResult,
 } from "./types.ts";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -81,6 +83,23 @@ export const api = {
 
   cancelTicket: (ticketId: string) =>
     request<{ ticket: Ticket }>(`/api/tickets/${ticketId}/cancel`, { method: "POST", body: "{}" }),
+
+  cleanupTicketWorktree: (ticketId: string) =>
+    request<{ ticket: Ticket }>(`/api/tickets/${ticketId}/cleanup-worktree`, {
+      method: "POST",
+      body: "{}",
+    }),
+
+  listWorktrees: (repoId?: string) =>
+    request<{ items: ManagedWorktreeItem[] }>(
+      repoId ? `/api/worktrees?repoId=${encodeURIComponent(repoId)}` : "/api/worktrees",
+    ),
+
+  gcWorktrees: (repoId?: string) =>
+    request<{ result: WorktreeGcResult; items: ManagedWorktreeItem[] }>("/api/worktrees/gc", {
+      method: "POST",
+      body: JSON.stringify(repoId ? { repoId } : {}),
+    }),
 
   simulateTrigger: (payload: {
     repoId: string;
@@ -148,6 +167,7 @@ export const api = {
     preferredReviewEngine: WorkerEngineId;
     claudeProfile?: EngineModelProfile;
     codexProfile?: EngineModelProfile;
+    opencodeProfile?: EngineModelProfile;
   }) =>
     request<PublicSetupStatus>("/api/setup/configure", {
       method: "POST",

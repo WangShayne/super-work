@@ -35,6 +35,7 @@ flowchart TB
         MandateGuard["Mandate Guardrails & GitWorktreeProvider"]
         Claude["ClaudeCodeDriver"]
         Codex["CodexDriver"]
+        OpenCode["OpenCodeDriver"]
         Mock["MockWorkerDriver"]
     end
 
@@ -47,6 +48,7 @@ flowchart TB
     Scheduler --> MandateGuard
     MandateGuard --> Claude
     MandateGuard --> Codex
+    MandateGuard --> OpenCode
     MandateGuard --> Mock
     Watchdog -.->|"Stream & Diff health checks"| MandateGuard
     Watchdog -.->|"Hint / Switch Engine / Escalate"| Scheduler
@@ -109,8 +111,8 @@ Defined in [mandate.ts](./packages/core/src/mandate.ts):
 ### 3.2 Unified `WorkerDriver` & Cross-Engine Handover
 Defined in [ports.ts](./packages/core/src/ports.ts) and implemented in `packages/drivers/src/workers/`:
 - All worker drivers emit normalized `WorkerStreamEvent` streams (`session_started`, `thought`, `tool_use`, `tool_result`, `text`, `usage`, `completed`, `error`).
-- **Same-engine resume**: Captures `nativeSessions[engine]` (`session_id` for `ClaudeCodeDriver`, `thread_id` for `CodexDriver`) and resumes via `--resume` / `exec resume`.
-- **Cross-engine handover**: Between stages (e.g., `ClaudeCodeDriver` for `implement` → `CodexDriver` for `review`) or after a `SWITCH_ENGINE` recovery, `MemoryManager` synthesizes concise `InlineMemory` handover notes without leaking giant raw transcripts into the next model's context window.
+- **Same-engine resume**: Captures `nativeSessions[engine]` (`session_id` for `ClaudeCodeDriver`, `thread_id` for `CodexDriver`, `sessionID` for `OpenCodeDriver`) and resumes via `--resume` / `exec resume` / `--session`.
+- **Cross-engine handover**: Between stages (e.g., `ClaudeCodeDriver` for `implement` → `CodexDriver` or `OpenCodeDriver` for `review`) or after a `SWITCH_ENGINE` recovery, `MemoryManager` synthesizes concise `InlineMemory` handover notes without leaking giant raw transcripts into the next model's context window.
 
 ### 3.3 `Inline & Spill` + `Chain of Recall`
 Implemented in [memory.ts](./packages/core/src/memory.ts), [sqlite-state-store.ts](./packages/drivers/src/storage/sqlite-state-store.ts), and [fs-artifact-store.ts](./packages/drivers/src/storage/fs-artifact-store.ts):
@@ -127,3 +129,4 @@ Implemented in [watchdog.ts](./packages/core/src/watchdog.ts):
 Implemented in [outbox.ts](./packages/core/src/outbox.ts) and [gh-cli-source.ts](./packages/drivers/src/sources/gh-cli-source.ts):
 - Before delivery, `SuperWorkKernel` runs `GitWorktreeProvider.rebaseOntoBase(...)`. Merge conflicts trigger a self-heal `implement` retry or a `merge_conflict` Inbox item.
 - Clean rebases enqueue an idempotent `OutboxEntry` (`idempotency_key` unique constraint in SQLite WAL). `OutboxProcessor.processDueEntries()` atomically claims due rows via `claimNextOutboxEntries` and executes `GhOutboxExecutor` (pushing & opening a GitHub PR when remote + `gh` are configured, or recording local branch readiness for local-only repos).
+- **Worktree Lifecycle & GC**: When `repo.autoCleanupWorktree` is enabled (default), terminal `delivered` and `cancelled` tickets automatically reclaim their isolated worktree directory while retaining branch commits (`GET /api/tickets/:id` falls back to `GitWorktreeProvider.getBranchDiff(...)`). Stale or orphan directories can also be inspected and reclaimed via `/api/worktrees/gc`.

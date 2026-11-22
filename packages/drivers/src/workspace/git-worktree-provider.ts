@@ -1,4 +1,4 @@
-import { access, mkdir, rm } from "node:fs/promises";
+import { access, mkdir, readdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { RepoConfig, Ticket, WorkspaceProvider } from "@super-work/core";
 
@@ -107,6 +107,15 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     return result;
   }
 
+  async getBranchDiff(
+    rootRepoPath: string,
+    baseBranch: string,
+    branchName: string,
+  ): Promise<string> {
+    const res = await runGit(["diff", `${baseBranch}...${branchName}`], rootRepoPath);
+    return res.exitCode === 0 ? res.stdout : "";
+  }
+
   async commitAll(worktreePath: string, message: string): Promise<boolean> {
     const status = await runGit(["status", "--porcelain"], worktreePath);
     if (!status.stdout.trim()) {
@@ -167,11 +176,25 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     }
   }
 
+  async listWorktreeDirs(): Promise<string[]> {
+    try {
+      const entries = await readdir(this.worktreesDir, { withFileTypes: true });
+      return entries
+        .filter((e) => e.isDirectory())
+        .map((e) => join(this.worktreesDir, e.name))
+        .sort();
+    } catch {
+      return [];
+    }
+  }
+
   async cleanupWorkspace(worktreePath: string, rootRepoPath?: string): Promise<void> {
     if (rootRepoPath) {
-      const res = await runGit(["worktree", "remove", "--force", worktreePath], rootRepoPath);
-      if (res.exitCode === 0) return;
+      await runGit(["worktree", "remove", "--force", worktreePath], rootRepoPath);
     }
     await rm(worktreePath, { recursive: true, force: true });
+    if (rootRepoPath) {
+      await runGit(["worktree", "prune"], rootRepoPath);
+    }
   }
 }

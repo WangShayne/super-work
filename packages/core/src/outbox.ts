@@ -1,5 +1,5 @@
 import type { OutboxExecutor, StateStore } from "./ports.ts";
-import type { KernelEvent, OutboxEntry } from "./types.ts";
+import type { KernelEvent, OutboxEntry, RepoConfig, Ticket } from "./types.ts";
 import { newId, nowIso } from "./utils.ts";
 
 export class OutboxProcessor {
@@ -8,6 +8,7 @@ export class OutboxProcessor {
     private readonly executor: OutboxExecutor,
     private readonly emit: (event: KernelEvent) => void,
     private readonly maxAttempts = 5,
+    private readonly onTicketDelivered?: (ticket: Ticket, repo: RepoConfig) => Promise<void>,
   ) {}
 
   async processDueEntries(limit = 5): Promise<number> {
@@ -57,6 +58,13 @@ export class OutboxProcessor {
         };
         await this.stateStore.saveTicket(updatedTicket);
         this.emit({ type: "ticket_updated", ticket: updatedTicket, timestamp: updatedTicket.updatedAt });
+        if (this.onTicketDelivered) {
+          try {
+            await this.onTicketDelivered(updatedTicket, repo);
+          } catch {
+            // Non-fatal post-delivery worktree cleanup hook
+          }
+        }
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

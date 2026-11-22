@@ -60,6 +60,7 @@ export class SqliteStateStore implements StateStore {
         default_template TEXT NOT NULL,
         preferred_implement_engine TEXT NOT NULL,
         preferred_review_engine TEXT NOT NULL,
+        auto_cleanup_worktree INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -107,6 +108,7 @@ export class SqliteStateStore implements StateStore {
         depends_on_json TEXT NOT NULL,
         worktree_path TEXT,
         branch_name TEXT,
+        worktree_cleaned_at TEXT,
         native_sessions_json TEXT NOT NULL,
         preferred_engine TEXT,
         active_engine TEXT,
@@ -201,6 +203,14 @@ export class SqliteStateStore implements StateStore {
       );
     `);
 
+    const repoCols = this.db
+      .query("PRAGMA table_info(repos)")
+      .all() as Array<{ name: string }>;
+    const existingRepoCols = new Set(repoCols.map((c) => c.name));
+    if (!existingRepoCols.has("auto_cleanup_worktree")) {
+      this.db.run("ALTER TABLE repos ADD COLUMN auto_cleanup_worktree INTEGER NOT NULL DEFAULT 1;");
+    }
+
     const cols = this.db
       .query("PRAGMA table_info(tickets)")
       .all() as Array<{ name: string }>;
@@ -214,6 +224,9 @@ export class SqliteStateStore implements StateStore {
     if (!existingCols.has("effort_override")) {
       this.db.run("ALTER TABLE tickets ADD COLUMN effort_override TEXT;");
     }
+    if (!existingCols.has("worktree_cleaned_at")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN worktree_cleaned_at TEXT;");
+    }
   }
 
   // --- Repos ---
@@ -222,8 +235,8 @@ export class SqliteStateStore implements StateStore {
       .query(
         `INSERT INTO repos (
           id, name, root_path, base_branch, mode, github_repo, default_template,
-          preferred_implement_engine, preferred_review_engine, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          preferred_implement_engine, preferred_review_engine, auto_cleanup_worktree, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           root_path = excluded.root_path,
@@ -233,6 +246,7 @@ export class SqliteStateStore implements StateStore {
           default_template = excluded.default_template,
           preferred_implement_engine = excluded.preferred_implement_engine,
           preferred_review_engine = excluded.preferred_review_engine,
+          auto_cleanup_worktree = excluded.auto_cleanup_worktree,
           updated_at = excluded.updated_at`,
       )
       .run(
@@ -245,6 +259,7 @@ export class SqliteStateStore implements StateStore {
         repo.defaultTemplate,
         repo.preferredImplementEngine,
         repo.preferredReviewEngine,
+        repo.autoCleanupWorktree === false ? 0 : 1,
         repo.createdAt,
         repo.updatedAt,
       );
@@ -343,9 +358,9 @@ export class SqliteStateStore implements StateStore {
         `INSERT INTO tickets (
           id, repo_id, thread_id, source_trigger_id, title, description, status, template,
           current_stage, stage_retries, mandate_json, depends_on_json, worktree_path, branch_name,
-          native_sessions_json, preferred_engine, active_engine, model_override, effort_override,
+          worktree_cleaned_at, native_sessions_json, preferred_engine, active_engine, model_override, effort_override,
           inline_memory_json, cost_usd, priority, error_message, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           status = excluded.status,
           template = excluded.template,
@@ -355,6 +370,7 @@ export class SqliteStateStore implements StateStore {
           depends_on_json = excluded.depends_on_json,
           worktree_path = excluded.worktree_path,
           branch_name = excluded.branch_name,
+          worktree_cleaned_at = excluded.worktree_cleaned_at,
           native_sessions_json = excluded.native_sessions_json,
           preferred_engine = excluded.preferred_engine,
           active_engine = excluded.active_engine,
@@ -381,6 +397,7 @@ export class SqliteStateStore implements StateStore {
         JSON.stringify(ticket.dependsOn),
         ticket.worktreePath ?? null,
         ticket.branchName ?? null,
+        ticket.worktreeCleanedAt ?? null,
         JSON.stringify(ticket.nativeSessions),
         ticket.preferredEngine ?? null,
         ticket.activeEngine ?? null,
@@ -814,6 +831,10 @@ function mapRepoRow(r: Record<string, unknown>): RepoConfig {
     defaultTemplate: r.default_template as RepoConfig["defaultTemplate"],
     preferredImplementEngine: r.preferred_implement_engine as RepoConfig["preferredImplementEngine"],
     preferredReviewEngine: r.preferred_review_engine as RepoConfig["preferredReviewEngine"],
+    autoCleanupWorktree:
+      r.auto_cleanup_worktree === undefined || r.auto_cleanup_worktree === null
+        ? true
+        : Boolean(r.auto_cleanup_worktree),
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
   };
@@ -861,6 +882,7 @@ function mapTicketRow(r: Record<string, unknown>): Ticket {
     dependsOn: JSON.parse(String(r.depends_on_json)),
     worktreePath: r.worktree_path ? String(r.worktree_path) : undefined,
     branchName: r.branch_name ? String(r.branch_name) : undefined,
+    worktreeCleanedAt: r.worktree_cleaned_at ? String(r.worktree_cleaned_at) : undefined,
     nativeSessions: JSON.parse(String(r.native_sessions_json)),
     preferredEngine: r.preferred_engine
       ? (String(r.preferred_engine) as Ticket["preferredEngine"])

@@ -4,6 +4,7 @@ export * from "./workspace/git-worktree-provider.ts";
 export * from "./workers/mock-driver.ts";
 export * from "./workers/claude-code-driver.ts";
 export * from "./workers/codex-driver.ts";
+export * from "./workers/opencode-driver.ts";
 export * from "./llm/control-plane-llm.ts";
 export * from "./sources/gh-cli-source.ts";
 export * from "./env/cli-scanner.ts";

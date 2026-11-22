@@ -225,19 +225,129 @@ export class CliEnvironmentScanner {
   private async probeOpenCode(): Promise<DetectedCliTool> {
     const binaryPath = this.which("opencode") ?? undefined;
     if (!binaryPath) {
-      return this.notInstalled("opencode", "OpenCode CLI", false);
+      return this.notInstalled("opencode", "OpenCode CLI", true);
     }
 
-    const verRes = await this.runCmd([binaryPath, "--version"]);
+    const [verRes, authRes, localDefaults] = await Promise.all([
+      this.runCmd([binaryPath, "--version"]),
+      this.runCmd([binaryPath, "auth", "list", "--format", "json"]),
+      this.readOpenCodeLocalDefaults(),
+    ]);
+
+    let hasCliIntegration = false;
+    let integrationSummary: string | undefined;
+    const rawAuth = authRes.stdout.trim();
+    if (authRes.exitCode === 0 && rawAuth.startsWith("[")) {
+      try {
+        const list = JSON.parse(rawAuth) as Array<{ id?: string; name?: string }>;
+        if (Array.isArray(list) && list.length > 0) {
+          hasCliIntegration = true;
+          integrationSummary = `integrations: ${list
+            .map((item) => item.name ?? item.id)
+            .filter(Boolean)
+            .slice(0, 3)
+            .join(", ")}`;
+        }
+      } catch {
+        // Fallback below
+      }
+    } else if (
+      authRes.exitCode === 0 &&
+      rawAuth &&
+      !/no authenticated integrations/i.test(rawAuth) &&
+      !/^\d+\.\d+\.\d+/.test(rawAuth)
+    ) {
+      hasCliIntegration = true;
+      integrationSummary = firstLine(rawAuth) ?? "authenticated";
+    }
+
+    const hasProviders = localDefaults.providerKeys.length > 0;
+    const authenticated = hasCliIntegration || hasProviders;
+    const authSummary = hasCliIntegration
+      ? integrationSummary
+      : hasProviders
+        ? `providers: ${localDefaults.providerKeys.slice(0, 3).join(", ")}`
+        : "no providers configured";
+
     return {
       id: "opencode",
       name: "OpenCode CLI",
       installed: true,
       binaryPath,
       version: firstLine(verRes.stdout || verRes.stderr),
-      authenticated: null,
-      authSummary: "detected (driver planned v0.2)",
-      workerSupported: false,
+      authenticated,
+      authSummary,
+      localDefaultModel: localDefaults.localDefaultModel,
+      localDefaultEffort: localDefaults.localDefaultEffort,
+      workerSupported: true,
+    };
+  }
+
+  private async readOpenCodeLocalDefaults(): Promise<{
+    providerKeys: string[];
+    localDefaultModel?: string;
+    localDefaultEffort?: string;
+  }> {
+    let providerKeys: string[] = [];
+    let configModel: string | undefined;
+
+    try {
+      const raw = await readFile(join(this.homeDir, ".config", "opencode", "opencode.json"), "utf8");
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      if (parsed.provider && typeof parsed.provider === "object") {
+        providerKeys = Object.keys(parsed.provider as Record<string, unknown>);
+      }
+      const agent = parsed.agent as Record<string, Record<string, unknown>> | undefined;
+      if (typeof parsed.model === "string" && parsed.model.trim()) {
+        configModel = parsed.model.trim();
+      } else if (typeof agent?.build?.model === "string" && agent.build.model.trim()) {
+        configModel = agent.build.model.trim();
+      }
+    } catch {
+      // Ignore missing or unreadable config
+    }
+
+    let stateModel: string | undefined;
+    let stateVariant: string | undefined;
+    try {
+      const rawState = await readFile(
+        join(this.homeDir, ".local", "state", "opencode", "model.json"),
+        "utf8",
+      );
+      const parsedState = JSON.parse(rawState) as {
+        recent?: Array<string | { providerID?: string; modelID?: string }>;
+        variant?: Record<string, string>;
+      };
+      const firstRecent = Array.isArray(parsedState.recent) ? parsedState.recent[0] : undefined;
+      if (typeof firstRecent === "string" && firstRecent.trim()) {
+        stateModel = firstRecent.trim();
+      } else if (
+        firstRecent &&
+        typeof firstRecent === "object" &&
+        firstRecent.providerID &&
+        firstRecent.modelID
+      ) {
+        stateModel = `${firstRecent.providerID}/${firstRecent.modelID}`;
+      }
+      const variants =
+        parsedState.variant && typeof parsedState.variant === "object"
+          ? parsedState.variant
+          : undefined;
+      const lookupModel = configModel ?? stateModel;
+      if (variants) {
+        const directVariant = lookupModel ? variants[lookupModel] : undefined;
+        if (directVariant && directVariant !== "default") {
+          stateVariant = directVariant;
+        }
+      }
+    } catch {
+      // Ignore missing or unreadable state
+    }
+
+    return {
+      providerKeys,
+      localDefaultModel: configModel ?? stateModel,
+      localDefaultEffort: stateVariant,
     };
   }
 
@@ -335,30 +445,25 @@ export function computeRecommendedEngines(tools: DetectedCliTool[]): {
   recommendedReviewEngine: WorkerEngineId;
 } {
   const byId = new Map(tools.map((t) => [t.id, t]));
-  const claude = byId.get("claude");
-  const codex = byId.get("codex");
+  type CliWorkerId = "claude" | "codex" | "opencode";
+  const implOrder: CliWorkerId[] = ["claude", "codex", "opencode"];
+  const reviewOrder: CliWorkerId[] = ["codex", "claude", "opencode"];
 
-  let recommendedImplementEngine: WorkerEngineId = "mock";
-  if (claude?.installed && claude.authenticated) {
-    recommendedImplementEngine = "claude";
-  } else if (codex?.installed && codex.authenticated) {
-    recommendedImplementEngine = "codex";
-  } else if (claude?.installed) {
-    recommendedImplementEngine = "claude";
-  } else if (codex?.installed) {
-    recommendedImplementEngine = "codex";
-  }
+  const isAuth = (id: CliWorkerId) => {
+    const t = byId.get(id);
+    return Boolean(t?.installed && t.authenticated);
+  };
+  const isInstalled = (id: CliWorkerId) => Boolean(byId.get(id)?.installed);
 
-  let recommendedReviewEngine: WorkerEngineId = "mock";
-  if (codex?.installed && codex.authenticated) {
-    recommendedReviewEngine = "codex";
-  } else if (claude?.installed && claude.authenticated) {
-    recommendedReviewEngine = "claude";
-  } else if (codex?.installed) {
-    recommendedReviewEngine = "codex";
-  } else if (claude?.installed) {
-    recommendedReviewEngine = "claude";
-  }
+  const recommendedImplementEngine: WorkerEngineId =
+    implOrder.find(isAuth) ?? implOrder.find(isInstalled) ?? "mock";
+
+  const recommendedReviewEngine: WorkerEngineId =
+    reviewOrder.find((id) => id !== recommendedImplementEngine && isAuth(id)) ??
+    reviewOrder.find(isAuth) ??
+    reviewOrder.find((id) => id !== recommendedImplementEngine && isInstalled(id)) ??
+    reviewOrder.find(isInstalled) ??
+    "mock";
 
   return { recommendedImplementEngine, recommendedReviewEngine };
 }

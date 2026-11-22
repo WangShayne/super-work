@@ -161,6 +161,15 @@ describe("SuperWorkKernel E2E on real Git worktrees", () => {
 
     const finalTicket = await store.getTicket(ingest.ticket.id);
     expect(finalTicket?.status).toBe("delivered");
+    expect(finalTicket?.worktreePath).toBeUndefined();
+    expect(finalTicket?.worktreeCleanedAt).toBeDefined();
+    expect(await kernel.inspectWorktrees(repo.id)).toHaveLength(0);
+    const branchDiff = await kernel.workspace.getBranchDiff(
+      repo.rootPath,
+      repo.baseBranch,
+      finalTicket!.branchName!,
+    );
+    expect(branchDiff).toContain("src/health");
     expect(finalTicket?.inlineMemory.stageNotes.map((n) => `${n.stage}:${n.engine}`)).toEqual([
       "plan:claude",
       "implement:claude",
@@ -296,6 +305,13 @@ describe("SuperWorkKernel E2E on real Git worktrees", () => {
     // Verify .env.local was reverted in worktree
     const envExists = await Bun.file(join(blocked!.worktreePath!, ".env.local")).exists();
     expect(envExists).toBe(false);
+
+    // Cancelling the blocked ticket automatically reclaims its worktree when autoCleanupWorktree is enabled
+    const cancelled = await kernel.cancelTicket(ticket.id, "Test cancel cleanup");
+    expect(cancelled.status).toBe("cancelled");
+    expect(cancelled.worktreePath).toBeUndefined();
+    expect(cancelled.worktreeCleanedAt).toBeDefined();
+    expect(await kernel.inspectWorktrees(repo.id)).toHaveLength(0);
 
     store.close();
   });

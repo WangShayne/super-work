@@ -3,7 +3,13 @@ import { Inbox, Kanban } from "lucide-react";
 import { api } from "./api.ts";
 import { DeepDiveDrawer } from "./components/DeepDiveDrawer.tsx";
 import { HeaderBar } from "./components/HeaderBar.tsx";
-import { AddRepoModal, DispatchTaskModal, SimulateEventModal } from "./components/Modals.tsx";
+import {
+  AddRepoModal,
+  DispatchTaskModal,
+  RepoSettingsModal,
+  SimulateEventModal,
+  WorktreeManagerModal,
+} from "./components/Modals.tsx";
 import { SetupWizardModal } from "./components/SetupWizardModal.tsx";
 import { useI18n } from "./i18n.tsx";
 import type {
@@ -35,6 +41,8 @@ export function App() {
   const [dispatchOpen, setDispatchOpen] = useState(false);
   const [simulateOpen, setSimulateOpen] = useState(false);
   const [addRepoOpen, setAddRepoOpen] = useState(false);
+  const [repoSettingsOpen, setRepoSettingsOpen] = useState(false);
+  const [worktreesOpen, setWorktreesOpen] = useState(false);
   const [setupStatus, setSetupStatus] = useState<PublicSetupStatus | null>(null);
   const [setupOpen, setSetupOpen] = useState(false);
   const setupAutoCheckedRef = useRef(false);
@@ -106,6 +114,7 @@ export function App() {
       "outbox_queued",
       "outbox_sent",
       "outbox_failed",
+      "worktrees_gc",
     ];
 
     for (const name of eventNames) {
@@ -206,6 +215,8 @@ export function App() {
         onOpenDispatch={() => setDispatchOpen(true)}
         onOpenSimulate={() => setSimulateOpen(true)}
         onOpenAddRepo={() => setAddRepoOpen(true)}
+        onOpenRepoSettings={() => setRepoSettingsOpen(true)}
+        onOpenWorktrees={() => setWorktreesOpen(true)}
         onOpenSetup={() => setSetupOpen(true)}
       />
 
@@ -301,6 +312,24 @@ export function App() {
           setSelectedRepoId(res.repo.id);
           await refreshAll(res.repo.id);
         }}
+      />
+
+      <RepoSettingsModal
+        open={repoSettingsOpen}
+        repo={activeRepo ?? null}
+        availableEngines={health?.availableEngines ?? ["mock"]}
+        onClose={() => setRepoSettingsOpen(false)}
+        onSubmit={async (repoId, patch) => {
+          await api.patchRepo(repoId, patch);
+          await refreshAll(repoId);
+        }}
+      />
+
+      <WorktreeManagerModal
+        open={worktreesOpen}
+        repoId={activeRepo?.id}
+        onClose={() => setWorktreesOpen(false)}
+        onChanged={() => void refreshAll(selectedRepoId || undefined)}
       />
 
       <SetupWizardModal

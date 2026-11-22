@@ -12,7 +12,7 @@ An asynchronous autonomous development workflow orchestration kernel and local d
 
 - **Router + Isolated Worker Architecture**:
   - **Control Plane (`EventIntakeRouter` & `MasterAssessor`)**: Triages incoming triggers (`web`, `github_issue`, `github_pr`, `github_ci`, `cli`), enforces `off` / `observe` / `auto` operating modes, and routes follow-up comments on active `Thread`s directly to the subscribed `Ticket`.
-  - **Execution Plane (`WorkerDriver` & `GitWorktreeProvider`)**: Schedules external coding agents (`ClaudeCodeDriver` for `claude`, `CodexDriver` for `codex`, plus `MockWorkerDriver`) inside isolated `git worktree` branches. Supports native `--resume` / `exec resume` within the same engine and structured `Inline` context handover across engines (e.g., Claude implements → Codex reviews).
+  - **Execution Plane (`WorkerDriver` & `GitWorktreeProvider`)**: Schedules external coding agents (`ClaudeCodeDriver` for `claude`, `CodexDriver` for `codex`, `OpenCodeDriver` for `opencode`, plus `MockWorkerDriver`) inside isolated `git worktree` branches. Supports native `--resume` / `exec resume` / `--session` within the same engine, structured `Inline` context handover across engines (e.g., Claude implements → Codex reviews), and automatic or one-click worktree GC after terminal delivery/cancellation.
 - **Stage Pipeline Templates**: Built-in `fast` (`implement` → `rebase`), `standard` (`plan` → `implement` → `review` → `rebase`), and `strict` (with mandatory `plan_approval` and `outbox_signoff` human gates) workflows.
 - **Immutable `Mandate` Guardrails & Scope Serialization**:
   - Pre-dispatch overlap detection (`mandateScopesOverlap`) serializes tickets touching overlapping paths via `dependsOn`, while disjoint scopes execute in parallel.
@@ -46,7 +46,7 @@ super-work/
 ### Prerequisites
 - [Bun](https://bun.sh) `>= 1.3`
 - `git` (repositories managed by `super-work` must have at least an initial commit / valid `HEAD` before `git worktree add` can branch from them)
-- Optional Worker / Source CLIs on `PATH`: `claude` (Claude Code), `codex` (Codex CLI), `gh` (GitHub CLI)
+- Optional Worker / Source CLIs on `PATH`: `claude` (Claude Code), `codex` (Codex CLI), `opencode` (OpenCode CLI), `gh` (GitHub CLI)
 
 ### Commands
 
@@ -97,10 +97,11 @@ When no API key is configured, the control plane automatically uses the built-in
 
 ## REST & SSE API Summary
 
-- `GET /api/health` — Daemon health, active control-plane LLM provider, and available worker engines (`claude`, `codex`, `mock`)
-- `GET /api/repos`, `POST /api/repos`, `PATCH /api/repos/:id` — Register repos and switch `off` / `observe` / `auto` mode
+- `GET /api/health` — Daemon health, active control-plane LLM provider, available worker engines (`claude`, `codex`, `opencode`, `mock`), and worktree pool counts
+- `GET /api/repos`, `POST /api/repos`, `PATCH /api/repos/:id` — Register repos, configure per-repo preferences (template, engines, worktree cleanup), and switch `off` / `observe` / `auto` mode
 - `POST /api/triggers` — Ingest external or simulated triggers (`github_issue`, `github_pr`, `github_ci`, `cli`)
-- `GET /api/tickets`, `POST /api/tickets`, `GET /api/tickets/:id`, `POST /api/tickets/:id/message`, `POST /api/tickets/:id/cancel` — Direct task dispatch, live worktree diff inspection, and Thread Subscription follow-ups
+- `GET /api/tickets`, `POST /api/tickets`, `GET /api/tickets/:id`, `POST /api/tickets/:id/message`, `POST /api/tickets/:id/cancel`, `POST /api/tickets/:id/cleanup-worktree` — Direct task dispatch, live worktree / committed branch diff inspection, Thread Subscription follow-ups, and worktree reclamation
+- `GET /api/worktrees`, `POST /api/worktrees/gc` — Inspect active/reclaimable worktrees and run one-click garbage collection
 - `GET /api/inbox`, `POST /api/inbox/:id/resolve` — Approve or reject pending Attention Inbox decisions
 - `GET /api/tickets/:id/recall`, `GET /api/memory/search?q=...`, `GET /api/artifacts/:id` — `Chain of Recall` lineage, FTS5 search, and Spill artifact reader
 - `GET /api/outbox` — Inspect `Transactional Outbox` delivery entries

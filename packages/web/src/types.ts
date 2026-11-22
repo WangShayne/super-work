@@ -36,6 +36,7 @@ export interface RepoConfig {
   defaultTemplate: PipelineTemplateId;
   preferredImplementEngine: WorkerEngineId;
   preferredReviewEngine: WorkerEngineId;
+  autoCleanupWorktree?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -86,6 +87,7 @@ export interface Ticket {
   dependsOn: string[];
   worktreePath?: string;
   branchName?: string;
+  worktreeCleanedAt?: string;
   nativeSessions: Partial<Record<WorkerEngineId, string>>;
   activeEngine?: WorkerEngineId;
   inlineMemory: InlineMemory;
@@ -166,7 +168,28 @@ export interface HealthResponse {
     tickets: number;
     pendingInbox: number;
     pendingOutbox: number;
+    activeWorktrees?: number;
+    reclaimableWorktrees?: number;
   };
+  timestamp: string;
+}
+
+export interface ManagedWorktreeItem {
+  path: string;
+  ticketId?: string;
+  ticketTitle?: string;
+  ticketStatus?: TicketStatus;
+  repoId?: string;
+  repoName?: string;
+  branchName?: string;
+  reclaimable: boolean;
+  isOrphan: boolean;
+}
+
+export interface WorktreeGcResult {
+  removedPaths: string[];
+  cleanedTicketIds: string[];
+  skippedActiveCount: number;
   timestamp: string;
 }
 
@@ -272,6 +295,7 @@ export interface PublicSetupStatus {
     preferredReviewEngine: WorkerEngineId;
     claudeProfile?: EngineModelProfile;
     codexProfile?: EngineModelProfile;
+    opencodeProfile?: EngineModelProfile;
     updatedAt: string;
     hasApiKey: boolean;
     maskedApiKey?: string;

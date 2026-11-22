@@ -36,7 +36,8 @@ describe("CliEnvironmentScanner", () => {
         if (sub === "login status") return { exitCode: 0, stdout: "Logged in using ChatGPT", stderr: "" };
       }
       if (bin.endsWith("opencode")) {
-        return { exitCode: 0, stdout: "opencode v2.1.2", stderr: "" };
+        if (sub === "--version") return { exitCode: 0, stdout: "opencode v2.1.2", stderr: "" };
+        if (sub.startsWith("auth list")) return { exitCode: 0, stdout: "[]", stderr: "" };
       }
       if (bin.endsWith("gh")) {
         if (sub === "--version") return { exitCode: 0, stdout: "gh version 2.96.0", stderr: "" };
@@ -58,7 +59,11 @@ describe("CliEnvironmentScanner", () => {
       return { exitCode: 1, stdout: "", stderr: "unexpected" };
     };
 
+    const emptyHome = await mkdtemp(join(tmpdir(), "sw-empty-home-"));
+    tempDirs.push(emptyHome);
+
     const scanner = new CliEnvironmentScanner({
+      homeDir: emptyHome,
       runCmd: fakeRunner,
       which: (bin) => `/usr/local/bin/${bin}`,
     });
@@ -89,7 +94,11 @@ describe("CliEnvironmentScanner", () => {
       return { exitCode: 0, stdout: "1.0.0", stderr: "" };
     };
 
+    const emptyHome = await mkdtemp(join(tmpdir(), "sw-empty-home-"));
+    tempDirs.push(emptyHome);
+
     const scanner = new CliEnvironmentScanner({
+      homeDir: emptyHome,
       runCmd: fakeRunner,
       which: (bin) => (bin === "codex" ? null : `/bin/${bin}`),
     });
@@ -107,11 +116,13 @@ describe("CliEnvironmentScanner", () => {
     expect(report.recommendedImplementEngine).toBe("claude");
   });
 
-  it("extracts local default model and reasoning effort from ~/.claude/settings.json and ~/.codex/config.toml", async () => {
+  it("extracts local default model and reasoning effort from ~/.claude/settings.json, ~/.codex/config.toml, and ~/.config/opencode", async () => {
     const home = await mkdtemp(join(tmpdir(), "sw-home-"));
     tempDirs.push(home);
     await mkdir(join(home, ".claude"), { recursive: true });
     await mkdir(join(home, ".codex"), { recursive: true });
+    await mkdir(join(home, ".config", "opencode"), { recursive: true });
+    await mkdir(join(home, ".local", "state", "opencode"), { recursive: true });
 
     await writeFile(
       join(home, ".claude", "settings.json"),
@@ -128,13 +139,32 @@ describe("CliEnvironmentScanner", () => {
       ].join("\n"),
       "utf8",
     );
+    await writeFile(
+      join(home, ".config", "opencode", "opencode.json"),
+      JSON.stringify({
+        model: "openai/gpt-5.6-sol",
+        provider: { openai: { options: { apiKey: "secret-should-not-leak" } }, anthropic: {} },
+      }),
+      "utf8",
+    );
+    await writeFile(
+      join(home, ".local", "state", "opencode", "model.json"),
+      JSON.stringify({
+        recent: ["openai/gpt-5.6-sol"],
+        variant: { "openai/gpt-5.6-sol": "xhigh" },
+      }),
+      "utf8",
+    );
 
     const scanner = new CliEnvironmentScanner({
       homeDir: home,
       which: (bin) => `/usr/bin/${bin}`,
       runCmd: async (cmd) => {
-        if (cmd.includes("--json")) {
+        if (cmd[0]?.endsWith("claude") && cmd.includes("--json")) {
           return { exitCode: 0, stdout: JSON.stringify({ loggedIn: true }), stderr: "" };
+        }
+        if (cmd[0]?.endsWith("opencode") && cmd.includes("--format")) {
+          return { exitCode: 0, stdout: "[]", stderr: "" };
         }
         return { exitCode: 0, stdout: "1.0.0", stderr: "" };
       },
@@ -143,10 +173,16 @@ describe("CliEnvironmentScanner", () => {
     const report = await scanner.scanAll();
     const claude = report.tools.find((t) => t.id === "claude")!;
     const codex = report.tools.find((t) => t.id === "codex")!;
+    const opencode = report.tools.find((t) => t.id === "opencode")!;
 
     expect(claude.localDefaultModel).toBe("sonnet");
     expect(claude.localDefaultEffort).toBe("high");
     expect(codex.localDefaultModel).toBe("gpt-5.6-sol");
     expect(codex.localDefaultEffort).toBe("xhigh");
+    expect(opencode.workerSupported).toBe(true);
+    expect(opencode.authenticated).toBe(true);
+    expect(opencode.authSummary).toBe("providers: openai, anthropic");
+    expect(opencode.localDefaultModel).toBe("openai/gpt-5.6-sol");
+    expect(opencode.localDefaultEffort).toBe("xhigh");
   });
 });

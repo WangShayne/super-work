@@ -124,9 +124,13 @@ const nextConfig: SystemSetupConfig = {
   llmPreset,
   llmBaseUrl,
   llmModel,
+  llmEffort: existing?.llmEffort ?? "low",
   llmApiKey,
   preferredImplementEngine,
   preferredReviewEngine,
+  claudeProfile: existing?.claudeProfile ?? {},
+  codexProfile: existing?.codexProfile ?? {},
+  opencodeProfile: existing?.opencodeProfile ?? {},
   updatedAt: nowIso(),
 };
 await store.setSystemSetting("setup_config", nextConfig);

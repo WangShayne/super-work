@@ -51,9 +51,11 @@ export interface WorkspaceProvider {
   prepareWorkspace(ticket: Ticket, repo: RepoConfig): Promise<{ worktreePath: string; branchName: string }>;
   getChangedFiles(worktreePath: string, baseBranch: string): Promise<string[]>;
   getDiff(worktreePath: string, baseBranch: string): Promise<string>;
+  getBranchDiff(rootRepoPath: string, baseBranch: string, branchName: string): Promise<string>;
   commitAll(worktreePath: string, message: string): Promise<boolean>;
   rebaseOntoBase(worktreePath: string, baseBranch: string): Promise<{ ok: boolean; conflictSummary?: string }>;
   revertPaths(worktreePath: string, paths: string[]): Promise<void>;
+  listWorktreeDirs(): Promise<string[]>;
   cleanupWorkspace(worktreePath: string, rootRepoPath?: string): Promise<void>;
 }
 

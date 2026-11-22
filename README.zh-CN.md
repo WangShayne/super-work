@@ -12,7 +12,7 @@
 
 - **Router + 隔离 Worker 双层架构**：
   - **控制面（`EventIntakeRouter` & `MasterAssessor`）**：统一接收入站触发器（`web`、`github_issue`、`github_pr`、`github_ci`、`cli`），支持 `off` / `observe` / `auto` 三档运行模式，并通过 **Thread 订阅直通**将关联追问直接路由至活跃 `Ticket`。
-  - **执行面（`WorkerDriver` & `GitWorktreeProvider`）**：在独立的 `git worktree` 分支中调度成熟 Coding Agent（`ClaudeCodeDriver`、`CodexDriver` 以及用于全自动验证的 `MockWorkerDriver`）。同引擎续跑优先复用原生 `--resume` / `exec resume` 会话缓存，跨引擎接力（如 Claude 编码 → Codex 审查）通过结构化 `Inline` 摘要无缝衔接。
+  - **执行面（`WorkerDriver` & `GitWorktreeProvider`）**：在独立的 `git worktree` 分支中调度成熟 Coding Agent（`ClaudeCodeDriver`、`CodexDriver`、`OpenCodeDriver` 以及用于全自动验证的 `MockWorkerDriver`）。同引擎续跑优先复用原生 `--resume` / `exec resume` / `--session` 会话缓存，跨引擎接力（如 Claude 编码 → Codex 审查）通过结构化 `Inline` 摘要无缝衔接，并支持交付/取消后自动回收 Worktree 与一键 GC。
 - **阶段流水线模板（Stage Pipeline）**：内置 `fast`（`implement` → `rebase`）、`standard`（`plan` → `implement` → `review` → `rebase`）与 `strict`（强制包含人工 `plan_approval` 与 `outbox_signoff` 门禁）三种模板。
 - **不可变 `Mandate` 护栏与并发冲突预判**：
   - 派单前通过 `mandateScopesOverlap` 检测活跃任务的授权路径重合度：有重叠自动注入 `dependsOn` 串行排队，无重叠全速并行。
@@ -46,7 +46,7 @@ super-work/
 ### 前置依赖
 - [Bun](https://bun.sh) `>= 1.3`
 - `git`（被接管的本地仓库需至少有一次初始提交 / 有效 `HEAD`，否则 `git worktree add` 无法创建工作树分支）
-- 可选 Worker / 事件源 CLI（需在 `PATH` 中）：`claude`（Claude Code）、`codex`（Codex CLI）、`gh`（GitHub CLI）
+- 可选 Worker / 事件源 CLI（需在 `PATH` 中）：`claude`（Claude Code）、`codex`（Codex CLI）、`opencode`（OpenCode CLI）、`gh`（GitHub CLI）
 
 ### 常用命令
 
@@ -97,10 +97,11 @@ bun run dev:web      # 监听 5173 端口的 Vite 开发服务器（自动代理
 
 ## REST 与 SSE 接口概览
 
-- `GET /api/health` — 服务健康状态、当前控制面 LLM 提供者及可用 Worker 引擎列表（`claude`、`codex`、`mock`）
-- `GET /api/repos`、`POST /api/repos`、`PATCH /api/repos/:id` — 注册仓库及切换 `off` / `observe` / `auto` 运行模式
+- `GET /api/health` — 服务健康状态、当前控制面 LLM 提供者及可用 Worker 引擎列表（`claude`、`codex`、`opencode`、`mock`）
+- `GET /api/repos`、`POST /api/repos`、`PATCH /api/repos/:id` — 注册仓库、修改偏好设置（默认模板、引擎、自动回收策略）及切换 `off` / `observe` / `auto` 模式
 - `POST /api/triggers` — 接入外部或模拟事件触发器（`github_issue`、`github_pr`、`github_ci`、`cli`）
-- `GET /api/tickets`、`POST /api/tickets`、`GET /api/tickets/:id`、`POST /api/tickets/:id/message`、`POST /api/tickets/:id/cancel` — 直接派单、查看实时 Worktree Diff 与 Thread 订阅追问
+- `GET /api/tickets`、`POST /api/tickets`、`GET /api/tickets/:id`、`POST /api/tickets/:id/message`、`POST /api/tickets/:id/cancel`、`POST /api/tickets/:id/cleanup-worktree` — 直接派单、查看 Worktree / 分支 Diff、Thread 订阅追问与手动回收工作树
+- `GET /api/worktrees`、`POST /api/worktrees/gc` — 查看 Worktree 运行池与一键回收终态/孤儿工作树目录
 - `GET /api/inbox`、`POST /api/inbox/:id/resolve` — 审批或驳回 Attention Inbox 待决项
 - `GET /api/tickets/:id/recall`、`GET /api/memory/search?q=...`、`GET /api/artifacts/:id` — 获取 `Chain of Recall` 全链路、FTS5 记忆检索与按需读取 Spill 产物
 - `GET /api/outbox` — 查询 `Transactional Outbox` 外发队列状态

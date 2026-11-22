@@ -59,6 +59,7 @@ export function toPublicSetupStatus(
     preferredReviewEngine: scanReport.recommendedReviewEngine,
     claudeProfile: {},
     codexProfile: {},
+    opencodeProfile: {},
     updatedAt: scanReport.scannedAt,
   };
   const { llmApiKey, ...rest } = cfg;
@@ -84,13 +85,15 @@ export function createServerApp(deps: ServerAppDeps): Hono {
   app.use("/api/*", cors());
 
   app.get("/api/health", async (c) => {
-    const [repos, tickets, pendingInbox, pendingOutbox, availableEngines] = await Promise.all([
-      stateStore.listRepos(),
-      stateStore.listTickets(),
-      stateStore.listInboxItems({ status: "pending" }),
-      stateStore.listOutboxEntries({ status: "pending" }),
-      kernel.getAvailableEngines(),
-    ]);
+    const [repos, tickets, pendingInbox, pendingOutbox, availableEngines, worktrees] =
+      await Promise.all([
+        stateStore.listRepos(),
+        stateStore.listTickets(),
+        stateStore.listInboxItems({ status: "pending" }),
+        stateStore.listOutboxEntries({ status: "pending" }),
+        kernel.getAvailableEngines(),
+        kernel.inspectWorktrees(),
+      ]);
     return c.json({
       ok: true,
       llmProvider: getActiveProviderName(),
@@ -100,6 +103,8 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         tickets: tickets.length,
         pendingInbox: pendingInbox.length,
         pendingOutbox: pendingOutbox.length,
+        activeWorktrees: worktrees.filter((w) => !w.reclaimable).length,
+        reclaimableWorktrees: worktrees.filter((w) => w.reclaimable).length,
       },
       timestamp: nowIso(),
     });
@@ -160,6 +165,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       preferredReviewEngine?: WorkerEngineId;
       claudeProfile?: EngineModelProfile;
       codexProfile?: EngineModelProfile;
+      opencodeProfile?: EngineModelProfile;
     };
 
     const existing = await stateStore.getSystemSetting<SystemSetupConfig>("setup_config");
@@ -203,6 +209,10 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         body.codexProfile !== undefined
           ? cleanProfile(body.codexProfile)
           : (existing?.codexProfile ?? {}),
+      opencodeProfile:
+        body.opencodeProfile !== undefined
+          ? cleanProfile(body.opencodeProfile)
+          : (existing?.opencodeProfile ?? {}),
       updatedAt: nowIso(),
     };
 
@@ -247,6 +257,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       defaultTemplate: body.defaultTemplate ?? "standard",
       preferredImplementEngine: body.preferredImplementEngine ?? "claude",
       preferredReviewEngine: body.preferredReviewEngine ?? "codex",
+      autoCleanupWorktree: body.autoCleanupWorktree ?? true,
       createdAt: ts,
       updatedAt: ts,
     };
@@ -264,6 +275,13 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     const updated: RepoConfig = {
       ...existing,
       ...patch,
+      name: patch.name?.trim() || existing.name,
+      baseBranch: patch.baseBranch?.trim() || existing.baseBranch,
+      githubRepo:
+        patch.githubRepo !== undefined
+          ? patch.githubRepo.trim() || undefined
+          : existing.githubRepo,
+      autoCleanupWorktree: patch.autoCleanupWorktree ?? existing.autoCleanupWorktree ?? true,
       id: existing.id,
       createdAt: existing.createdAt,
       updatedAt: nowIso(),
@@ -362,9 +380,17 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     ]);
 
     let diff = "";
-    if (ticket.worktreePath && repo) {
+    if (repo) {
       try {
-        diff = await kernel.workspace.getDiff(ticket.worktreePath, repo.baseBranch);
+        if (ticket.worktreePath && existsSync(ticket.worktreePath)) {
+          diff = await kernel.workspace.getDiff(ticket.worktreePath, repo.baseBranch);
+        } else if (ticket.branchName) {
+          diff = await kernel.workspace.getBranchDiff(
+            repo.rootPath,
+            repo.baseBranch,
+            ticket.branchName,
+          );
+        }
       } catch {
         diff = "";
       }
@@ -396,6 +422,33 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     const body = (await c.req.json().catch(() => ({}))) as { reason?: string };
     const ticket = await kernel.cancelTicket(id, body.reason);
     return c.json({ ticket });
+  });
+
+  app.post("/api/tickets/:id/cleanup-worktree", async (c) => {
+    const id = c.req.param("id");
+    try {
+      const ticket = await kernel.cleanupTicketWorktree(id);
+      if (!ticket) {
+        return c.json({ error: "Ticket not found" }, 404);
+      }
+      return c.json({ ticket });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  // --- Worktree Lifecycle & GC ---
+  app.get("/api/worktrees", async (c) => {
+    const repoId = c.req.query("repoId") || undefined;
+    const items = await kernel.inspectWorktrees(repoId);
+    return c.json({ items });
+  });
+
+  app.post("/api/worktrees/gc", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { repoId?: string };
+    const result = await kernel.gcWorktrees({ repoId: body.repoId });
+    const items = await kernel.inspectWorktrees(body.repoId);
+    return c.json({ result, items });
   });
 
   // --- Attention Inbox ---

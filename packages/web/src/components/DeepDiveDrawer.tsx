@@ -9,6 +9,7 @@ import {
   Send,
   Shield,
   Terminal,
+  Trash2,
   X,
 } from "lucide-react";
 import { api } from "../api.ts";
@@ -104,6 +105,13 @@ export function DeepDiveDrawer({
     onRefresh();
   };
 
+  const handleCleanupWorktree = async () => {
+    await api.cleanupTicketWorktree(ticketId);
+    const d = await api.getTicketDetail(ticketId);
+    setDetail(d);
+    onRefresh();
+  };
+
   const handleLoadArtifact = async (id: string) => {
     if (artifactContent?.id === id) {
       setArtifactContent(null);
@@ -142,6 +150,25 @@ export function DeepDiveDrawer({
                       {ticket.branchName}
                     </span>
                   )}
+                  {ticket.worktreePath ? (
+                    <span className="inline-flex items-center gap-1.5 text-[10px] font-mono px-2 py-0.5 rounded bg-sky-500/10 border border-sky-500/30 text-sky-300">
+                      {t("drawer.worktreeActive")}
+                      {["delivered", "failed", "cancelled"].includes(ticket.status) && (
+                        <button
+                          type="button"
+                          onClick={() => void handleCleanupWorktree()}
+                          className="inline-flex items-center gap-1 pl-1.5 border-l border-sky-500/30 text-amber-300 hover:text-amber-200"
+                        >
+                          <Trash2 className="w-2.5 h-2.5" />
+                          {t("drawer.reclaimWorktree")}
+                        </button>
+                      )}
+                    </span>
+                  ) : ticket.worktreeCleanedAt ? (
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-500">
+                      {t("drawer.worktreeCleaned")}
+                    </span>
+                  ) : null}
                 </>
               )}
             </div>

@@ -9,7 +9,7 @@ This guide walks through first-run CLI environment scanning, Control-Plane LLM c
 ## 1. First-Run Setup: CLI Environment Scan & Control-Plane LLM
 
 `super-work` cleanly separates the **Control Plane** from the **Execution Plane**:
-- **Execution Plane (Workers)**: Schedules locally installed coding agent CLIs (`claude`, `codex`, etc.) inside isolated `git worktree` sandboxes.
+- **Execution Plane (Workers)**: Schedules locally installed coding agent CLIs (`claude`, `codex`, `opencode`, etc.) inside isolated `git worktree` sandboxes.
 - **Control Plane (Router / Watchdog)**: Handles event triage, Mandate scoping, and Watchdog L2 semantic recovery.
 
 ### Option A: Web First-Run Setup Wizard (Recommended)
@@ -19,8 +19,8 @@ This guide walks through first-run CLI environment scanning, Control-Plane LLM c
    bun run dev
    ```
 2. On first launch (when `initialized` is false), the **First-Run CLI Scan & LLM Setup** wizard opens automatically. You can also reopen it anytime via the **Env & LLM** button in the top-right header:
-   - **Local CLI Toolchain Scan**: Probes `claude`, `codex`, `opencode`, `gh`, `git`, and `bun` for binary paths, versions, authentication state (`Ready` / `Not Logged In` / `Not Found`), and local model/effort defaults from `~/.claude/settings.json` and `~/.codex/config.toml`.
-   - **Default Engines & CLI Model/Effort Profiles**: Configure global `model` and `effort` (`low` / `medium` / `high` / `xhigh` / `max`) independently for `Claude Code` and `Codex CLI` without modifying your local config files; **Dispatch Task** also supports per-task model and effort overrides.
+   - **Local CLI Toolchain Scan**: Probes `claude`, `codex`, `opencode`, `gh`, `git`, and `bun` for binary paths, versions, authentication state (`Ready` / `Not Logged In` / `Not Found`), and local model/effort defaults from `~/.claude/settings.json`, `~/.codex/config.toml`, and `~/.config/opencode/opencode.json`.
+   - **Default Engines & CLI Model/Effort Profiles**: Configure global `model` and `effort` (`low` / `medium` / `high` / `xhigh` / `max`) independently for `Claude Code`, `Codex CLI`, and `OpenCode CLI` (`provider/model#variant`) without modifying your local config files; **Dispatch Task** also supports per-task model and effort overrides.
    - **Control-Plane LLM**: Pick one of five presets, click **Test Connection** to verify reachability and latency, and click **Save & Activate** (hot-swaps immediately in memory without restarting the server):
 
 | Preset | Best For | Requirements & Cost |
@@ -48,12 +48,12 @@ bun run setup -- --auto
 ## 2. Interface Tour & Core Concepts
 
 ### 1. Header Control Bar
-- **Repository Switcher & `+` Button**: Automatically binds the current Git repository (and parses `owner/repo` from `origin` for GitHub integration). Register multiple repositories anytime.
+- **Repository Switcher, `+` & Preferences Button**: Automatically binds the current Git repository; click **Repository preferences** next to the selector to configure per-repo default pipeline template, preferred implement/review engines, base branch, GitHub binding, and **Auto-reclaim Worktree**.
 - **Operating Mode Toggle**:
   - `OFF`: Ingests triggers without creating tickets.
   - `OBSERVE` (Recommended to start): Proposes tickets into the **Attention Inbox** for human approval before touching any code.
   - `AUTO`: Dispatches qualifying triggers straight to worker execution, interrupting only on policy gates or Watchdog escalations.
-- **Live Status Pills**: Displays `Live SSE`, detected worker engines, `Watchdog`, `Outbox` queue count, **Setup**, and `中文 / EN` language switch.
+- **Live Status Pills**: Displays `Live Sync`, `Control Brain`, `Agent Roles`, `Anti-Stall Watchdog`, `PR Delivery Queue`, and **`Worktrees` (click to inspect active/reclaimable directories and run one-click GC)**, alongside **Env & LLM** and the `中文 / EN` language switch.
 
 ### 2. Three-Tier Navigation
 1. **Attention Inbox**: High-signal queue aggregating `OBSERVE PROPOSAL`, `PLAN APPROVAL`, `MANDATE VIOLATION`, `WATCHDOG ESCALATION`, `MERGE CONFLICT`, and `PR SIGNOFF`.
@@ -108,4 +108,4 @@ bun run setup -- --auto
    - GitHub CLI: run `gh auth login`
    - Then click **Setup → Rescan** in the Web dashboard.
 4. **Where are runtime databases, worktrees, and Spill artifacts stored?**
-   - Everything lives inside `.super-work/` (or `SUPER_WORK_DATA_DIR`), which is ignored by `.gitignore`.
+   - Everything lives inside `.super-work/` (or `SUPER_WORK_DATA_DIR`), which is ignored by `.gitignore`. By default, delivered and cancelled worktree directories are automatically reclaimed while keeping committed branches viewable, or click **Worktrees** in the header strip to run manual GC.

@@ -121,12 +121,14 @@ describe("@super-work/server REST + SSE API", () => {
     const ticketId = inboxData.items[0]!.ticketId;
     const detailRes = await app.request(`/api/tickets/${ticketId}`);
     const detail = (await detailRes.json()) as {
-      ticket: { status: string };
+      ticket: { status: string; worktreePath?: string; worktreeCleanedAt?: string };
       stageRuns: unknown[];
       artifacts: Array<{ id: string }>;
       diff: string;
     };
     expect(detail.ticket.status).toBe("delivered");
+    expect(detail.ticket.worktreePath).toBeUndefined();
+    expect(detail.ticket.worktreeCleanedAt).toBeDefined();
     expect(detail.stageRuns.length).toBeGreaterThanOrEqual(2);
     expect(detail.artifacts.length).toBeGreaterThanOrEqual(1);
     expect(detail.diff).toContain("src/metrics");
@@ -142,6 +144,119 @@ describe("@super-work/server REST + SSE API", () => {
     const outbox = (await outboxRes.json()) as { entries: Array<{ status: string }> };
     expect(outbox.entries[0]?.status).toBe("sent");
 
+    stateStore.close();
+  });
+
+  it("supports per-repo preferences update and manual Worktree GC when autoCleanupWorktree is disabled", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sw-gc-api-"));
+    tempDirs.push(dir);
+    const repoDir = await createTempGitRepo(dir);
+
+    const stateStore = new SqliteStateStore(join(dir, "state.db"));
+    const artifactStore = new FsArtifactStore(join(dir, "artifacts"));
+    const workspace = new GitWorktreeProvider(join(dir, "worktrees"));
+    const llm = new HeuristicControlLLM();
+    const kernel = new SuperWorkKernel({
+      stateStore,
+      artifactStore,
+      workspace,
+      llm,
+      drivers: [new MockWorkerDriver({ engine: "mock", stepDelayMs: 1 })],
+      outboxExecutor: {
+        async execute(_entry, _repo, ticket) {
+          return { mode: "local_branch_ready", branchName: ticket.branchName };
+        },
+      },
+    });
+    const app = createServerApp({ kernel, stateStore, artifactStore, llmProviderName: llm.providerName });
+
+    const createRepoRes = await app.request("/api/repos", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: "repo_gc",
+        name: "gc-demo",
+        rootPath: repoDir,
+        baseBranch: "main",
+        mode: "auto",
+        defaultTemplate: "fast",
+        preferredImplementEngine: "mock",
+        preferredReviewEngine: "mock",
+        autoCleanupWorktree: false,
+      }),
+    });
+    expect(createRepoRes.status).toBe(201);
+
+    const patchRes = await app.request("/api/repos/repo_gc", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        defaultTemplate: "fast",
+        autoCleanupWorktree: false,
+        githubRepo: "  ",
+      }),
+    });
+    expect(patchRes.status).toBe(200);
+    const patched = (await patchRes.json()) as {
+      repo: { autoCleanupWorktree?: boolean; githubRepo?: string };
+    };
+    expect(patched.repo.autoCleanupWorktree).toBe(false);
+    expect(patched.repo.githubRepo).toBeUndefined();
+
+    const createTicketRes = await app.request("/api/tickets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        repoId: "repo_gc",
+        title: "Keep worktree until GC",
+        description: "Test manual GC",
+        template: "fast",
+        allowedPaths: ["src/**"],
+        preferredEngine: "mock",
+      }),
+    });
+    expect(createTicketRes.status).toBe(201);
+    const { ticket } = (await createTicketRes.json()) as { ticket: { id: string } };
+
+    await kernel.runUntilIdle();
+    const deliveredTicket = await stateStore.getTicket(ticket.id);
+    expect(deliveredTicket?.status).toBe("delivered");
+    expect(deliveredTicket?.worktreePath).toBeDefined();
+
+    const listRes = await app.request("/api/worktrees?repoId=repo_gc");
+    expect(listRes.status).toBe(200);
+    const listed = (await listRes.json()) as {
+      items: Array<{ ticketId?: string; reclaimable: boolean; isOrphan: boolean }>;
+    };
+    expect(listed.items).toHaveLength(1);
+    expect(listed.items[0]).toMatchObject({
+      ticketId: ticket.id,
+      reclaimable: true,
+      isOrphan: false,
+    });
+
+    const healthRes = await app.request("/api/health");
+    const health = (await healthRes.json()) as {
+      counts: { reclaimableWorktrees?: number; activeWorktrees?: number };
+    };
+    expect(health.counts.reclaimableWorktrees).toBe(1);
+    expect(health.counts.activeWorktrees).toBe(0);
+
+    const gcRes = await app.request("/api/worktrees/gc", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repoId: "repo_gc" }),
+    });
+    expect(gcRes.status).toBe(200);
+    const gcJson = (await gcRes.json()) as {
+      result: { removedPaths: string[]; cleanedTicketIds: string[] };
+      items: unknown[];
+    };
+    expect(gcJson.result.removedPaths).toHaveLength(1);
+    expect(gcJson.result.cleanedTicketIds).toEqual([ticket.id]);
+    expect(gcJson.items).toHaveLength(0);
+
+    await kernel.stop();
     stateStore.close();
   });
 });

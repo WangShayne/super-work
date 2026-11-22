@@ -59,6 +59,8 @@ export function SetupWizardModal({
   const [claudeEffort, setClaudeEffort] = useState<ReasoningEffort | "">("");
   const [codexModel, setCodexModel] = useState("");
   const [codexEffort, setCodexEffort] = useState<ReasoningEffort | "">("");
+  const [opencodeModel, setOpencodeModel] = useState("");
+  const [opencodeEffort, setOpencodeEffort] = useState<ReasoningEffort | "">("");
 
   const [scanning, setScanning] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -81,6 +83,8 @@ export function SetupWizardModal({
     setClaudeEffort(cfg.claudeProfile?.effort ?? "");
     setCodexModel(cfg.codexProfile?.model ?? "");
     setCodexEffort(cfg.codexProfile?.effort ?? "");
+    setOpencodeModel(cfg.opencodeProfile?.model ?? "");
+    setOpencodeEffort(cfg.opencodeProfile?.effort ?? "");
     setApiKey("");
     setTestResult(null);
   }, [open, setupStatus]);
@@ -94,6 +98,7 @@ export function SetupWizardModal({
     availableEngines.length > 0 ? availableEngines : ["claude", "codex", "mock"];
   const claudeScan = scanReport?.tools.find((tool) => tool.id === "claude");
   const codexScan = scanReport?.tools.find((tool) => tool.id === "codex");
+  const opencodeScan = scanReport?.tools.find((tool) => tool.id === "opencode");
 
   const handleSelectPreset = (next: LlmProviderPreset) => {
     setPreset(next);
@@ -153,6 +158,10 @@ export function SetupWizardModal({
         codexProfile: {
           model: codexModel.trim() || undefined,
           effort: codexEffort || undefined,
+        },
+        opencodeProfile: {
+          model: opencodeModel.trim() || undefined,
+          effort: opencodeEffort || undefined,
         },
       });
       await onSaved(updated);
@@ -337,7 +346,7 @@ export function SetupWizardModal({
                 <div className="font-semibold text-zinc-200">{t("setup.workerProfilesTitle")}</div>
                 <p className="text-[11px] text-zinc-400 mt-0.5">{t("setup.workerProfilesHint")}</p>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
                 <div className="rounded-lg border border-zinc-800 bg-zinc-950/70 p-3 space-y-2.5">
                   <div className="font-medium text-zinc-200">{t("setup.claudeProfileTitle")}</div>
                   <div>
@@ -407,6 +416,42 @@ export function SetupWizardModal({
                       <option value="medium">{t("setup.effort.medium")}</option>
                       <option value="high">{t("setup.effort.high")}</option>
                       <option value="xhigh">{t("setup.effort.xhigh")}</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-zinc-800 bg-zinc-950/70 p-3 space-y-2.5">
+                  <div className="font-medium text-zinc-200">{t("setup.opencodeProfileTitle")}</div>
+                  <div>
+                    <label className="block text-zinc-400 mb-1">{t("setup.modelLabel")}</label>
+                    <input
+                      value={opencodeModel}
+                      onChange={(e) => setOpencodeModel(e.target.value)}
+                      placeholder={
+                        opencodeScan?.localDefaultModel
+                          ? `${t("setup.followLocalDefault")} (${opencodeScan.localDefaultModel})`
+                          : "provider/model"
+                      }
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 font-mono text-zinc-100 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-zinc-400 mb-1">{t("setup.effortLabel")}</label>
+                    <select
+                      value={opencodeEffort}
+                      onChange={(e) => setOpencodeEffort(e.target.value as ReasoningEffort | "")}
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-zinc-100"
+                    >
+                      <option value="">
+                        {opencodeScan?.localDefaultEffort
+                          ? `${t("setup.effort.inherit")} (${opencodeScan.localDefaultEffort})`
+                          : t("setup.effort.inherit")}
+                      </option>
+                      <option value="low">{t("setup.effort.low")}</option>
+                      <option value="medium">{t("setup.effort.medium")}</option>
+                      <option value="high">{t("setup.effort.high")}</option>
+                      <option value="xhigh">{t("setup.effort.xhigh")}</option>
+                      <option value="max">{t("setup.effort.max")}</option>
                     </select>
                   </div>
                 </div>

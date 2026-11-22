@@ -42,6 +42,7 @@ export interface RepoConfig {
   defaultTemplate: PipelineTemplateId;
   preferredImplementEngine: WorkerEngineId;
   preferredReviewEngine: WorkerEngineId;
+  autoCleanupWorktree?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -120,6 +121,7 @@ export interface Ticket {
   dependsOn: string[];
   worktreePath?: string;
   branchName?: string;
+  worktreeCleanedAt?: string;
   nativeSessions: Partial<Record<WorkerEngineId, string>>;
   preferredEngine?: WorkerEngineId;
   activeEngine?: WorkerEngineId;
@@ -324,7 +326,27 @@ export type KernelEvent =
   | { type: "inbox_resolved"; item: InboxItem; timestamp: string }
   | { type: "outbox_queued"; entry: OutboxEntry; timestamp: string }
   | { type: "outbox_sent"; entry: OutboxEntry; timestamp: string }
-  | { type: "outbox_failed"; entry: OutboxEntry; timestamp: string };
+  | { type: "outbox_failed"; entry: OutboxEntry; timestamp: string }
+  | { type: "worktrees_gc"; result: WorktreeGcResult; timestamp: string };
+
+export interface ManagedWorktreeItem {
+  path: string;
+  ticketId?: string;
+  ticketTitle?: string;
+  ticketStatus?: TicketStatus;
+  repoId?: string;
+  repoName?: string;
+  branchName?: string;
+  reclaimable: boolean;
+  isOrphan: boolean;
+}
+
+export interface WorktreeGcResult {
+  removedPaths: string[];
+  cleanedTicketIds: string[];
+  skippedActiveCount: number;
+  timestamp: string;
+}
 
 export type CliToolId = "claude" | "codex" | "opencode" | "gh" | "git" | "bun";
 
@@ -367,6 +389,7 @@ export interface SystemSetupConfig {
   preferredReviewEngine: WorkerEngineId;
   claudeProfile?: EngineModelProfile;
   codexProfile?: EngineModelProfile;
+  opencodeProfile?: EngineModelProfile;
   updatedAt: string;
 }
 

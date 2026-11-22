@@ -1,3 +1,4 @@
+import { basename, resolve } from "node:path";
 import { validateChangedFilesAgainstMandate } from "./mandate.ts";
 import { MemoryManager } from "./memory.ts";
 import { OutboxProcessor } from "./outbox.ts";
@@ -24,6 +25,7 @@ import { EventIntakeRouter, type IngestResult } from "./router.ts";
 import type {
   InboxItem,
   KernelEvent,
+  ManagedWorktreeItem,
   OutboxEntry,
   RepoConfig,
   StageKind,
@@ -34,8 +36,9 @@ import type {
   WatchdogSignal,
   WorkerEngineId,
   WorkerStreamEvent,
+  WorktreeGcResult,
 } from "./types.ts";
-import { newId, nowIso } from "./utils.ts";
+import { isTerminalTicketStatus, newId, nowIso } from "./utils.ts";
 import { DEFAULT_WATCHDOG_CONFIG, TwoTierWatchdog } from "./watchdog.ts";
 
 export const DEFAULT_KERNEL_CONFIG: KernelConfig = {
@@ -99,6 +102,11 @@ export class SuperWorkKernel {
       deps.outboxExecutor,
       emit,
       this.config.outboxMaxAttempts,
+      async (deliveredTicket, repo) => {
+        if (repo.autoCleanupWorktree !== false && deliveredTicket.worktreePath) {
+          await this.cleanupTicketWorktree(deliveredTicket.id);
+        }
+      },
     );
   }
 
@@ -197,6 +205,10 @@ export class SuperWorkKernel {
     if (ctrl) {
       ctrl.abort("cancelled_by_user");
     }
+    const activeRun = this.activeTicketRuns.get(ticketId);
+    if (activeRun) {
+      await Promise.race([activeRun, new Promise((r) => setTimeout(r, 500))]).catch(() => {});
+    }
     const ticket = await this.stateStore.getTicket(ticketId);
     if (!ticket) throw new Error(`Ticket not found: ${ticketId}`);
 
@@ -208,7 +220,118 @@ export class SuperWorkKernel {
     };
     await this.stateStore.saveTicket(updated);
     this.emitEvent({ type: "ticket_updated", ticket: updated, timestamp: updated.updatedAt });
+
+    const repo = await this.stateStore.getRepo(updated.repoId);
+    if (repo?.autoCleanupWorktree !== false && updated.worktreePath) {
+      return (await this.cleanupTicketWorktree(ticketId)) ?? updated;
+    }
     return updated;
+  }
+
+  async cleanupTicketWorktree(ticketId: string): Promise<Ticket | null> {
+    const ticket = await this.stateStore.getTicket(ticketId);
+    if (!ticket) return null;
+
+    if (!isTerminalTicketStatus(ticket.status) || this.activeTicketRuns.has(ticketId)) {
+      throw new Error(
+        `Cannot cleanup worktree for non-terminal ticket ${ticketId} (${ticket.status})`,
+      );
+    }
+
+    const repo = await this.stateStore.getRepo(ticket.repoId);
+    if (ticket.worktreePath) {
+      await this.workspace.cleanupWorkspace(ticket.worktreePath, repo?.rootPath);
+    }
+
+    const ts = nowIso();
+    const updated: Ticket = {
+      ...ticket,
+      worktreePath: undefined,
+      worktreeCleanedAt: ts,
+      updatedAt: ts,
+    };
+    await this.stateStore.saveTicket(updated);
+    this.emitEvent({ type: "ticket_updated", ticket: updated, timestamp: ts });
+    return updated;
+  }
+
+  async inspectWorktrees(repoId?: string): Promise<ManagedWorktreeItem[]> {
+    const [dirs, tickets, repos] = await Promise.all([
+      this.workspace.listWorktreeDirs(),
+      this.stateStore.listTickets(),
+      this.stateStore.listRepos(),
+    ]);
+    const reposById = new Map(repos.map((r) => [r.id, r]));
+    const ticketsByPath = new Map<string, Ticket>();
+    const ticketsById = new Map<string, Ticket>();
+    for (const t of tickets) {
+      ticketsById.set(t.id, t);
+      if (t.worktreePath) {
+        ticketsByPath.set(resolve(t.worktreePath), t);
+      }
+    }
+
+    const items: ManagedWorktreeItem[] = [];
+    for (const dir of dirs) {
+      const resolvedDir = resolve(dir);
+      const matched = ticketsByPath.get(resolvedDir) ?? ticketsById.get(basename(resolvedDir));
+      if (matched) {
+        const repo = reposById.get(matched.repoId);
+        const item: ManagedWorktreeItem = {
+          path: dir,
+          ticketId: matched.id,
+          ticketTitle: matched.title,
+          ticketStatus: matched.status,
+          repoId: matched.repoId,
+          repoName: repo?.name,
+          branchName: matched.branchName,
+          reclaimable:
+            isTerminalTicketStatus(matched.status) && !this.activeTicketRuns.has(matched.id),
+          isOrphan: false,
+        };
+        if (!repoId || item.repoId === repoId) {
+          items.push(item);
+        }
+      } else {
+        items.push({
+          path: dir,
+          reclaimable: true,
+          isOrphan: true,
+        });
+      }
+    }
+    return items;
+  }
+
+  async gcWorktrees(options?: { repoId?: string }): Promise<WorktreeGcResult> {
+    const items = await this.inspectWorktrees(options?.repoId);
+    const removedPaths: string[] = [];
+    const cleanedTicketIds: string[] = [];
+    let skippedActiveCount = 0;
+
+    for (const item of items) {
+      if (!item.reclaimable) {
+        skippedActiveCount += 1;
+        continue;
+      }
+      if (item.ticketId) {
+        await this.cleanupTicketWorktree(item.ticketId);
+        removedPaths.push(item.path);
+        cleanedTicketIds.push(item.ticketId);
+      } else {
+        await this.workspace.cleanupWorkspace(item.path);
+        removedPaths.push(item.path);
+      }
+    }
+
+    const result: WorktreeGcResult = {
+      removedPaths,
+      cleanedTicketIds,
+      skippedActiveCount,
+      timestamp: nowIso(),
+    };
+    this.emitEvent({ type: "worktrees_gc", result, timestamp: result.timestamp });
+    return result;
   }
 
   async resolveInboxItem(
@@ -460,7 +583,9 @@ export class SuperWorkKernel {
         ? setupConfig?.claudeProfile
         : driver.engine === "codex"
           ? setupConfig?.codexProfile
-          : undefined;
+          : driver.engine === "opencode"
+            ? setupConfig?.opencodeProfile
+            : undefined;
     const canApplyModelOverride = Boolean(
       ticket.modelOverride &&
         stage !== "review" &&

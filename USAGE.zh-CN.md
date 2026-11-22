@@ -9,7 +9,7 @@
 ## 一、 首次运行：CLI 自动扫描与控制面 LLM 配置
 
 `super-work` 采用**控制面 + 执行面**分离架构：
-- **执行面（Worker）**：直接复用本机安装的 Coding Agent CLI（`claude`、`codex` 等）。
+- **执行面（Worker）**：直接复用本机安装的 Coding Agent CLI（`claude`、`codex`、`opencode` 等）。
 - **控制面（Router / Watchdog）**：负责新事件分诊、任务作用域划分以及异常卡死诊断。
 
 ### 方式 A：Web 指挥舱可视化向导（推荐）
@@ -19,8 +19,8 @@
    bun run dev
    ```
 2. 首次启动且尚未完成初始化时，系统会自动弹出 **「首次运行环境扫描与模型配置」** 向导（此后也可随时点击右上角 **环境与模型** 按钮再次打开）：
-   - **本机 CLI 工具链扫描**：自动探测 `claude`、`codex`、`opencode`、`gh`、`git`、`bun` 的安装路径、版本、登录认证状态（`已就绪` / `未登录` / `未安装`）以及 `~/.claude/settings.json` / `~/.codex/config.toml` 中的本机默认模型与思考强度。
-   - **默认引擎与 CLI 模型/强度档位**：分别为 `Claude Code` 与 `Codex CLI` 配置全局默认模型和思考强度（`low` / `medium` / `high` / `xhigh` / `max`）；留空则沿用本机全局配置文件，填写后由 `super-work` 在派单时透传 `--model` / `--effort`（或 `-m` / `-c model_reasoning_effort`），**派发任务弹窗也支持对单个任务做临时覆盖**。
+   - **本机 CLI 工具链扫描**：自动探测 `claude`、`codex`、`opencode`、`gh`、`git`、`bun` 的安装路径、版本、登录认证状态（`已就绪` / `未登录` / `未安装`）以及 `~/.claude/settings.json`、`~/.codex/config.toml`、`~/.config/opencode/opencode.json` 中的本机默认模型与思考强度。
+   - **默认引擎与 CLI 模型/强度档位**：分别为 `Claude Code`、`Codex CLI` 与 `OpenCode CLI` 配置全局默认模型和思考强度（`low` / `medium` / `high` / `xhigh` / `max`）；留空则沿用本机全局配置文件，填写后由 `super-work` 在派单时透传 `--model` / `--effort`、`-m` / `-c model_reasoning_effort` 或 `provider/model#variant`，**派发任务弹窗也支持对单个任务做临时覆盖**。
    - **控制面大模型配置**：从五种方案中任选其一，点击 **「测试连接」** 验证延迟与连通性，再点击 **「完成配置并启用」**（保存后立即热生效，无需重启进程）：
 
 | 方案 | 适用场景 | 费用与依赖 |
@@ -48,12 +48,12 @@ bun run setup -- --auto
 ## 二、 界面三层导航与核心概念速查
 
 ### 1. 顶部控制栏
-- **仓库切换与 `+` 注册按钮**：自动识别当前工作区 Git 仓库并绑定远程 `owner/repo`；可注册多个本地 Git 仓库统一编排。
+- **仓库切换、`+` 注册与偏好设置按钮**：自动识别当前工作区 Git 仓库并绑定远程 `owner/repo`；点击仓库旁的 **「偏好设置」** 图标可按仓库单独调整默认流水线模板（`fast`/`standard`/`strict`）、首选编码/审查引擎、基准分支以及 **交付/取消后自动回收 Worktree** 开关。
 - **自治模式开关**：
   - `关闭 (off)`：仅记录事件触发器，不生成任务。
   - `观察 (observe)`（推荐初上手）：收到外部事件后仅**拟单**放入「决策收件箱」等你点头确认，绝不私自改代码。
   - `自动 (auto)`：收到高信噪比事件后直接入队执行，仅在触发审批门禁或异常升级时通知你。
-- **状态指示灯**：实时展示 `实时流已连接`（SSE）、可用引擎徽章、`看门狗`、`发件箱` 队列计数以及 `设置` / `中文 / EN` 切换。
+- **状态指示灯**：实时展示 `实时同步`（SSE）、`总控大脑`、`Agent 分工`、`防卡死巡检`、`PR 交付队列` 与 **`工作树池`（点击可查看在跑/可回收目录并一键 GC 清理）**，以及 `环境与模型` / `中文 / EN` 切换。
 
 ### 2. 三层信息结构
 1. **决策收件箱（Attention Inbox）**：聚合 `观察模式拟单`、`方案审批门禁`、`越界授权拦截`、`看门狗升级告警`、`合并冲突待解`、`PR 交付签发` 六类高信噪比决策。
@@ -109,4 +109,4 @@ bun run setup -- --auto
    - GitHub CLI：在终端运行 `gh auth login`
    - 完成后在网页端点击 **设置 → 重新扫描** 即可更新为「已就绪」。
 4. **在哪里查看或清理工作树与数据库？**
-   - 所有运行时状态库（`super-work.db`）、Spill 产物与临时 `worktrees/` 均隔离存放在 `.super-work/`（或 `SUPER_WORK_DATA_DIR` 指定目录）下，且已被 `.gitignore` 忽略。
+   - 所有运行时状态库（`super-work.db`）、Spill 产物与临时 `worktrees/` 均隔离存放在 `.super-work/`（或 `SUPER_WORK_DATA_DIR` 指定目录）下，且已被 `.gitignore` 忽略；开启仓库的「自动回收 Worktree」后，任务交付或取消时会自动回收工作树目录（仍保留分支 Diff 可回看），也可以点击状态栏 **「工作树池」** 一键 GC 清理历史或孤儿目录。

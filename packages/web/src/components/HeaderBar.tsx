@@ -11,6 +11,7 @@ import {
   Send,
   Settings,
   ShieldCheck,
+  SlidersHorizontal,
 } from "lucide-react";
 import {
   formatEngineDisplayName,
@@ -31,6 +32,8 @@ interface HeaderBarProps {
   onOpenDispatch: () => void;
   onOpenSimulate: () => void;
   onOpenAddRepo: () => void;
+  onOpenRepoSettings: () => void;
+  onOpenWorktrees: () => void;
   onOpenSetup: () => void;
 }
 
@@ -129,6 +132,8 @@ export function HeaderBar({
   onOpenDispatch,
   onOpenSimulate,
   onOpenAddRepo,
+  onOpenRepoSettings,
+  onOpenWorktrees,
   onOpenSetup,
 }: HeaderBarProps) {
   const { locale, t, toggleLocale } = useI18n();
@@ -146,6 +151,8 @@ export function HeaderBar({
     formatEngineDisplayName(e, locale),
   );
   const llmDisplay = formatLlmProviderDisplay(health?.llmProvider, locale);
+  const activeWorktrees = health?.counts.activeWorktrees ?? 0;
+  const reclaimableWorktrees = health?.counts.reclaimableWorktrees ?? 0;
 
   return (
     <header className="border-b border-zinc-800/80 bg-zinc-950/95 backdrop-blur sticky top-0 z-20">
@@ -192,6 +199,14 @@ export function HeaderBar({
               className="p-1.5 rounded-md border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-100 hover:border-zinc-700 transition"
             >
               <Plus className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={onOpenRepoSettings}
+              disabled={!activeRepo}
+              title={t("header.repoSettingsTitle")}
+              className="p-1.5 rounded-md border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-100 hover:border-zinc-700 disabled:opacity-40 transition"
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5" />
             </button>
           </div>
 
@@ -337,6 +352,34 @@ export function HeaderBar({
           align="right"
           tooltipTitle={t("strip.outbox.label")}
           tooltipBody={t("strip.outbox.desc")}
+        />
+
+        <StatusCapsule
+          icon={
+            <FolderGit2
+              className={`w-3 h-3 ${
+                reclaimableWorktrees > 0 ? "text-amber-400" : "text-sky-400"
+              }`}
+            />
+          }
+          label={t("strip.worktrees.label")}
+          value={
+            reclaimableWorktrees > 0
+              ? `${reclaimableWorktrees} ${t("strip.worktrees.reclaimableSuffix")}`
+              : activeWorktrees > 0
+                ? `${activeWorktrees} ${t("strip.worktrees.activeSuffix")}`
+                : t("strip.worktrees.clean")
+          }
+          extra={
+            reclaimableWorktrees > 0 && activeWorktrees > 0
+              ? `(${activeWorktrees} ${t("strip.worktrees.activeSuffix")})`
+              : undefined
+          }
+          tone={reclaimableWorktrees > 0 ? "warn" : "neutral"}
+          align="right"
+          onClick={onOpenWorktrees}
+          tooltipTitle={t("strip.worktrees.label")}
+          tooltipBody={t("strip.worktrees.desc")}
         />
       </div>
     </header>

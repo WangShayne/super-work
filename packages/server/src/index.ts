@@ -13,6 +13,7 @@ import {
   GitWorktreeProvider,
   MockWorkerDriver,
   MutableControlPlaneLLM,
+  OpenCodeDriver,
   SqliteStateStore,
   buildControlPlaneLLMFromSetup,
   runGit,
@@ -68,6 +69,7 @@ export async function startDaemon(options?: {
   const drivers = [
     new ClaudeCodeDriver(),
     new CodexDriver(),
+    new OpenCodeDriver(),
     new MockWorkerDriver(),
   ];
 
@@ -106,6 +108,7 @@ export async function startDaemon(options?: {
           savedSetup?.preferredImplementEngine ?? scanReport.recommendedImplementEngine,
         preferredReviewEngine:
           savedSetup?.preferredReviewEngine ?? scanReport.recommendedReviewEngine,
+        autoCleanupWorktree: true,
         createdAt: ts,
         updatedAt: ts,
       });
