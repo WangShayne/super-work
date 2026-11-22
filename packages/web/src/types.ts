@@ -4,6 +4,42 @@ export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 export type PipelineTemplateId = "fast" | "standard" | "strict";
 export type StageKind = "plan" | "implement" | "review" | "rebase";
 
+// Plugin types mirror @super-work/core (web does not depend on core).
+export type PluginKind = "driver" | "trigger" | "outbox" | "llm" | "tool";
+export type PluginState = "loaded" | "enabled" | "disabled" | "failed";
+
+export interface PluginConfigProperty {
+  type: "string" | "number" | "boolean" | "array" | "object";
+  description?: string;
+  default?: unknown;
+  enum?: readonly (string | number)[];
+  secret?: boolean;
+}
+
+export interface PluginConfigSchema {
+  type: "object";
+  properties: Record<string, PluginConfigProperty>;
+  required?: readonly string[];
+}
+
+export interface PluginManifest {
+  id: string;
+  name: string;
+  version: string;
+  kind: PluginKind;
+  capabilities: readonly string[];
+  configSchema?: PluginConfigSchema;
+  description?: string;
+}
+
+export interface PluginStatus {
+  manifest: PluginManifest;
+  state: PluginState;
+  config?: Record<string, unknown>;
+  error?: string;
+  updatedAt: string;
+}
+
 export interface EngineModelProfile {
   model?: string;
   effort?: ReasoningEffort;
