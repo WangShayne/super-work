@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Inbox, Kanban } from "lucide-react";
+import { Inbox, Kanban, Puzzle } from "lucide-react";
 import { api } from "./api.ts";
 import { DeepDiveDrawer } from "./components/DeepDiveDrawer.tsx";
 import { HeaderBar } from "./components/HeaderBar.tsx";
@@ -23,8 +23,9 @@ import type {
 } from "./types.ts";
 import { BoardView } from "./views/BoardView.tsx";
 import { InboxView } from "./views/InboxView.tsx";
+import { PluginsView } from "./views/PluginsView.tsx";
 
-type MainTab = "inbox" | "board";
+type MainTab = "inbox" | "board" | "plugins";
 
 export function App() {
   const { t } = useI18n();
@@ -253,6 +254,18 @@ export function App() {
             {tickets.length}
           </span>
         </button>
+
+        <button
+          onClick={() => setActiveTab("plugins")}
+          className={`inline-flex items-center gap-2 px-3 py-2.5 text-xs font-medium border-b-2 transition ${
+            activeTab === "plugins"
+              ? "border-indigo-500 text-zinc-100"
+              : "border-transparent text-zinc-500 hover:text-zinc-300"
+          }`}
+        >
+          <Puzzle className="w-3.5 h-3.5" />
+          {t("nav.plugins")}
+        </button>
       </nav>
 
       <main className="flex-1">
@@ -263,11 +276,13 @@ export function App() {
             onResolve={handleResolveInbox}
             onInspectTicket={(id) => setInspectedTicketId(id)}
           />
-        ) : (
+        ) : activeTab === "board" ? (
           <BoardView
             tickets={tickets}
             onSelectTicket={(id) => setInspectedTicketId(id)}
           />
+        ) : (
+          <PluginsView />
         )}
       </main>
 

@@ -11,6 +11,7 @@ import type {
   OperatingMode,
   OutboxEntry,
   PipelineTemplateId,
+  PluginStatus,
   PublicSetupStatus,
   ReasoningEffort,
   RepoConfig,
@@ -34,6 +35,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(body || `HTTP ${res.status}`);
   }
   return (await res.json()) as T;
+}
+
+/** Turn a thrown `request()` error (raw JSON body or text) into a readable message. */
+export function parseApiError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  try {
+    const body = JSON.parse(raw) as { error?: string; details?: string[] };
+    if (body.error) {
+      return body.details?.length ? `${body.error}: ${body.details.join("; ")}` : body.error;
+    }
+  } catch {
+    // not JSON
+  }
+  return raw;
 }
 
 export const api = {
@@ -137,6 +152,26 @@ export const api = {
     request<{ entries: OutboxEntry[] }>(
       repoId ? `/api/outbox?repoId=${encodeURIComponent(repoId)}` : "/api/outbox",
     ),
+
+  listPlugins: () => request<{ plugins: PluginStatus[] }>("/api/plugins"),
+
+  enablePlugin: (id: string, config?: Record<string, unknown>) =>
+    request<{ plugin: PluginStatus }>(`/api/plugins/${encodeURIComponent(id)}/enable`, {
+      method: "POST",
+      body: JSON.stringify(config ? { config } : {}),
+    }),
+
+  disablePlugin: (id: string) =>
+    request<{ plugin: PluginStatus }>(`/api/plugins/${encodeURIComponent(id)}/disable`, {
+      method: "POST",
+      body: "{}",
+    }),
+
+  updatePluginConfig: (id: string, config: Record<string, unknown>) =>
+    request<{ plugin: PluginStatus }>(`/api/plugins/${encodeURIComponent(id)}/config`, {
+      method: "PUT",
+      body: JSON.stringify({ config }),
+    }),
 
   getSetupStatus: () => request<PublicSetupStatus>("/api/setup/status"),
 
