@@ -130,3 +130,37 @@ Implemented in [outbox.ts](./packages/core/src/outbox.ts) and [gh-cli-source.ts]
 - Before delivery, `SuperWorkKernel` runs `GitWorktreeProvider.rebaseOntoBase(...)`. Merge conflicts trigger a self-heal `implement` retry or a `merge_conflict` Inbox item.
 - Clean rebases enqueue an idempotent `OutboxEntry` (`idempotency_key` unique constraint in SQLite WAL). `OutboxProcessor.processDueEntries()` atomically claims due rows via `claimNextOutboxEntries` and executes `GhOutboxExecutor` (pushing & opening a GitHub PR when remote + `gh` are configured, or recording local branch readiness for local-only repos).
 - **Worktree Lifecycle & GC**: When `repo.autoCleanupWorktree` is enabled (default), terminal `delivered` and `cancelled` tickets automatically reclaim their isolated worktree directory while retaining branch commits (`GET /api/tickets/:id` falls back to `GitWorktreeProvider.getBranchDiff(...)`). Stale or orphan directories can also be inspected and reclaimed via `/api/worktrees/gc`.
+
+### 3.6 Plugin System: Contract, Loader & Management API
+Defined in [plugin.ts](./packages/core/src/plugin.ts) (pure types), implemented in `packages/drivers/src/plugins/`, exposed by [plugin-routes.ts](./packages/server/src/plugin-routes.ts) and rendered by `packages/web/src/views/PluginsView.tsx`.
+
+**Contract (`@super-work/core`)**
+- `PluginManifest`: `id` (`^[a-z0-9][a-z0-9._-]{0,63}$`), `name`, `version` (semver), `kind` (`driver` | `trigger` | `outbox` | `llm` | `tool`), `capabilities` (free-form tags scoped by `kind`), optional `description` and `configSchema`.
+- `configSchema` is a minimal JSON-Schema subset: `type: "object"`, `properties` (each `string` | `number` | `boolean` | `array` | `object`, with optional `description`, `default`, `enum`, `secret`) and `required`.
+- `PluginStatus` is discriminated by `state` (`loaded` | `enabled` | `disabled` | `failed`); a `failed` status always carries `error`. `PluginEvent`s: `plugin_loaded`, `plugin_unloaded`, `plugin_enabled`, `plugin_disabled`, `plugin_failed`.
+- Ports: `PluginRegistryReader` (`get`, `list`), `PluginRegistry` (adds `register`, `unregister`, `subscribe`) and `PluginLoaderPort` (`load`, `unload`, `list`, `enable`, `disable`).
+
+**Loading flow (`PluginLoader` in `@super-work/drivers`)**
+1. **Discover**: `discover()` scans `pluginsDir` for `<dir>/<name>/plugin.json`; `load(source)` accepts a plugin directory or a manifest file path.
+2. **Validate**: `validateManifest` checks the manifest; a failure is recorded as a `failed` plugin (`load()` also rethrows; `discover()` / `restore()` swallow it).
+3. **Import**: the entry is resolved from the manifest's optional `main` (must stay inside the plugin directory), else `index.ts` / `index.js` / `index.mjs`. It must export (`default` or named) `activate(config)` and optionally `deactivate(instance)`.
+4. **Register**: the plugin enters the registry as `loaded`; duplicate ids are rejected without clobbering a healthy plugin.
+5. **Enable**: `enable(id, config?)` validates config against `configSchema`, calls `activate(config)` under a timeout (default 10 s) and moves to `enabled`. Any error moves the plugin to `failed` — one broken plugin never aborts the others. `enable` on an already-enabled plugin is a no-op returning the current status.
+6. **Disable / unload**: `deactivate` is called with the activated instance; `disable` keeps the plugin registered as `disabled`, `unload` removes it. Operations are serialized per plugin id.
+7. **Persist & restore**: state is saved via `PluginStateStore` (`SqlitePluginStateStore`, table `plugins`). Properties marked `secret` are **never persisted**. `restore()` reloads persisted non-builtin plugins on startup.
+
+`registerBuiltinPlugins(loader)` registers the built-in drivers through the same path: `worker-claude-code`, `worker-codex`, `worker-opencode` (config: `binary`), `worker-mock`, `llm-heuristic` and `outbox-gh`. It is purely additive; the original driver classes and exports are unchanged.
+
+**Management API (`@super-work/server`)**
+
+| Endpoint | Behavior |
+| :--- | :--- |
+| `GET /api/plugins?kind=&state=` | List plugins; invalid `kind` / `state` → `400` |
+| `GET /api/plugins/:id` | Single plugin; unknown id → `404` |
+| `POST /api/plugins/:id/enable` | Optional body `{ "config": {...} }`; schema violations → `400` with `details` |
+| `POST /api/plugins/:id/disable` | Deactivates the plugin |
+| `PUT /api/plugins/:id/config` | Body `{ "config": {...} }`; only valid while `enabled`, otherwise `409` |
+
+Config is validated against the schema (unknown keys, wrong types, enum and `required` violations are rejected). Loader rejections return `409`. Every response masks `secret` properties as `****`, so secrets never leave the server.
+
+> **Current wiring**: `createApp` registers these routes when `pluginRegistry` and `pluginLoader` are supplied. The bundled server entry (`packages/server/src/index.ts`) currently wires an in-memory `RegistryBackedPluginLoader`, which only tracks state transitions in memory; it does not discover plugin directories or instantiate runtimes. Injecting the drivers `PluginLoader` (with `registerBuiltinPlugins`, `discover()` and `restore()`) at that seam is what activates real plugins.

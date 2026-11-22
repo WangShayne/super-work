@@ -96,7 +96,47 @@ bun run setup -- --auto
 
 ---
 
-## 4. Concurrency Best Practices & FAQ
+## 4. Plugin Management Panel
+
+Open the **Plugins** tab (中文界面: **插件管理**) in the main navigation next to **Attention Inbox** and **Mission Board**. Each row shows the plugin name, version, `kind`, capabilities, a state badge (`loaded` / `enabled` / `disabled` / `failed`) and, for `failed` plugins, the error message.
+
+- **Refresh**: reloads the list from `GET /api/plugins`.
+- **Enable / Disable toggle**: enables or disables the plugin and reports the result in a message. A plugin that fails to activate turns `failed` and shows its error; other plugins are unaffected.
+- **Configure**: available only for plugins that declare a `configSchema`. The drawer renders one field per schema property (enum → select, boolean → checkbox, number, string; `array` / `object` as JSON text) and flags missing required fields or invalid JSON/numbers.
+  - **Save** applies the config to an enabled plugin; **Save & Enable** enables a not-yet-enabled plugin with that config.
+  - **Secret** properties are rendered as password fields, masked (`****`) by the server, and never returned or persisted; re-enter them whenever you update the config.
+
+### Writing and loading a plugin
+
+1. Create `<pluginsDir>/my-plugin/plugin.json`:
+   ```json
+   {
+     "id": "my-plugin",
+     "name": "My Plugin",
+     "version": "1.0.0",
+     "kind": "tool",
+     "capabilities": ["example"],
+     "configSchema": {
+       "type": "object",
+       "properties": { "token": { "type": "string", "secret": true } },
+       "required": ["token"]
+     }
+   }
+   ```
+2. Add the entry `index.ts` (or point `main` in the manifest at it) exporting `activate` and, optionally, `deactivate`:
+   ```ts
+   export default {
+     activate: (config: Record<string, unknown>) => ({ token: config.token }),
+     deactivate: (instance: unknown) => {},
+   };
+   ```
+3. The drivers `PluginLoader` picks it up through `discover()` / `load(path)`; enable it from the panel or via `POST /api/plugins/my-plugin/enable`.
+
+> The bundled server currently wires an in-memory loader (see [ARCHITECTURE.md §3.6](./ARCHITECTURE.md)), so the panel manages only the plugins registered with it; directory discovery and the built-in driver plugins (`worker-claude-code`, `worker-codex`, `worker-opencode`, `worker-mock`, `llm-heuristic`, `outbox-gh`) appear once the drivers `PluginLoader` is injected there.
+
+---
+
+## 5. Concurrency Best Practices & FAQ
 
 1. **How do multiple Workers run truly in parallel without blocking each other?**
    - Assign disjoint **Mandate Allowed Paths** when dispatching tasks (e.g., `packages/core/**` and `packages/web/**`). Non-overlapping tickets run concurrently in separate `git worktree` directories; overlapping scopes are automatically serialized via `dependsOn`.

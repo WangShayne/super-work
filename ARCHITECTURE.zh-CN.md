@@ -130,3 +130,37 @@ stateDiagram-v2
 - 交付前由 `SuperWorkKernel` 自动执行 `GitWorktreeProvider.rebaseOntoBase(...)`；若发生冲突则优先注入冲突文件摘要唤醒 Worker 自愈，超出重试上限再升级人工处理。
 - Rebase 干净后写入带 SQLite `UNIQUE(idempotency_key)` 约束的 `OutboxEntry`；`OutboxProcessor.processDueEntries()` 通过事务方法 `claimNextOutboxEntries` 原子认领任务并交由 `GhOutboxExecutor` 执行（有远端及 `gh` 授权时自动 Push 分支并建 PR，纯本地仓库则完成本地分支交付汇总）。
 - **Worktree 生命周期与 GC**：启用仓库 `autoCleanupWorktree`（默认开启）时，任务到达 `delivered` 或被 `cancelTicket` 取消后会自动移除工作树目录并保留提交分支；即使清理后，`GET /api/tickets/:id` 仍可通过 `GitWorktreeProvider.getBranchDiff(...)` 回看分支 Diff，也可通过 `/api/worktrees/gc` 回收历史或孤儿目录。
+
+### 3.6 插件系统：契约、加载器与管理 API
+契约定义于 [plugin.ts](./packages/core/src/plugin.ts)(纯类型),加载器实现于 `packages/drivers/src/plugins/`,由 [plugin-routes.ts](./packages/server/src/plugin-routes.ts) 暴露 API,并由 `packages/web/src/views/PluginsView.tsx` 渲染管理面板。
+
+**契约(`@super-work/core`)**
+- `PluginManifest`:`id`(`^[a-z0-9][a-z0-9._-]{0,63}$`)、`name`、`version`(semver)、`kind`(`driver` | `trigger` | `outbox` | `llm` | `tool`)、`capabilities`(按 `kind` 约定语义的自由标签),以及可选的 `description` 与 `configSchema`。
+- `configSchema` 为精简的 JSON-Schema 子集:`type: "object"`、`properties`(每项为 `string` | `number` | `boolean` | `array` | `object`,可带 `description`、`default`、`enum`、`secret`)与 `required`。
+- `PluginStatus` 按 `state`(`loaded` | `enabled` | `disabled` | `failed`)区分;`failed` 状态必带 `error`。`PluginEvent`:`plugin_loaded`、`plugin_unloaded`、`plugin_enabled`、`plugin_disabled`、`plugin_failed`。
+- 端口:`PluginRegistryReader`(`get`、`list`)、`PluginRegistry`(额外提供 `register`、`unregister`、`subscribe`)与 `PluginLoaderPort`(`load`、`unload`、`list`、`enable`、`disable`)。
+
+**加载流程(`@super-work/drivers` 中的 `PluginLoader`)**
+1. **发现**:`discover()` 扫描 `pluginsDir` 下的 `<dir>/<name>/plugin.json`;`load(source)` 接受插件目录或 manifest 文件路径。
+2. **校验**:`validateManifest` 校验 manifest;失败会被记录为 `failed` 插件(`load()` 同时会重新抛出错误,`discover()` / `restore()` 则吞掉错误)。
+3. **导入**:入口取自 manifest 的可选 `main`(必须位于插件目录内),否则依次尝试 `index.ts` / `index.js` / `index.mjs`。入口须导出(`default` 或具名)`activate(config)`,可选导出 `deactivate(instance)`。
+4. **注册**:插件以 `loaded` 状态进入注册表;重复 id 会被拒绝,且不会覆盖健康的已有插件。
+5. **启用**:`enable(id, config?)` 按 `configSchema` 校验配置,在超时保护(默认 10 秒)下调用 `activate(config)`,成功后进入 `enabled`;任何错误都会使该插件进入 `failed`,单个插件故障不会影响其他插件。对已启用的插件再次 `enable` 为空操作,直接返回当前状态。
+6. **停用 / 卸载**:以激活得到的实例调用 `deactivate`;`disable` 保留注册并置为 `disabled`,`unload` 则移除。同一插件 id 的操作串行执行。
+7. **持久化与恢复**:状态通过 `PluginStateStore`(`SqlitePluginStateStore`,表 `plugins`)保存,标记为 `secret` 的属性**绝不落盘**。启动时 `restore()` 会重新加载已持久化的非内置插件。
+
+`registerBuiltinPlugins(loader)` 通过同一路径注册内置驱动:`worker-claude-code`、`worker-codex`、`worker-opencode`(配置项 `binary`)、`worker-mock`、`llm-heuristic` 与 `outbox-gh`。该函数纯增量,原有驱动类与导出保持不变。
+
+**管理 API(`@super-work/server`)**
+
+| 端点 | 行为 |
+| :--- | :--- |
+| `GET /api/plugins?kind=&state=` | 列出插件;非法 `kind` / `state` → `400` |
+| `GET /api/plugins/:id` | 查询单个插件;id 不存在 → `404` |
+| `POST /api/plugins/:id/enable` | 可选请求体 `{ "config": {...} }`;违反 schema → `400` 并附带 `details` |
+| `POST /api/plugins/:id/disable` | 停用插件 |
+| `PUT /api/plugins/:id/config` | 请求体 `{ "config": {...} }`;仅在 `enabled` 状态下有效,否则 `409` |
+
+配置会按 schema 校验(未知键、类型错误、enum 与 `required` 违规均被拒绝)。加载器拒绝操作时返回 `409`。所有响应都会把 `secret` 属性掩码为 `****`,密钥不会离开服务端。
+
+> **当前接线**:`createApp` 在传入 `pluginRegistry` 与 `pluginLoader` 时注册上述路由。随附的服务入口(`packages/server/src/index.ts`)目前接入的是内存版 `RegistryBackedPluginLoader`,它只在内存中记录状态切换,不会发现插件目录,也不会实例化运行时。在该接缝处注入 drivers 的 `PluginLoader`(配合 `registerBuiltinPlugins`、`discover()` 与 `restore()`)即可启用真实插件。

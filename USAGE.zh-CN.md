@@ -97,7 +97,47 @@ bun run setup -- --auto
 
 ---
 
-## 四、 多任务并发最佳实践与常见问题（FAQ）
+## 四、 插件管理面板
+
+在主导航中打开 **插件管理** 标签(英文界面为 **Plugins**),位于 **决策收件箱** 与 **态势看板** 之后。每一行展示插件名称、版本、`kind`、capabilities、状态徽标(`loaded` / `enabled` / `disabled` / `failed`),`failed` 插件还会显示错误信息。
+
+- **刷新**:通过 `GET /api/plugins` 重新加载列表。
+- **启用 / 停用开关**:启用或停用插件,并以消息反馈结果。激活失败的插件会变为 `failed` 并显示错误,不影响其他插件。
+- **配置**:仅对声明了 `configSchema` 的插件可用。抽屉按 schema 属性逐项渲染字段(enum → 下拉、boolean → 复选框、number、string;`array` / `object` 以 JSON 文本编辑),并提示缺失的必填项以及无效的 JSON / 数字。
+  - **保存** 将配置应用到已启用的插件;**保存并启用** 则带上该配置启用尚未启用的插件。
+  - **Secret** 属性以密码框呈现,由服务端掩码为 `****`,既不会返回也不会持久化;每次更新配置时都需要重新输入。
+
+### 编写并加载插件
+
+1. 创建 `<pluginsDir>/my-plugin/plugin.json`:
+   ```json
+   {
+     "id": "my-plugin",
+     "name": "My Plugin",
+     "version": "1.0.0",
+     "kind": "tool",
+     "capabilities": ["example"],
+     "configSchema": {
+       "type": "object",
+       "properties": { "token": { "type": "string", "secret": true } },
+       "required": ["token"]
+     }
+   }
+   ```
+2. 添加入口 `index.ts`(或在 manifest 中用 `main` 指向它),导出 `activate` 以及可选的 `deactivate`:
+   ```ts
+   export default {
+     activate: (config: Record<string, unknown>) => ({ token: config.token }),
+     deactivate: (instance: unknown) => {},
+   };
+   ```
+3. drivers 的 `PluginLoader` 通过 `discover()` / `load(path)` 加载它;随后可在面板中启用,或调用 `POST /api/plugins/my-plugin/enable`。
+
+> 随附的服务端目前接入的是内存版加载器(见 [ARCHITECTURE.zh-CN.md §3.6](./ARCHITECTURE.zh-CN.md)),因此面板只管理注册到该加载器的插件;待 drivers 的 `PluginLoader` 在此注入后,目录发现与内置驱动插件(`worker-claude-code`、`worker-codex`、`worker-opencode`、`worker-mock`、`llm-heuristic`、`outbox-gh`)才会出现在面板中。
+
+---
+
+## 五、 多任务并发最佳实践与常见问题（FAQ）
 
 1. **如何让多个 Worker 真正并发而不互相排队？**
    - 派发任务时为不同任务填写互不重叠的 **Mandate 允许修改路径**（例如任务 A 填 `packages/core/**`，任务 B 填 `packages/web/**`）。当检测到两个任务路径无交集时，内核会在各自独立的 `git worktree` 中全速并发；只有路径存在重叠时才会自动通过 `dependsOn` 串行排队，避免 Merge 冲突。
