@@ -1,6 +1,7 @@
 export * from "./types.ts";
 export * from "./utils.ts";
 export * from "./ports.ts";
+export * from "./plugin.ts";
 export * from "./mandate.ts";
 export * from "./memory.ts";
 export * from "./pipeline.ts";

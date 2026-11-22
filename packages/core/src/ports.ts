@@ -23,6 +23,7 @@ import type {
   WorkerStreamEvent,
   WorkerTurnInput,
 } from "./types.ts";
+import type { PluginManifest, PluginStatus } from "./plugin.ts";
 
 export interface ControlPlaneLLM {
   readonly providerName: string;
@@ -131,6 +132,19 @@ export interface OutboxExecutor {
     repo: RepoConfig,
     ticket: Ticket,
   ): Promise<Record<string, unknown>>;
+}
+
+/**
+ * Plugin lifecycle port. Contract for implementations:
+ * - `enable` is idempotent for an already enabled plugin.
+ * - `unload`/`enable`/`disable` reject with an Error for unknown ids.
+ */
+export interface PluginLoaderPort {
+  load(source: string): Promise<PluginManifest>;
+  unload(id: string): Promise<void>;
+  list(): Promise<PluginStatus[]>;
+  enable(id: string, config?: Record<string, unknown>): Promise<PluginStatus>;
+  disable(id: string): Promise<PluginStatus>;
 }
 
 export interface DirectTicketInput {
