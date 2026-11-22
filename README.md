@@ -1,0 +1,106 @@
+[English](./README.md) | [简体中文](./README.zh-CN.md)
+
+# super-work
+
+An asynchronous autonomous development workflow orchestration kernel and local decision command center built in TypeScript / Bun Monorepo, inspired by DeepSeek Harness team's design essay *"Exploring Super-agent Design: Towards a More Autonomous Agent System"*.
+
+> **Core Philosophy**: The bottleneck in AI-assisted engineering is **human attention bandwidth**, not single-turn model intelligence. `super-work` shifts developers from manually micromanaging 3–5 interactive coding sessions to acting as **reviewers and boundary authorizers**—keeping a lightweight control plane always on while dispatching isolated coding workers behind immutable guardrails.
+
+---
+
+## Key Capabilities
+
+- **Router + Isolated Worker Architecture**:
+  - **Control Plane (`EventIntakeRouter` & `MasterAssessor`)**: Triages incoming triggers (`web`, `github_issue`, `github_pr`, `github_ci`, `cli`), enforces `off` / `observe` / `auto` operating modes, and routes follow-up comments on active `Thread`s directly to the subscribed `Ticket`.
+  - **Execution Plane (`WorkerDriver` & `GitWorktreeProvider`)**: Schedules external coding agents (`ClaudeCodeDriver` for `claude`, `CodexDriver` for `codex`, plus `MockWorkerDriver`) inside isolated `git worktree` branches. Supports native `--resume` / `exec resume` within the same engine and structured `Inline` context handover across engines (e.g., Claude implements → Codex reviews).
+- **Stage Pipeline Templates**: Built-in `fast` (`implement` → `rebase`), `standard` (`plan` → `implement` → `review` → `rebase`), and `strict` (with mandatory `plan_approval` and `outbox_signoff` human gates) workflows.
+- **Immutable `Mandate` Guardrails & Scope Serialization**:
+  - Pre-dispatch overlap detection (`mandateScopesOverlap`) serializes tickets touching overlapping paths via `dependsOn`, while disjoint scopes execute in parallel.
+  - Pre-turn CLI permission mapping forbids direct `git push` / `gh pr create`; post-turn `git diff` validation automatically reverts out-of-scope or secret modifications (`.env*`, `*.pem`, `*.key`) and escalates to the Attention Inbox.
+- **`Inline & Spill` Memory + `Chain of Recall`**: Keeps active prompts lean with structured `InlineMemory` while offloading raw JSONL transcripts and unified patches to `FsArtifactStore` (`Spill`), indexed with `bun:sqlite` FTS5 for on-demand cross-ticket recall.
+- **Two-Tier `Watchdog`**: Zero-cost L1 probes detect silence timeouts, repeated identical tool errors, `A -> B -> A` diff oscillation, and budget burn; L2 semantic diagnosis chooses `CONTINUE`, `INJECT_HINT`, `SWITCH_ENGINE`, or `ESCALATE_HUMAN`.
+- **`Transactional Outbox`**: Idempotent SQLite WAL-backed delivery queue for rebasing, pushing branches, creating GitHub PRs via `gh`, or recording local branch readiness.
+- **Three-Tier Local Web Command Center**:
+  1. **Attention Inbox**: High-signal approval queue for `observe_proposal`, `plan_approval`, `watchdog_escalation`, `mandate_violation`, `merge_conflict`, and `outbox_signoff`.
+  2. **Mission Board**: Five-column live swimlane board with engine badges, scope chips, dependency locks, and budget meters.
+  3. **Deep Dive Drawer**: Real-time SSE worker event stream, colorized worktree `git diff`, `Chain of Recall` + FTS5 search, `Outbox` ledger, and live Thread follow-up injection.
+
+---
+
+## Monorepo Package Map
+
+```text
+super-work/
+├── packages/
+│   ├── core/       # @super-work/core    — Zero-UI orchestration kernel, Mandate, Memory, Watchdog, Outbox, Ports
+│   ├── drivers/    # @super-work/drivers — bun:sqlite + FTS5, FsArtifactStore, GitWorktreeProvider, LLM & CLI drivers
+│   ├── server/     # @super-work/server  — Hono HTTP/SSE API daemon & static web bundle server
+│   └── web/        # @super-work/web     — React + Vite + Tailwind v4 local command center
+└── scripts/dev.ts  # Concurrent dev launcher for server + web
+```
+
+---
+
+## Prerequisites & Quickstart
+
+### Prerequisites
+- [Bun](https://bun.sh) `>= 1.3`
+- `git` (repositories managed by `super-work` must have at least an initial commit / valid `HEAD` before `git worktree add` can branch from them)
+- Optional Worker / Source CLIs on `PATH`: `claude` (Claude Code), `codex` (Codex CLI), `gh` (GitHub CLI)
+
+### Commands
+
+```bash
+# 1. Install workspace dependencies
+bun install
+
+# 2. Run all unit, driver, database/FTS5, Watchdog, E2E kernel, and API tests
+bun test
+
+# 3. Typecheck all four workspace packages
+bun run typecheck
+
+# 4. Build production frontend bundle into packages/web/dist
+bun run build
+
+# 5. Start daemon (http://localhost:4318) + Vite dashboard (http://localhost:5173)
+bun run dev
+```
+
+You can also run the backend or frontend individually:
+```bash
+bun run dev:server   # Hono daemon with --watch on port 4318
+bun run dev:web      # Vite dev server on port 5173 (proxies /api -> 4318)
+```
+
+> **Self-hosting note**: Before dispatching tasks against the `super-work` repository itself, create an initial `git commit` so `HEAD` exists for `git worktree add`.
+
+---
+
+## Environment Variables (Optional)
+
+When no API key is configured, the control plane automatically uses the built-in `HeuristicControlLLM` so local evaluation and workflows run with zero external setup. See [.env.example](./.env.example).
+
+| Variable | Description |
+| :--- | :--- |
+| `DEEPSEEK_API_KEY` | Enables OpenAI-compatible control-plane LLM defaulting to `https://api.deepseek.com/v1` and `deepseek-chat`. |
+| `OPENAI_API_KEY` | Enables OpenAI-compatible control-plane LLM defaulting to `https://api.openai.com/v1` and `gpt-4o-mini`. |
+| `SUPER_WORK_LLM_API_KEY` / `_BASE_URL` / `_MODEL` | Custom OpenAI-compatible control-plane endpoint, key, and model override. |
+| `SUPER_WORK_ENABLE_CLI_LLM=1` | Allows control-plane fallback to tool-less `claude -p --tools ""` when no API key is set. |
+| `SUPER_WORK_DATA_DIR` | Directory for `super-work.db`, Spill artifacts, and `worktrees/` (default: `./.super-work`). |
+| `PORT` | Daemon HTTP/SSE port (default: `4318`). |
+
+---
+
+## REST & SSE API Summary
+
+- `GET /api/health` — Daemon health, active control-plane LLM provider, and available worker engines (`claude`, `codex`, `mock`)
+- `GET /api/repos`, `POST /api/repos`, `PATCH /api/repos/:id` — Register repos and switch `off` / `observe` / `auto` mode
+- `POST /api/triggers` — Ingest external or simulated triggers (`github_issue`, `github_pr`, `github_ci`, `cli`)
+- `GET /api/tickets`, `POST /api/tickets`, `GET /api/tickets/:id`, `POST /api/tickets/:id/message`, `POST /api/tickets/:id/cancel` — Direct task dispatch, live worktree diff inspection, and Thread Subscription follow-ups
+- `GET /api/inbox`, `POST /api/inbox/:id/resolve` — Approve or reject pending Attention Inbox decisions
+- `GET /api/tickets/:id/recall`, `GET /api/memory/search?q=...`, `GET /api/artifacts/:id` — `Chain of Recall` lineage, FTS5 search, and Spill artifact reader
+- `GET /api/outbox` — Inspect `Transactional Outbox` delivery entries
+- `GET /api/events` — Real-time Server-Sent Events (SSE) stream of `KernelEvent` updates
+
+For architectural deep dives, state machines, and interface contracts, see [ARCHITECTURE.md](./ARCHITECTURE.md).

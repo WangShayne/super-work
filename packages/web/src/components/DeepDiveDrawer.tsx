@@ -1,0 +1,515 @@
+import { useEffect, useState } from "react";
+import {
+  Ban,
+  Database,
+  FileDiff,
+  GitBranch,
+  History,
+  Search,
+  Send,
+  Shield,
+  Terminal,
+  X,
+} from "lucide-react";
+import { api } from "../api.ts";
+import type {
+  ChainOfRecall,
+  LiveEventLogEntry,
+  MemorySearchHit,
+  TicketDetailResponse,
+} from "../types.ts";
+
+interface DeepDiveDrawerProps {
+  ticketId: string | null;
+  liveEvents: LiveEventLogEntry[];
+  onClose: () => void;
+  onRefresh: () => void;
+}
+
+type DrawerTab = "stream" | "diff" | "recall" | "outbox";
+
+export function DeepDiveDrawer({
+  ticketId,
+  liveEvents,
+  onClose,
+  onRefresh,
+}: DeepDiveDrawerProps) {
+  const [tab, setTab] = useState<DrawerTab>("stream");
+  const [detail, setDetail] = useState<TicketDetailResponse | null>(null);
+  const [recall, setRecall] = useState<ChainOfRecall | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [followUp, setFollowUp] = useState("");
+  const [sendingMsg, setSendingMsg] = useState(false);
+
+  const [artifactContent, setArtifactContent] = useState<{ id: string; text: string } | null>(null);
+  const [searchQ, setSearchQ] = useState("");
+  const [searchHits, setSearchHits] = useState<MemorySearchHit[] | null>(null);
+
+  useEffect(() => {
+    if (!ticketId) {
+      setDetail(null);
+      setRecall(null);
+      setArtifactContent(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    Promise.all([api.getTicketDetail(ticketId), api.getRecall(ticketId)])
+      .then(([d, r]) => {
+        if (!cancelled) {
+          setDetail(d);
+          setRecall(r.chain);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ticketId, liveEvents.length]);
+
+  if (!ticketId) return null;
+
+  const ticket = detail?.ticket;
+  const ticketLiveEvents = liveEvents.filter((e) => e.ticketId === ticketId);
+
+  const handleSendFollowUp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!followUp.trim()) return;
+    setSendingMsg(true);
+    try {
+      await api.sendThreadMessage(ticketId, followUp.trim());
+      setFollowUp("");
+      const [d, r] = await Promise.all([api.getTicketDetail(ticketId), api.getRecall(ticketId)]);
+      setDetail(d);
+      setRecall(r.chain);
+      onRefresh();
+    } finally {
+      setSendingMsg(false);
+    }
+  };
+
+  const handleCancel = async () => {
+    await api.cancelTicket(ticketId);
+    const d = await api.getTicketDetail(ticketId);
+    setDetail(d);
+    onRefresh();
+  };
+
+  const handleLoadArtifact = async (id: string) => {
+    if (artifactContent?.id === id) {
+      setArtifactContent(null);
+      return;
+    }
+    const res = await api.getArtifact(id);
+    setArtifactContent({ id, text: res.content });
+  };
+
+  const handleMemorySearch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!searchQ.trim()) {
+      setSearchHits(null);
+      return;
+    }
+    const res = await api.searchMemory(searchQ.trim(), ticket?.repoId);
+    setSearchHits(res.hits);
+  };
+
+  return (
+    <div className="fixed inset-0 z-40 flex justify-end bg-black/60 backdrop-blur-xs">
+      <div className="w-full max-w-3xl bg-zinc-950 border-l border-zinc-800 h-full flex flex-col shadow-2xl">
+        {/* Header */}
+        <div className="px-5 py-4 border-b border-zinc-800 flex items-start justify-between gap-4">
+          <div className="space-y-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-xs font-mono text-indigo-400">{ticketId}</span>
+              {ticket && (
+                <>
+                  <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-200">
+                    {ticket.status}
+                  </span>
+                  {ticket.branchName && (
+                    <span className="inline-flex items-center gap-1 text-[11px] font-mono text-zinc-400">
+                      <GitBranch className="w-3 h-3" />
+                      {ticket.branchName}
+                    </span>
+                  )}
+                </>
+              )}
+            </div>
+            <h2 className="text-base font-semibold text-zinc-100 truncate">
+              {ticket?.title ?? (loading ? "Loading..." : ticketId)}
+            </h2>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {ticket && !["delivered", "cancelled", "failed"].includes(ticket.status) && (
+              <button
+                onClick={handleCancel}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-rose-500/30 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20 text-xs"
+              >
+                <Ban className="w-3 h-3" />
+                Cancel
+              </button>
+            )}
+            <button
+              onClick={onClose}
+              className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-900"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+
+        {/* Tabs */}
+        <div className="px-5 border-b border-zinc-800 flex items-center gap-1 bg-zinc-950">
+          {[
+            { id: "stream" as const, label: "Execution Stream", icon: Terminal },
+            { id: "diff" as const, label: "Diff & Mandate", icon: FileDiff },
+            { id: "recall" as const, label: "Chain of Recall", icon: History },
+            { id: "outbox" as const, label: `Outbox (${detail?.outboxEntries.length ?? 0})`, icon: Database },
+          ].map((t) => {
+            const Icon = t.icon;
+            const active = tab === t.id;
+            return (
+              <button
+                key={t.id}
+                onClick={() => setTab(t.id)}
+                className={`inline-flex items-center gap-1.5 px-3 py-2.5 text-xs font-medium border-b-2 transition ${
+                  active
+                    ? "border-indigo-500 text-indigo-300"
+                    : "border-transparent text-zinc-500 hover:text-zinc-300"
+                }`}
+              >
+                <Icon className="w-3.5 h-3.5" />
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto p-5 space-y-5">
+          {tab === "stream" && (
+            <div className="space-y-5">
+              {ticket?.errorMessage && (
+                <div className="p-3 rounded-lg border border-rose-500/30 bg-rose-500/10 text-xs text-rose-200">
+                  <strong>Attention:</strong> {ticket.errorMessage}
+                </div>
+              )}
+
+              <div className="space-y-2">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                  Stage Pipeline Runs
+                </h3>
+                {detail?.stageRuns.length === 0 ? (
+                  <p className="text-xs text-zinc-500">No stage runs recorded yet.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {detail?.stageRuns.map((run) => (
+                      <div
+                        key={run.id}
+                        className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3 text-xs space-y-1.5"
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-semibold text-indigo-300 uppercase">
+                              {run.stage}
+                            </span>
+                            <span className="px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono text-[10px]">
+                              {run.engine}
+                            </span>
+                            <span
+                              className={`px-1.5 py-0.5 rounded font-mono text-[10px] ${
+                                run.status === "completed"
+                                  ? "bg-emerald-500/15 text-emerald-300"
+                                  : run.status === "running"
+                                    ? "bg-amber-500/15 text-amber-300"
+                                    : "bg-rose-500/15 text-rose-300"
+                              }`}
+                            >
+                              {run.status}
+                            </span>
+                          </div>
+                          <span className="font-mono text-zinc-500">${run.costUsd.toFixed(3)}</span>
+                        </div>
+                        {run.summary && (
+                          <p className="text-zinc-300 whitespace-pre-wrap leading-relaxed">
+                            {run.summary}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                  Live SSE Event Trajectory
+                </h3>
+                <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-3 font-mono text-[11px] space-y-1.5 max-h-80 overflow-y-auto">
+                  {ticketLiveEvents.length === 0 ? (
+                    <span className="text-zinc-600">
+                      Listening for live stream events on this ticket...
+                    </span>
+                  ) : (
+                    ticketLiveEvents.map((ev) => (
+                      <div key={ev.id} className="flex gap-2">
+                        <span className="text-zinc-600 shrink-0">
+                          {ev.timestamp.slice(11, 19)}
+                        </span>
+                        <span className="text-indigo-400 shrink-0">[{ev.kind}]</span>
+                        <span className="text-zinc-300 break-all">{ev.summary}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {tab === "diff" && ticket && (
+            <div className="space-y-4">
+              <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4 space-y-2 text-xs">
+                <div className="flex items-center gap-2 font-semibold text-zinc-200">
+                  <Shield className="w-4 h-4 text-emerald-400" />
+                  Immutable Mandate Guardrail
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                  <div>
+                    <span className="text-zinc-500 block mb-1">Allowed Paths</span>
+                    <div className="flex flex-wrap gap-1">
+                      {ticket.mandate.allowedPaths.map((p) => (
+                        <code
+                          key={p}
+                          className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20"
+                        >
+                          {p}
+                        </code>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <span className="text-zinc-500 block mb-1">Forbidden Paths</span>
+                    <div className="flex flex-wrap gap-1">
+                      {ticket.mandate.forbiddenPaths.map((p) => (
+                        <code
+                          key={p}
+                          className="px-1.5 py-0.5 rounded bg-rose-500/10 text-rose-300 border border-rose-500/20"
+                        >
+                          {p}
+                        </code>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                  Worktree Unified Git Diff
+                </h3>
+                <pre className="rounded-lg border border-zinc-800 bg-zinc-900/80 p-3 font-mono text-[11px] overflow-x-auto leading-relaxed">
+                  {detail?.diff ? (
+                    detail.diff.split("\n").map((line, i) => {
+                      const cls = line.startsWith("+") && !line.startsWith("+++")
+                        ? "text-emerald-400"
+                        : line.startsWith("-") && !line.startsWith("---")
+                          ? "text-rose-400"
+                          : line.startsWith("@@")
+                            ? "text-sky-400"
+                            : "text-zinc-400";
+                      return (
+                        <div key={i} className={cls}>
+                          {line}
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <span className="text-zinc-600">No diff produced in worktree yet.</span>
+                  )}
+                </pre>
+              </div>
+            </div>
+          )}
+
+          {tab === "recall" && recall && (
+            <div className="space-y-5">
+              {/* FTS5 Search */}
+              <form onSubmit={handleMemorySearch} className="flex gap-2">
+                <div className="relative flex-1">
+                  <Search className="w-3.5 h-3.5 text-zinc-500 absolute left-3 top-2.5" />
+                  <input
+                    type="text"
+                    value={searchQ}
+                    onChange={(e) => setSearchQ(e.target.value)}
+                    placeholder="Search SQLite FTS5 memory across tickets & spill..."
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg pl-8 pr-3 py-2 text-xs text-zinc-200 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="px-3 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs text-zinc-200"
+                >
+                  Recall
+                </button>
+              </form>
+
+              {searchHits && (
+                <div className="rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3 space-y-2">
+                  <div className="text-[11px] font-semibold text-indigo-300">
+                    FTS5 Search Results ({searchHits.length})
+                  </div>
+                  {searchHits.map((hit, idx) => (
+                    <div key={idx} className="text-xs border-t border-zinc-800/60 pt-1.5">
+                      <span className="font-mono text-zinc-400">[{hit.ticketId}]</span>{" "}
+                      <span className="text-zinc-200 font-medium">{hit.title}</span>
+                      <p className="text-zinc-400 text-[11px] mt-0.5">{hit.snippet}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Lineage: Trigger -> Thread -> Inline -> Spill */}
+              <div className="space-y-3 text-xs">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                  Lineage: Trigger → Thread → Inline Memory
+                </h3>
+                <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3 space-y-2">
+                  <div>
+                    <span className="text-zinc-500">Origin Trigger:</span>{" "}
+                    <span className="font-mono text-zinc-300">
+                      {recall.trigger?.source} ({recall.thread?.threadKey})
+                    </span>
+                  </div>
+                  {recall.ticket.inlineMemory.planSummary && (
+                    <div>
+                      <span className="text-zinc-500 block">Inline Plan Summary:</span>
+                      <p className="text-zinc-300 mt-0.5 whitespace-pre-wrap">
+                        {recall.ticket.inlineMemory.planSummary}
+                      </p>
+                    </div>
+                  )}
+                  {recall.ticket.inlineMemory.threadUpdates.length > 0 && (
+                    <div>
+                      <span className="text-zinc-500 block">Subscribed Thread Updates:</span>
+                      <ul className="list-disc pl-4 text-zinc-300 mt-1 space-y-1">
+                        {recall.ticket.inlineMemory.threadUpdates.map((u) => (
+                          <li key={u.triggerId}>
+                            <span className="font-mono text-zinc-500 text-[10px]">
+                              {u.createdAt.slice(11, 19)}
+                            </span>{" "}
+                            {u.message}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 pt-2">
+                  Spill Artifacts (Load On Demand)
+                </h3>
+                {recall.artifacts.length === 0 ? (
+                  <p className="text-zinc-500">No spill artifacts written yet.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {recall.artifacts.map((art) => (
+                      <div
+                        key={art.id}
+                        className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3 space-y-2"
+                      >
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 mr-2">
+                              {art.kind}
+                            </span>
+                            <span className="text-zinc-200">{art.summary}</span>
+                            <span className="text-zinc-500 text-[11px] ml-2">
+                              ({art.byteSize} bytes)
+                            </span>
+                          </div>
+                          <button
+                            onClick={() => handleLoadArtifact(art.id)}
+                            className="text-indigo-400 hover:text-indigo-300 font-medium"
+                          >
+                            {artifactContent?.id === art.id ? "Hide Spill" : "Read Spill"}
+                          </button>
+                        </div>
+                        {artifactContent?.id === art.id && (
+                          <pre className="p-2.5 rounded bg-zinc-950 border border-zinc-800 text-[11px] font-mono text-zinc-300 max-h-60 overflow-auto whitespace-pre-wrap">
+                            {artifactContent.text}
+                          </pre>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {tab === "outbox" && (
+            <div className="space-y-3">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                Transactional Outbox Side-Effects
+              </h3>
+              {detail?.outboxEntries.length === 0 ? (
+                <p className="text-xs text-zinc-500">No Outbox side-effects queued for this ticket yet.</p>
+              ) : (
+                detail?.outboxEntries.map((obx) => (
+                  <div
+                    key={obx.id}
+                    className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3.5 text-xs space-y-2"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono font-semibold text-zinc-200">{obx.action}</span>
+                      <span className="font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 text-[10px]">
+                        {obx.status}
+                      </span>
+                    </div>
+                    <div className="font-mono text-[11px] text-zinc-500">
+                      Key: {obx.idempotencyKey} · Attempts: {obx.attempts}
+                    </div>
+                    {obx.resultPayload && (
+                      <pre className="p-2 rounded bg-zinc-950 border border-zinc-800 text-[11px] text-emerald-300 overflow-x-auto">
+                        {JSON.stringify(obx.resultPayload, null, 2)}
+                      </pre>
+                    )}
+                    {obx.lastError && (
+                      <div className="text-rose-300 text-[11px]">Error: {obx.lastError}</div>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Thread Subscription Follow-Up Input */}
+        <form
+          onSubmit={handleSendFollowUp}
+          className="px-5 py-3 border-t border-zinc-800 bg-zinc-900/60 flex items-center gap-2"
+        >
+          <input
+            type="text"
+            value={followUp}
+            onChange={(e) => setFollowUp(e.target.value)}
+            placeholder="Send follow-up message on subscribed Thread (routes directly to this Worker)..."
+            className="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
+          />
+          <button
+            type="submit"
+            disabled={sendingMsg || !followUp.trim()}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium disabled:opacity-40 transition"
+          >
+            <Send className="w-3.5 h-3.5" />
+            Inject
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}

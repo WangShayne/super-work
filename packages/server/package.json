@@ -1,0 +1,17 @@
+{
+  "name": "@super-work/server",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@super-work/core": "workspace:*",
+    "@super-work/drivers": "workspace:*",
+    "hono": "^4.7.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  }
+}

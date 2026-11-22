@@ -1,0 +1,21 @@
+{
+  "name": "super-work",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "bun run scripts/dev.ts",
+    "dev:server": "bun --watch packages/server/src/index.ts",
+    "dev:web": "bun run --cwd packages/web dev",
+    "build": "bun run --cwd packages/web build",
+    "typecheck": "bun --filter '*' typecheck",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.8.2"
+  }
+}

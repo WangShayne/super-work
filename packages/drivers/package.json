@@ -1,0 +1,15 @@
+{
+  "name": "@super-work/drivers",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@super-work/core": "workspace:*"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  }
+}

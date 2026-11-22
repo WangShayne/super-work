@@ -1,0 +1,54 @@
+# Dependencies / 依赖目录
+node_modules/
+
+# Build, Vite & TypeScript caches / 构建产物与缓存
+dist/
+dist-ssr/
+build/
+out/
+.vite/
+*.tsbuildinfo
+
+# super-work runtime state, Spill artifacts, worktrees & SQLite / 运行时状态、工作树与数据库
+.super-work/
+.super-work-generated/
+worktrees/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Environment variables & secrets / 环境变量与密钥
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Test coverage, logs & profiler outputs / 测试覆盖率、日志与性能分析文件
+coverage/
+logs/
+*.log
+*.lcov
+*.cpuprofile
+*.heapsnapshot
+
+# OS & IDE / 系统与编辑器临时文件
+.DS_Store
+._*
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+
+# Local AI coding agent / tool state / 本地 AI 代理与工具状态目录
+.claude/
+.codex/
+.opencode/
+.codegraph/
+.gemini/
