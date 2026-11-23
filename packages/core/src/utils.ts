@@ -1,4 +1,4 @@
-import type { TicketStatus } from "./types.ts";
+import type { SmokeCheckConfig, TicketStatus } from "./types.ts";
 
 export function newId(prefix: string): string {
   const rand = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
@@ -40,4 +40,37 @@ export function normalizeErrorSignature(raw: string): string {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 160);
+}
+
+export function normalizeSmokeCheckConfig(raw: unknown): SmokeCheckConfig | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return undefined;
+  }
+  const r = raw as Record<string, unknown>;
+  const startCommand = typeof r.startCommand === "string" ? r.startCommand.trim() : "";
+  const readyUrl =
+    typeof r.readyUrl === "string" && r.readyUrl.trim() ? r.readyUrl.trim() : undefined;
+  const checkCommands = Array.isArray(r.checkCommands)
+    ? r.checkCommands.map((s) => String(s).trim()).filter(Boolean)
+    : undefined;
+  const rawTimeout = typeof r.startupTimeoutSec === "number" ? r.startupTimeoutSec : Number(r.startupTimeoutSec);
+  const startupTimeoutSec =
+    Number.isFinite(rawTimeout) && rawTimeout > 0
+      ? Math.max(2, Math.min(120, Math.floor(rawTimeout)))
+      : undefined;
+  const triggerMode = r.triggerMode === "delivery_only" ? "delivery_only" : "every_gate";
+  const enabled = Boolean(r.enabled) && Boolean(startCommand);
+
+  if (!startCommand && !readyUrl && (!checkCommands || checkCommands.length === 0) && r.enabled !== true) {
+    return undefined;
+  }
+
+  return {
+    enabled,
+    startCommand,
+    ...(readyUrl ? { readyUrl } : {}),
+    ...(startupTimeoutSec !== undefined ? { startupTimeoutSec } : {}),
+    ...(checkCommands && checkCommands.length > 0 ? { checkCommands } : {}),
+    triggerMode,
+  };
 }

@@ -17,6 +17,8 @@ import type {
   RepoContractFile,
   RepoMetricsSummary,
   RevertResult,
+  SmokeCheckConfig,
+  SmokeCheckResult,
   SpillArtifact,
   StageKind,
   StageRun,
@@ -59,15 +61,29 @@ export interface ControlPlaneLLM {
     repoStructure?: string;
     playbookRules?: string;
     conventions?: string;
+    availableRepos?: Array<{ id: string; name: string; structure?: string }>;
   }): Promise<EpicDecompositionPlan>;
   distillPlaybookLesson?(input: {
     repo: RepoConfig;
     ticket: Ticket;
-    failureKind: "verification" | "review";
+    failureKind: "verification" | "smoke" | "review";
     failureSummary: string;
     fixSummary: string;
     changedFiles: string[];
   }): Promise<{ rule: string; scopePaths: string[] } | null>;
+  distillHandoverDigest?(input: {
+    repo: RepoConfig;
+    ticket: Ticket;
+    changedFiles: string[];
+    exportedSymbols: string[];
+    contractSnippets: string[];
+    diffExcerpt: string;
+    stageSummary: string;
+  }): Promise<{
+    summary: string;
+    exportedSymbols?: string[];
+    contractSnippets?: string[];
+  } | null>;
 }
 
 export interface WorkerDriver {
@@ -93,6 +109,10 @@ export interface WorkspaceProvider {
     commands: string[],
     timeoutSec?: number,
   ): Promise<VerificationRunResult>;
+  runSmokeCheck?(
+    worktreePath: string,
+    config: SmokeCheckConfig,
+  ): Promise<SmokeCheckResult>;
   commitAll(worktreePath: string, message: string): Promise<boolean>;
   rebaseOntoBase(worktreePath: string, baseBranch: string): Promise<{ ok: boolean; conflictSummary?: string }>;
   mergeBranchToBase(input: {
@@ -213,6 +233,7 @@ export interface DirectTicketInput {
   template?: RepoConfig["defaultTemplate"];
   allowedPaths?: string[];
   forbiddenPaths?: string[];
+  dependsOn?: string[];
   maxCostUsd?: number;
   maxDurationSec?: number;
   preferredEngine?: WorkerEngineId;

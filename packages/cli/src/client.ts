@@ -1,6 +1,7 @@
 import type {
   EpicDecompositionPlan,
   EpicDeliveryMode,
+  HandoverDigest,
   InboxItem,
   InboxItemStatus,
   OutboxEntry,
@@ -109,6 +110,15 @@ export class SuperWorkHttpClient {
     inboxItems: InboxItem[];
     outboxEntries: OutboxEntry[];
     diff: string;
+    subtasks?: Ticket[];
+    upstreamDependencies?: Array<{
+      id: string;
+      repoId: string;
+      repoName?: string;
+      title: string;
+      status: Ticket["status"];
+      handoverDigest?: HandoverDigest;
+    }>;
   }> {
     return this.request(`/api/tickets/${encodeURIComponent(id)}`);
   }
@@ -175,6 +185,7 @@ export class SuperWorkHttpClient {
     description: string;
     template?: PipelineTemplateId;
     allowedPaths?: string[];
+    dependsOn?: string[];
     maxCostUsd?: number;
     preferredEngine?: WorkerEngineId;
   }): Promise<{ ticket: Ticket }> {

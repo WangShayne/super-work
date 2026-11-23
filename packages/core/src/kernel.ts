@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { basename, resolve } from "node:path";
+import { buildHandoverDigest, extractDiffContracts } from "./handover.ts";
 import { validateChangedFilesAgainstMandate } from "./mandate.ts";
 import { MemoryManager } from "./memory.ts";
 import { OutboxProcessor } from "./outbox.ts";
@@ -40,6 +41,7 @@ import type {
 import { EventIntakeRouter, type IngestResult } from "./router.ts";
 import type {
   EpicDecompositionPlan,
+  HandoverDigest,
   InboxItem,
   KernelEvent,
   ManagedWorktreeItem,
@@ -62,7 +64,7 @@ import type {
   WorkerStreamEvent,
   WorktreeGcResult,
 } from "./types.ts";
-import { isTerminalTicketStatus, newId, nowIso } from "./utils.ts";
+import { isTerminalTicketStatus, newId, normalizeSmokeCheckConfig, nowIso } from "./utils.ts";
 import { DEFAULT_WATCHDOG_CONFIG, TwoTierWatchdog } from "./watchdog.ts";
 
 export const DEFAULT_KERNEL_CONFIG: KernelConfig = {
@@ -192,6 +194,8 @@ export class SuperWorkKernel {
             });
           }
         }
+
+        currentTicket = await this.generateAndSaveHandoverDigest(currentTicket, repo);
 
         if (
           currentTicket.worktreePath &&
@@ -347,6 +351,8 @@ export class SuperWorkKernel {
   }
 
   async createEpic(input: CreateEpicInput): Promise<{ epic: Ticket; subtasks: Ticket[] }> {
+    const allRepos = await this.stateStore.listRepos();
+    await Promise.all(allRepos.map((r) => this.syncRepoContract(r.id).catch(() => null)));
     await this.syncRepoContract(input.repoId);
     return this.router.createEpic(input);
   }
@@ -379,6 +385,10 @@ export class SuperWorkKernel {
         contract.setupCommands !== undefined
           ? contract.setupCommands.map((s) => String(s).trim()).filter(Boolean)
           : repo.setupCommands,
+      smokeCheck:
+        contract.smokeCheck !== undefined
+          ? normalizeSmokeCheckConfig(contract.smokeCheck)
+          : repo.smokeCheck,
       forbiddenPaths:
         contract.forbiddenPaths !== undefined
           ? contract.forbiddenPaths.map((s) => String(s).trim()).filter(Boolean)
@@ -456,6 +466,7 @@ export class SuperWorkKernel {
       defaultTemplate: repo.defaultTemplate,
       verificationCommands: repo.verificationCommands ?? [],
       setupCommands: repo.setupCommands ?? [],
+      ...(repo.smokeCheck ? { smokeCheck: repo.smokeCheck } : {}),
       forbiddenPaths: repo.forbiddenPaths ?? [],
       ...(repo.conventions?.trim() ? { conventions: repo.conventions.trim() } : {}),
       playbook: entries.map((e) => ({
@@ -536,7 +547,9 @@ export class SuperWorkKernel {
   private async maybeDistillClosedLoopLesson(ticket: Ticket, repoArg?: RepoConfig): Promise<void> {
     if (ticket.isEpic) return;
     const stageRuns = await this.stateStore.listStageRuns(ticket.id);
-    const failedImplRuns = stageRuns.filter((r) => r.stage === "implement" && r.status === "failed");
+    const failedImplRuns = stageRuns.filter(
+      (r) => (r.stage === "implement" || r.stage === "rebase") && r.status === "failed",
+    );
     const rejectedReviewNotes = ticket.inlineMemory.stageNotes.filter(
       (n) => n.stage === "review" && n.reviewApproved === false,
     );
@@ -556,7 +569,12 @@ export class SuperWorkKernel {
           latestRejectedReview.createdAt >= (latestFailedImpl.completedAt ?? latestFailedImpl.startedAt)),
     );
 
-    const failureKind: "verification" | "review" = useReviewFailure ? "review" : "verification";
+    const isSmokeFailure = Boolean(latestFailedImpl?.summary?.includes("Smoke check failed"));
+    const failureKind: "verification" | "smoke" | "review" = useReviewFailure
+      ? "review"
+      : isSmokeFailure
+        ? "smoke"
+        : "verification";
     const failureSummary = useReviewFailure
       ? latestRejectedReview?.summary || "Code review requested changes"
       : latestFailedImpl?.summary || "Verification check failed";
@@ -606,6 +624,169 @@ export class SuperWorkKernel {
       enabled: true,
       pinned: false,
     });
+  }
+
+  private async generateAndSaveHandoverDigest(
+    ticket: Ticket,
+    repo: RepoConfig,
+    precomputed?: { changedFiles: string[]; diffText: string },
+  ): Promise<Ticket> {
+    if (ticket.isEpic && ticket.epicDeliveryMode === "per_subtask") {
+      return ticket;
+    }
+
+    let changedFiles = precomputed?.changedFiles ?? [];
+    let diffText = precomputed?.diffText ?? "";
+
+    if (!precomputed) {
+      if (ticket.worktreePath && existsSync(ticket.worktreePath)) {
+        try {
+          const { effectiveBaseBranch } = await this.getEffectiveBaseInfo(ticket, repo);
+          changedFiles = await this.workspace.getChangedFiles(ticket.worktreePath, effectiveBaseBranch);
+          diffText = await this.workspace.getDiff(ticket.worktreePath, effectiveBaseBranch);
+        } catch {
+          // Fall back to latest recorded Spill diff artifact
+        }
+      }
+
+      if (!diffText.trim()) {
+        const artifacts = await this.stateStore.listArtifacts(ticket.id);
+        const latestDiff = [...artifacts].reverse().find((a) => a.kind === "diff");
+        if (latestDiff) {
+          try {
+            diffText = await this.artifactStore.readSpill(latestDiff.storageUri);
+          } catch {
+            diffText = "";
+          }
+        }
+      }
+
+      if (changedFiles.length === 0) {
+        const latestFilesNote = [...ticket.inlineMemory.stageNotes]
+          .reverse()
+          .find((n) => n.changedFiles.length > 0 && n.verificationPassed);
+        if (latestFilesNote) {
+          changedFiles = latestFilesNote.changedFiles;
+        } else if (diffText.trim()) {
+          changedFiles = Array.from(
+            new Set(
+              Array.from(diffText.matchAll(/^\+\+\+\s+b\/(.+)$/gm))
+                .map((m) => m[1]!.trim())
+                .filter((p) => p !== "/dev/null"),
+            ),
+          );
+        }
+      }
+    }
+
+    const stageSummary =
+      [...ticket.inlineMemory.stageNotes]
+        .reverse()
+        .find((n) => n.stage === "implement" || n.stage === "rebase")?.summary ??
+      ticket.inlineMemory.stageNotes.at(-1)?.summary ??
+      ticket.title;
+
+    const extracted = extractDiffContracts(diffText);
+    let llmRefinement: {
+      summary?: string;
+      exportedSymbols?: string[];
+      contractSnippets?: string[];
+    } | null = null;
+    if (this.llm.distillHandoverDigest && (changedFiles.length > 0 || diffText.trim().length > 0)) {
+      try {
+        llmRefinement = await this.llm.distillHandoverDigest({
+          repo,
+          ticket,
+          changedFiles,
+          exportedSymbols: extracted.exportedSymbols,
+          contractSnippets: extracted.contractSnippets,
+          diffExcerpt: diffText.slice(0, 6000),
+          stageSummary,
+        });
+      } catch {
+        llmRefinement = null;
+      }
+    }
+
+    const previousDigest = ticket.handoverDigest;
+    const version = (previousDigest?.version ?? 0) + 1;
+    const digest = buildHandoverDigest({
+      ticket,
+      repoName: repo.name,
+      changedFiles,
+      diffText,
+      stageSummary,
+      version,
+      llmRefinement,
+    });
+
+    const handoverArtifact = await this.artifactStore.writeSpill(
+      {
+        ticketId: ticket.id,
+        kind: "handover",
+        summary: `Handover v${digest.version}: ${ticket.title}`,
+        ext: "md",
+      },
+      digest.formattedMarkdown,
+    );
+    await this.stateStore.saveArtifact(handoverArtifact, digest.formattedMarkdown);
+
+    const ts = nowIso();
+    const updated: Ticket = {
+      ...ticket,
+      handoverDigest: digest,
+      updatedAt: ts,
+    };
+    await this.stateStore.saveTicket(updated);
+    this.emitEvent({ type: "ticket_updated", ticket: updated, timestamp: ts });
+
+    // Contract Drift Propagation: notify non-terminal downstream dependents when upstream handover changes
+    if (
+      previousDigest &&
+      previousDigest.formattedMarkdown !== digest.formattedMarkdown
+    ) {
+      const allTickets = await this.stateStore.listTickets();
+      for (const downstream of allTickets) {
+        if (downstream.id === ticket.id || isTerminalTicketStatus(downstream.status)) continue;
+        if (!downstream.dependsOn.includes(ticket.id)) continue;
+
+        const driftTs = nowIso();
+        const driftMsg = `[Upstream Contract Updated v${digest.version} from ${repo.name}/${ticket.id}] ${digest.summary}`;
+        const updatedDownstream: Ticket = {
+          ...downstream,
+          inlineMemory: {
+            ...downstream.inlineMemory,
+            threadUpdates: [
+              ...downstream.inlineMemory.threadUpdates,
+              {
+                triggerId: newId("drift"),
+                message: driftMsg,
+                createdAt: driftTs,
+              },
+            ],
+            activeHint: [downstream.inlineMemory.activeHint?.trim(), driftMsg]
+              .filter(Boolean)
+              .join("\n\n"),
+          },
+          updatedAt: driftTs,
+        };
+        await this.stateStore.saveTicket(updatedDownstream);
+        this.emitEvent({
+          type: "thread_routed",
+          ticketId: updatedDownstream.id,
+          triggerId: ticket.id,
+          message: driftMsg,
+          timestamp: driftTs,
+        });
+        this.emitEvent({
+          type: "ticket_updated",
+          ticket: updatedDownstream,
+          timestamp: driftTs,
+        });
+      }
+    }
+
+    return updated;
   }
 
   async revertTicketDelivery(
@@ -981,7 +1162,7 @@ export class SuperWorkKernel {
           await this.stateStore.saveStageRun(syntheticRun);
           const gate = repo
             ? await this.runRepoVerificationGate(nextTicket, repo, syntheticRun, ticket.worktreePath)
-            : { passed: true };
+            : { passed: true, artifacts: [] as SpillArtifact[], result: undefined };
 
           if (gate.passed) {
             await this.workspace.commitAll(
@@ -1010,7 +1191,7 @@ export class SuperWorkKernel {
               diffText,
               summary: finishedRun.summary!,
               verificationPassed: true,
-              extraArtifacts: gate.artifact ? [gate.artifact] : undefined,
+              extraArtifacts: gate.artifacts.length > 0 ? gate.artifacts : undefined,
             });
             finishedRun.spillTranscriptId = expNote.spillArtifactIds[0];
             await this.stateStore.saveStageRun(finishedRun);
@@ -1426,7 +1607,8 @@ export class SuperWorkKernel {
       const depBranches: string[] = [];
       for (const depId of ticket.dependsOn) {
         const dep = await this.stateStore.getTicket(depId);
-        if (dep?.branchName) {
+        // Only merge git branches from the SAME repository; cross-repo dependencies exchange contracts via HandoverDigest
+        if (dep?.branchName && dep.repoId === ticket.repoId) {
           depBranches.push(dep.branchName);
         }
       }
@@ -1471,14 +1653,40 @@ export class SuperWorkKernel {
       this.stateStore.searchMemory(ticket.title, 4, repo.id),
       this.stateStore.listPlaybookEntries(repo.id, { onlyEnabled: true }),
     ]);
+    const upstreamHandovers: HandoverDigest[] = [];
+    if (ticket.dependsOn.length > 0) {
+      const reposById = new Map((await this.stateStore.listRepos()).map((r) => [r.id, r]));
+      for (const depId of ticket.dependsOn) {
+        const dep = await this.stateStore.getTicket(depId);
+        if (!dep) continue;
+        if (dep.handoverDigest) {
+          upstreamHandovers.push(dep.handoverDigest);
+        } else if (dep.status === "delivered") {
+          const depFiles = Array.from(
+            new Set(dep.inlineMemory.stageNotes.flatMap((n) => n.changedFiles)),
+          );
+          upstreamHandovers.push(
+            buildHandoverDigest({
+              ticket: dep,
+              repoName: reposById.get(dep.repoId)?.name,
+              changedFiles: depFiles,
+              diffText: "",
+              stageSummary: dep.inlineMemory.stageNotes.at(-1)?.summary || dep.title,
+            }),
+          );
+        }
+      }
+    }
     const playbookContext = formatPlaybookContext(
       playbookEntries,
       ticket.mandate.allowedPaths,
     );
     const prompt = this.memory.buildWorkerPromptContext(ticket, stage, relatedMemory, {
       verificationCommands: repo.verificationCommands,
+      smokeCheck: repo.smokeCheck,
       repoConventions: repo.conventions,
       playbookContext,
+      upstreamHandovers,
     });
 
     const setupConfig = await this.stateStore.getSystemSetting<SystemSetupConfig>("setup_config");
@@ -1875,13 +2083,13 @@ export class SuperWorkKernel {
       );
     }
 
-    let verificationArtifact: SpillArtifact | undefined;
+    let verificationArtifacts: SpillArtifact[] = [];
     let verificationPassed = completedEvent?.structuredOutput?.verificationPassed ?? true;
     if (stage === "implement") {
-      const gate = await this.runRepoVerificationGate(ticket, repo, stageRun, ws.worktreePath);
-      if (gate.artifact) {
-        verificationArtifact = gate.artifact;
-      }
+      const gate = await this.runRepoVerificationGate(ticket, repo, stageRun, ws.worktreePath, {
+        isFinalDeliveryGate: false,
+      });
+      verificationArtifacts = gate.artifacts;
       verificationPassed = gate.passed;
       if (!gate.passed) {
         const failedSummary = gate.result?.summary ?? "Deterministic verification gate failed";
@@ -1901,7 +2109,7 @@ export class SuperWorkKernel {
           diffText,
           summary: failedSummary,
           verificationPassed: false,
-          extraArtifacts: verificationArtifact ? [verificationArtifact] : undefined,
+          extraArtifacts: verificationArtifacts.length > 0 ? verificationArtifacts : undefined,
         });
         failedRun.spillTranscriptId = failNote.spillArtifactIds[0];
         await this.stateStore.saveStageRun(failedRun);
@@ -1956,8 +2164,7 @@ export class SuperWorkKernel {
       }
     }
 
-    const extraArtifacts: SpillArtifact[] = [];
-    if (verificationArtifact) extraArtifacts.push(verificationArtifact);
+    const extraArtifacts: SpillArtifact[] = [...verificationArtifacts];
     if (reviewReportArtifact) extraArtifacts.push(reviewReportArtifact);
 
     const nitText =
@@ -2158,7 +2365,9 @@ export class SuperWorkKernel {
       return;
     }
 
-    const gate = await this.runRepoVerificationGate(ticket, repo, stageRun, worktreePath);
+    const gate = await this.runRepoVerificationGate(ticket, repo, stageRun, worktreePath, {
+      isFinalDeliveryGate: !parentEpic,
+    });
     if (!gate.passed) {
       const failedSummary = gate.result?.summary ?? "Post-rebase verification gate failed";
       const failedRun: StageRun = {
@@ -2175,7 +2384,7 @@ export class SuperWorkKernel {
         changedFiles,
         summary: failedSummary,
         verificationPassed: false,
-        extraArtifacts: gate.artifact ? [gate.artifact] : undefined,
+        extraArtifacts: gate.artifacts.length > 0 ? gate.artifacts : undefined,
       });
       await this.stateStore.saveStageRun(failedRun);
 
@@ -2213,9 +2422,10 @@ export class SuperWorkKernel {
       ...stageRun,
       status: "completed",
       completedAt: nowIso(),
-      summary: gate.artifact
-        ? `Rebased cleanly onto ${effectiveBaseBranch}; ${gate.result?.summary ?? "verification passed"}`
-        : `Rebased cleanly onto ${effectiveBaseBranch}`,
+      summary:
+        gate.artifacts.length > 0
+          ? `Rebased cleanly onto ${effectiveBaseBranch}; ${gate.result?.summary ?? "verification passed"}`
+          : `Rebased cleanly onto ${effectiveBaseBranch}`,
     };
     const changedFiles = await this.workspace.getChangedFiles(worktreePath, effectiveBaseBranch);
     const diffText = await this.workspace.getDiff(worktreePath, effectiveBaseBranch);
@@ -2227,7 +2437,7 @@ export class SuperWorkKernel {
       diffText,
       summary: finishedRun.summary!,
       verificationPassed: true,
-      extraArtifacts: gate.artifact ? [gate.artifact] : undefined,
+      extraArtifacts: gate.artifacts.length > 0 ? gate.artifacts : undefined,
     });
     finishedRun.spillTranscriptId = note.spillArtifactIds[0];
     await this.stateStore.saveStageRun(finishedRun);
@@ -2251,7 +2461,7 @@ export class SuperWorkKernel {
         }),
       );
       const deliveredTs = nowIso();
-      const deliveredSubtask: Ticket = {
+      let deliveredSubtask: Ticket = {
         ...ticket,
         status: "delivered",
         activeEngine: undefined,
@@ -2265,10 +2475,9 @@ export class SuperWorkKernel {
       };
       await this.maybeDistillClosedLoopLesson(deliveredSubtask, repo);
       await this.stateStore.saveTicket(deliveredSubtask);
-      this.emitEvent({
-        type: "ticket_updated",
-        ticket: deliveredSubtask,
-        timestamp: deliveredTs,
+      deliveredSubtask = await this.generateAndSaveHandoverDigest(deliveredSubtask, repo, {
+        changedFiles,
+        diffText,
       });
       return;
     }
@@ -2290,45 +2499,129 @@ export class SuperWorkKernel {
     repo: RepoConfig,
     stageRun: StageRun,
     worktreePath: string,
-  ): Promise<{ passed: boolean; artifact?: SpillArtifact; result?: VerificationRunResult }> {
+    options?: { isFinalDeliveryGate?: boolean },
+  ): Promise<{ passed: boolean; artifacts: SpillArtifact[]; result?: VerificationRunResult }> {
+    const artifacts: SpillArtifact[] = [];
     const commands = (repo.verificationCommands ?? []).map((c) => c.trim()).filter(Boolean);
-    if (commands.length === 0) {
-      return { passed: true };
+    let staticResult: VerificationRunResult | undefined;
+
+    if (commands.length > 0) {
+      staticResult = await this.workspace.runVerificationCommands(
+        worktreePath,
+        commands,
+        ticket.mandate.maxDurationSec,
+      );
+
+      const logBody = staticResult.results
+        .map(
+          (r) =>
+            `$ ${r.command}\n[exit=${r.exitCode}, duration=${r.durationMs}ms]\n${r.output || "(no output)"}\n`,
+        )
+        .join("\n---\n");
+
+      const testArtifact = await this.artifactStore.writeSpill(
+        {
+          ticketId: ticket.id,
+          stageRunId: stageRun.id,
+          kind: "test_log",
+          summary: `${staticResult.ok ? "PASS" : "FAIL"} verification (${commands.join(" && ")})`,
+          ext: "log",
+        },
+        logBody || staticResult.summary,
+      );
+      await this.stateStore.saveArtifact(testArtifact, `${staticResult.summary}\n${logBody}`);
+      artifacts.push(testArtifact);
+
+      if (!staticResult.ok) {
+        this.emitEvent({
+          type: "verification_completed",
+          ticketId: ticket.id,
+          stageRunId: stageRun.id,
+          result: staticResult,
+          timestamp: nowIso(),
+        });
+        return { passed: false, artifacts, result: staticResult };
+      }
     }
 
-    const result = await this.workspace.runVerificationCommands(
-      worktreePath,
-      commands,
-      ticket.mandate.maxDurationSec,
+    const smokeCfg = repo.smokeCheck;
+    const smokeTriggerMode = smokeCfg?.triggerMode ?? "every_gate";
+    const shouldRunSmoke = Boolean(
+      smokeCfg?.enabled &&
+        smokeCfg.startCommand?.trim() &&
+        this.workspace.runSmokeCheck &&
+        (smokeTriggerMode === "every_gate" || options?.isFinalDeliveryGate),
     );
+
+    if (!shouldRunSmoke) {
+      if (staticResult) {
+        this.emitEvent({
+          type: "verification_completed",
+          ticketId: ticket.id,
+          stageRunId: stageRun.id,
+          result: staticResult,
+          timestamp: nowIso(),
+        });
+      }
+      return { passed: true, artifacts, result: staticResult };
+    }
+
+    const smokeRes = await this.workspace.runSmokeCheck!(worktreePath, smokeCfg!);
+    const smokeLogLines = [
+      `Start Command: ${smokeCfg!.startCommand}`,
+      `Ready URL: ${smokeRes.readyUrl}`,
+      `Port: ${smokeRes.port}`,
+      `Startup Duration: ${smokeRes.startupDurationMs}ms`,
+      smokeRes.probeStatus !== undefined ? `Probe Status: ${smokeRes.probeStatus}` : "",
+      `Result: ${smokeRes.ok ? "PASS" : "FAIL"} — ${smokeRes.summary}`,
+      smokeRes.checkResults.length > 0
+        ? "\nCheck Commands:\n" +
+          smokeRes.checkResults
+            .map(
+              (r) =>
+                `$ ${r.command}\n[exit=${r.exitCode}, duration=${r.durationMs}ms]\n${r.output || "(no output)"}`,
+            )
+            .join("\n---\n")
+        : "",
+      smokeRes.serverOutputTail ? `\nServer Output Tail:\n${smokeRes.serverOutputTail}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    const smokeArtifact = await this.artifactStore.writeSpill(
+      {
+        ticketId: ticket.id,
+        stageRunId: stageRun.id,
+        kind: "smoke_log",
+        summary: `${smokeRes.ok ? "PASS" : "FAIL"} smoke check (${smokeRes.readyUrl})`,
+        ext: "log",
+      },
+      smokeLogLines,
+    );
+    await this.stateStore.saveArtifact(smokeArtifact, smokeLogLines);
+    artifacts.push(smokeArtifact);
+
+    const combinedResult: VerificationRunResult = {
+      ok: smokeRes.ok,
+      results: [...(staticResult?.results ?? []), ...smokeRes.checkResults],
+      failedCommand: smokeRes.ok
+        ? undefined
+        : (smokeRes.failedStep ?? `smoke:${smokeCfg!.startCommand}`),
+      summary: smokeRes.ok
+        ? [staticResult?.summary, smokeRes.summary].filter(Boolean).join("\n")
+        : `Smoke check failed (${smokeRes.failedStep ?? smokeCfg!.startCommand}): ${smokeRes.summary}`,
+      smokeResult: smokeRes,
+    };
+
     this.emitEvent({
       type: "verification_completed",
       ticketId: ticket.id,
       stageRunId: stageRun.id,
-      result,
+      result: combinedResult,
       timestamp: nowIso(),
     });
 
-    const logBody = result.results
-      .map(
-        (r) =>
-          `$ ${r.command}\n[exit=${r.exitCode}, duration=${r.durationMs}ms]\n${r.output || "(no output)"}\n`,
-      )
-      .join("\n---\n");
-
-    const artifact = await this.artifactStore.writeSpill(
-      {
-        ticketId: ticket.id,
-        stageRunId: stageRun.id,
-        kind: "test_log",
-        summary: `${result.ok ? "PASS" : "FAIL"} verification (${commands.join(" && ")})`,
-        ext: "log",
-      },
-      logBody || result.summary,
-    );
-    await this.stateStore.saveArtifact(artifact, `${result.summary}\n${logBody}`);
-
-    return { passed: result.ok, artifact, result };
+    return { passed: smokeRes.ok, artifacts, result: combinedResult };
   }
 
   private async enqueueDeliveryOutbox(ticket: Ticket, repoArg?: RepoConfig): Promise<void> {
@@ -2496,12 +2789,14 @@ export class SuperWorkKernel {
   }
 
   private async syncEpicStatuses(repo: RepoConfig): Promise<void> {
-    const repoTickets = await this.stateStore.listTickets({ repoId: repo.id });
-    const epics = repoTickets.filter((t) => t.isEpic && !isTerminalTicketStatus(t.status));
+    const allTickets = await this.stateStore.listTickets();
+    const epics = allTickets.filter(
+      (t) => t.repoId === repo.id && t.isEpic && !isTerminalTicketStatus(t.status),
+    );
     if (epics.length === 0) return;
 
     for (const epic of epics) {
-      const children = repoTickets.filter((t) => t.parentTicketId === epic.id);
+      const children = allTickets.filter((t) => t.parentTicketId === epic.id);
       if (children.length === 0) continue;
 
       const childrenCost = children.reduce((sum, c) => sum + c.costUsd, 0);
@@ -2658,7 +2953,9 @@ export class SuperWorkKernel {
       return;
     }
 
-    const gate = await this.runRepoVerificationGate(rebasingEpic, repo, stageRun, ws.worktreePath);
+    const gate = await this.runRepoVerificationGate(rebasingEpic, repo, stageRun, ws.worktreePath, {
+      isFinalDeliveryGate: true,
+    });
     const changedFiles = await this.workspace.getChangedFiles(ws.worktreePath, repo.baseBranch);
     const diffText = await this.workspace.getDiff(ws.worktreePath, repo.baseBranch);
 
@@ -2678,7 +2975,7 @@ export class SuperWorkKernel {
         diffText,
         summary: failedSummary,
         verificationPassed: false,
-        extraArtifacts: gate.artifact ? [gate.artifact] : undefined,
+        extraArtifacts: gate.artifacts.length > 0 ? gate.artifacts : undefined,
       });
       failedRun.spillTranscriptId = failNote.spillArtifactIds[0];
       await this.stateStore.saveStageRun(failedRun);
@@ -2721,9 +3018,10 @@ export class SuperWorkKernel {
       ...stageRun,
       status: "completed",
       completedAt: nowIso(),
-      summary: gate.artifact
-        ? `Epic staging branch verified on ${ws.branchName}; ${gate.result?.summary ?? "verification passed"}`
-        : `Epic staging branch ${ws.branchName} rebased cleanly onto ${repo.baseBranch}`,
+      summary:
+        gate.artifacts.length > 0
+          ? `Epic staging branch verified on ${ws.branchName}; ${gate.result?.summary ?? "verification passed"}`
+          : `Epic staging branch ${ws.branchName} rebased cleanly onto ${repo.baseBranch}`,
     };
     const { note } = await this.memory.recordStageSpillAndNote({
       ticket: rebasingEpic,
@@ -2733,7 +3031,7 @@ export class SuperWorkKernel {
       diffText,
       summary: finishedRun.summary!,
       verificationPassed: true,
-      extraArtifacts: gate.artifact ? [gate.artifact] : undefined,
+      extraArtifacts: gate.artifacts.length > 0 ? gate.artifacts : undefined,
     });
     finishedRun.spillTranscriptId = note.spillArtifactIds[0];
     await this.stateStore.saveStageRun(finishedRun);

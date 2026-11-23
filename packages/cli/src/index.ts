@@ -28,6 +28,7 @@ function parseCliArgs(argv: string[]): ParsedArgs {
     "desc",
     "description",
     "paths",
+    "depends-on",
     "template",
     "engine",
     "budget",
@@ -303,12 +304,12 @@ async function waitForTicketCompletion(
 }
 
 function printHelp(stdout: (line: string) => void): void {
-  stdout(`super-work v0.5.0 CLI
+  stdout(`super-work v0.6.0 CLI
 
 Usage:
   super-work up [-d|--detach] [--port 4318] [--data-dir path]
   super-work status [--repo <id>] [--auto-start] [--json]
-  super-work dispatch <title> [-d|--desc <text>] [--repo <id>] [--paths <csv>]
+  super-work dispatch <title> [-d|--desc <text>] [--repo <id>] [--paths <csv>] [--depends-on <csv>]
                       [--template fast|standard|strict] [--engine claude|codex|opencode|mock]
                       [--budget <usd>] [--wait] [--auto-start] [--json]
   super-work epic <title> [-d|--desc <text>] [--repo <id>] [--template fast|standard|strict]
@@ -437,6 +438,13 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
             .map((p) => p.trim())
             .filter(Boolean)
         : undefined;
+      const depsRaw = getStringFlag(flags, "depends-on");
+      const dependsOn = depsRaw
+        ? depsRaw
+            .split(",")
+            .map((d) => d.trim())
+            .filter(Boolean)
+        : undefined;
       const template = getStringFlag(flags, "template") as PipelineTemplateId | undefined;
       const preferredEngine = getStringFlag(flags, "engine") as WorkerEngineId | undefined;
       const budgetStr = getStringFlag(flags, "budget");
@@ -454,6 +462,7 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
             description,
             template,
             allowedPaths,
+            dependsOn,
             preferredEngine,
             maxCostUsd: Number.isFinite(maxCostUsd) ? maxCostUsd : undefined,
           });
@@ -465,7 +474,9 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
         stdout(
           asJson
             ? JSON.stringify({ ticket }, null, 2)
-            : `Dispatched ticket ${ticket.id} (${ticket.status}) -> ${ticket.title}`,
+            : `Dispatched ticket ${ticket.id} (${ticket.status})${
+                ticket.dependsOn.length > 0 ? ` deps=[${ticket.dependsOn.join(",")}]` : ""
+              } -> ${ticket.title}`,
         );
         return 0;
       }
@@ -518,8 +529,9 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
         stdout(plan.summary);
         for (const sub of plan.subtasks) {
           const deps = sub.dependsOnKeys.length > 0 ? sub.dependsOnKeys.join(",") : "parallel";
+          const repoTag = sub.repoId ? ` repo=${sub.repoId}` : "";
           stdout(
-            `  - [${sub.key}] (${sub.template}) deps=[${deps}] paths=[${sub.allowedPaths.join(", ")}] :: ${sub.title}`,
+            `  - [${sub.key}] (${sub.template})${repoTag} deps=[${deps}] paths=[${sub.allowedPaths.join(", ")}] :: ${sub.title}`,
           );
         }
         return 0;
@@ -649,6 +661,14 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
       stdout(
         `Ticket ${detail.ticket.id}: ${detail.ticket.title} [${detail.ticket.status} | stage=${detail.ticket.currentStage}]`,
       );
+      if (detail.ticket.handoverDigest) {
+        stdout(
+          `Handover Digest (v${detail.ticket.handoverDigest.version}): ${detail.ticket.handoverDigest.summary}`,
+        );
+        if (detail.ticket.handoverDigest.exportedSymbols.length > 0) {
+          stdout(`  Exports: ${detail.ticket.handoverDigest.exportedSymbols.join(" | ")}`);
+        }
+      }
       for (const run of detail.stageRuns) {
         stdout(
           `  - ${run.stage} (${run.engine}) [${run.status}] $${run.costUsd.toFixed(4)}${run.summary ? ` :: ${run.summary.split("\n")[0]}` : ""}`,

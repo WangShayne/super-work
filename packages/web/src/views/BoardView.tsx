@@ -1,9 +1,13 @@
-import { AlertCircle, CheckCircle2, Clock, GitPullRequest, Layers, Lock, Sparkles } from "lucide-react";
+import { useMemo, useState } from "react";
+import { AlertCircle, CheckCircle2, Clock, FileCode2, FolderGit2, GitPullRequest, Layers, Lock, Search, Sparkles, X } from "lucide-react";
 import { formatStage, formatTicketStatus, type TranslationKey, useI18n } from "../i18n.tsx";
-import type { Ticket, TicketStatus } from "../types.ts";
+import type { RepoConfig, Ticket, TicketStatus } from "../types.ts";
 
 interface BoardViewProps {
   tickets: Ticket[];
+  allTickets?: Ticket[];
+  repos?: RepoConfig[];
+  selectedRepoId?: string;
   onSelectTicket: (ticketId: string) => void;
 }
 
@@ -68,14 +72,115 @@ function statusBadgeStyle(status: TicketStatus): string {
   }
 }
 
-export function BoardView({ tickets, onSelectTicket }: BoardViewProps) {
+export function BoardView({
+  tickets,
+  allTickets,
+  repos = [],
+  selectedRepoId,
+  onSelectTicket,
+}: BoardViewProps) {
   const { locale, t } = useI18n();
+  const [searchQuery, setSearchQuery] = useState("");
+  const [hideSubtasks, setHideSubtasks] = useState(false);
+  const [onlyCrossOrHandover, setOnlyCrossOrHandover] = useState(false);
+
+  const childSource = allTickets ?? tickets;
+  const reposById = useMemo(() => new Map(repos.map((r) => [r.id, r])), [repos]);
+  const allTicketsById = useMemo(
+    () => new Map(childSource.map((item) => [item.id, item])),
+    [childSource],
+  );
+
+  const filteredTickets = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return tickets.filter((tkt) => {
+      if (hideSubtasks && Boolean(tkt.parentTicketId)) return false;
+      if (onlyCrossOrHandover) {
+        const isCrossCard = Boolean(selectedRepoId && tkt.repoId !== selectedRepoId);
+        const hasCrossDep = tkt.dependsOn.some((depId) => {
+          const dep = allTicketsById.get(depId);
+          return dep && dep.repoId !== tkt.repoId;
+        });
+        if (!tkt.handoverDigest && !isCrossCard && !hasCrossDep) return false;
+      }
+      if (!q) return true;
+      const rName = reposById.get(tkt.repoId)?.name ?? "";
+      return (
+        tkt.title.toLowerCase().includes(q) ||
+        tkt.id.toLowerCase().includes(q) ||
+        rName.toLowerCase().includes(q) ||
+        tkt.mandate.allowedPaths.some((p) => p.toLowerCase().includes(q))
+      );
+    });
+  }, [tickets, searchQuery, hideSubtasks, onlyCrossOrHandover, selectedRepoId, allTicketsById, reposById]);
 
   return (
-    <div className="p-5 overflow-x-auto">
+    <div className="p-5 space-y-4 overflow-x-auto">
+      {/* Board Search & Filter Toolbar */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-800/80 bg-zinc-900/40 px-3.5 py-2.5 text-xs">
+        <div className="relative flex-1 min-w-[220px] max-w-sm">
+          <Search className="w-3.5 h-3.5 text-zinc-500 absolute left-3 top-2" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder={t("board.searchPlaceholder")}
+            className="w-full bg-zinc-950 border border-zinc-800 rounded-lg pl-8 pr-7 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery("")}
+              className="absolute right-2 top-2 text-zinc-500 hover:text-zinc-200"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={() => {
+              setHideSubtasks(false);
+              setOnlyCrossOrHandover(false);
+            }}
+            className={`px-2.5 py-1 rounded-md border text-[11px] transition ${
+              !hideSubtasks && !onlyCrossOrHandover
+                ? "border-indigo-500/40 bg-indigo-500/15 text-indigo-200"
+                : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            {t("board.filterAll")} ({tickets.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setHideSubtasks((prev) => !prev)}
+            className={`px-2.5 py-1 rounded-md border text-[11px] transition ${
+              hideSubtasks
+                ? "border-purple-500/40 bg-purple-500/15 text-purple-200"
+                : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            {t("board.filterHideSubtasks")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setOnlyCrossOrHandover((prev) => !prev)}
+            className={`px-2.5 py-1 rounded-md border text-[11px] transition ${
+              onlyCrossOrHandover
+                ? "border-teal-500/40 bg-teal-500/15 text-teal-200"
+                : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            {t("board.filterCrossRepo")}
+          </button>
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-5 gap-4 min-w-[980px]">
         {SWIMLANES.map((lane) => {
-          const laneTickets = tickets.filter((tkt) => lane.statuses.includes(tkt.status));
+          const laneTickets = filteredTickets.filter((tkt) => lane.statuses.includes(tkt.status));
           return (
             <div
               key={lane.id}
@@ -101,16 +206,26 @@ export function BoardView({ tickets, onSelectTicket }: BoardViewProps) {
                       tkt.status,
                     );
                     const childTickets = tkt.isEpic
-                      ? tickets.filter((c) => c.parentTicketId === tkt.id)
+                      ? childSource.filter((c) => c.parentTicketId === tkt.id)
                       : [];
+                    const targetRepoName = reposById.get(tkt.repoId)?.name;
+                    const isCrossRepoCard = Boolean(selectedRepoId && tkt.repoId !== selectedRepoId);
+                    const hasCrossRepoDep = tkt.dependsOn.some((depId) => {
+                      const dep = allTicketsById.get(depId);
+                      return dep && dep.repoId !== tkt.repoId;
+                    });
                     const childDeliveredCount = childTickets.filter(
                       (c) => c.status === "delivered",
                     ).length;
+                    const cardBorderClass =
+                      tkt.status === "outbox_pending"
+                        ? "border-emerald-500/40"
+                        : "border-zinc-800";
                     return (
                       <div
                         key={tkt.id}
                         onClick={() => onSelectTicket(tkt.id)}
-                        className="rounded-lg border border-zinc-800 bg-zinc-950/80 p-3 space-y-2.5 hover:border-indigo-500/50 cursor-pointer transition group"
+                        className={`rounded-lg border ${cardBorderClass} bg-zinc-950/80 p-3 space-y-2.5 hover:border-indigo-500/50 cursor-pointer transition group`}
                       >
                         <div className="flex items-center justify-between gap-2">
                           <span
@@ -155,6 +270,18 @@ export function BoardView({ tickets, onSelectTicket }: BoardViewProps) {
                         </div>
 
                         <div className="flex flex-wrap gap-1">
+                          {isCrossRepoCard && targetRepoName && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-sky-500/15 border border-sky-500/30 text-sky-300 text-[10px] font-mono">
+                              <FolderGit2 className="w-2.5 h-2.5" />
+                              {targetRepoName}
+                            </span>
+                          )}
+                          {tkt.handoverDigest && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-teal-500/10 border border-teal-500/30 text-teal-300 text-[10px] font-mono">
+                              <FileCode2 className="w-2.5 h-2.5" />
+                              Handover v{tkt.handoverDigest.version}
+                            </span>
+                          )}
                           {tkt.prNumber && (
                             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 text-[10px] font-mono">
                               <GitPullRequest className="w-2.5 h-2.5" />
@@ -179,8 +306,13 @@ export function BoardView({ tickets, onSelectTicket }: BoardViewProps) {
 
                         {tkt.dependsOn.length > 0 && tkt.status === "waiting_deps" && (
                           <div className="flex items-center gap-1 text-[10px] text-amber-400/90 font-mono">
-                            <Clock className="w-3 h-3" />
-                            {t("board.waitingDepsPrefix")} {tkt.dependsOn.length} {t("board.waitingDepsSuffix")}
+                            <Clock className="w-3 h-3 shrink-0" />
+                            <span>
+                              {t("board.waitingDepsPrefix")} {tkt.dependsOn.length}{" "}
+                              {hasCrossRepoDep
+                                ? t("board.waitingCrossRepoSuffix")
+                                : t("board.waitingDepsSuffix")}
+                            </span>
                           </div>
                         )}
 

@@ -38,17 +38,37 @@ function canReach(
   return false;
 }
 
+export interface SanitizeEpicOptions {
+  validRepoIds?: Set<string>;
+  repoIdByName?: Map<string, string>;
+  defaultRepoId?: string;
+}
+
 export function sanitizeEpicSubtasks(
   rawSpecs: Array<Partial<EpicSubtaskSpec>>,
   defaultTemplate: PipelineTemplateId,
+  options?: SanitizeEpicOptions,
 ): EpicSubtaskSpec[] {
   const usedKeys = new Set<string>();
   const keyMap = new Map<string, string>();
+  const defaultRepoId = options?.defaultRepoId ?? "";
   const specs: EpicSubtaskSpec[] = rawSpecs.slice(0, 8).map((raw, idx) => {
     const rawKey = typeof raw.key === "string" ? raw.key.trim() : "";
     const key = sanitizeKey(rawKey, idx, usedKeys);
     if (rawKey) {
       keyMap.set(rawKey, key);
+    }
+    const rawRepo = typeof raw.repoId === "string" ? raw.repoId.trim() : "";
+    let resolvedRepoId: string | undefined;
+    if (rawRepo) {
+      if (!options?.validRepoIds || options.validRepoIds.has(rawRepo)) {
+        resolvedRepoId = rawRepo;
+      } else {
+        const byName = options.repoIdByName?.get(rawRepo.toLowerCase());
+        if (byName) {
+          resolvedRepoId = byName;
+        }
+      }
     }
     const template: PipelineTemplateId =
       raw.template === "fast" || raw.template === "standard" || raw.template === "strict"
@@ -64,6 +84,7 @@ export function sanitizeEpicSubtasks(
 
     return {
       key,
+      ...(resolvedRepoId ? { repoId: resolvedRepoId } : {}),
       title: String(raw.title ?? "").trim() || `Subtask ${key}`,
       description: String(raw.description ?? raw.title ?? "").trim() || `Implement ${key}`,
       template,
@@ -97,12 +118,15 @@ export function sanitizeEpicSubtasks(
     spec.dependsOnKeys = cleanDeps;
   }
 
-  // Ensure overlapping allowedPaths between siblings have a deterministic dependency edge
+  // Ensure overlapping allowedPaths between siblings in the SAME repository have a deterministic dependency edge
   for (let i = 0; i < specs.length; i++) {
     const a = specs[i]!;
+    const aRepo = a.repoId ?? defaultRepoId;
     const mandateA = createDefaultMandate({ allowedPaths: a.allowedPaths });
     for (let j = i + 1; j < specs.length; j++) {
       const b = specs[j]!;
+      const bRepo = b.repoId ?? defaultRepoId;
+      if (aRepo !== bRepo) continue;
       const mandateB = createDefaultMandate({ allowedPaths: b.allowedPaths });
       if (!mandateScopesOverlap(mandateA, mandateB)) continue;
       if (canReach(a.key, b.key, dependents) || canReach(b.key, a.key, dependents)) continue;
@@ -133,6 +157,48 @@ export function sanitizeEpicSubtasks(
   return ordered.length === specs.length ? ordered : specs;
 }
 
+export interface AvailableRepoSummary {
+  id: string;
+  name: string;
+  structure?: string;
+}
+
+function buildSanitizeOptions(
+  defaultRepoId: string,
+  availableRepos?: AvailableRepoSummary[],
+): SanitizeEpicOptions | undefined {
+  if (!availableRepos || availableRepos.length === 0) {
+    return defaultRepoId ? { defaultRepoId } : undefined;
+  }
+  return {
+    validRepoIds: new Set(availableRepos.map((r) => r.id)),
+    repoIdByName: new Map(availableRepos.map((r) => [r.name.toLowerCase(), r.id])),
+    defaultRepoId,
+  };
+}
+
+function inferTargetRepoFromText(
+  text: string,
+  availableRepos: AvailableRepoSummary[] | undefined,
+  defaultRepoId: string,
+): AvailableRepoSummary | undefined {
+  if (!availableRepos || availableRepos.length <= 1) return undefined;
+  const lower = text.toLowerCase();
+  for (const r of availableRepos) {
+    const escapedId = r.id.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const escapedName = r.name.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (
+      new RegExp(`\\[${escapedName}\\]|\\b${escapedName}:|\\bin\\s+${escapedName}\\b|\\b${escapedName}\\b`, "i").test(
+        lower,
+      ) ||
+      new RegExp(`\\b${escapedId}\\b`, "i").test(lower)
+    ) {
+      return r;
+    }
+  }
+  return availableRepos.find((r) => r.id === defaultRepoId);
+}
+
 export function normalizeEpicDecompositionPlan(
   raw: Partial<EpicDecompositionPlan>,
   fallbackInput: {
@@ -141,11 +207,13 @@ export function normalizeEpicDecompositionPlan(
     description: string;
     defaultTemplate: PipelineTemplateId;
     repoStructure?: string;
+    availableRepos?: AvailableRepoSummary[];
   },
 ): EpicDecompositionPlan {
+  const sanitizeOpts = buildSanitizeOptions(fallbackInput.repo.id, fallbackInput.availableRepos);
   const subtasks =
     Array.isArray(raw.subtasks) && raw.subtasks.length > 0
-      ? sanitizeEpicSubtasks(raw.subtasks, fallbackInput.defaultTemplate)
+      ? sanitizeEpicSubtasks(raw.subtasks, fallbackInput.defaultTemplate, sanitizeOpts)
       : heuristicDecomposeEpic(fallbackInput).subtasks;
 
   return {
@@ -201,7 +269,9 @@ export function heuristicDecomposeEpic(input: {
   description: string;
   defaultTemplate: PipelineTemplateId;
   repoStructure?: string;
+  availableRepos?: AvailableRepoSummary[];
 }): EpicDecompositionPlan {
+  const sanitizeOpts = buildSanitizeOptions(input.repo.id, input.availableRepos);
   const knownModules = extractKnownModulesFromRepoStructure(input.repoStructure);
   const rawLines = input.description.split(/\r?\n/);
   const listItems = rawLines
@@ -222,9 +292,15 @@ export function heuristicDecomposeEpic(input: {
     const steps = inlineItems.slice(0, 5);
     const hasCoreFirst = /core|contract|schema|type|契约|核心|接口/i.test(steps[0]!);
     const specs: EpicSubtaskSpec[] = steps.map((stepText, idx) => {
+      const targetRepo = inferTargetRepoFromText(stepText, input.availableRepos, input.repo.id);
+      const repoKnownModules = targetRepo?.structure
+        ? extractKnownModulesFromRepoStructure(targetRepo.structure)
+        : knownModules;
       const explicitPaths = extractScopedPaths(stepText);
       const paths =
-        explicitPaths.length > 0 ? explicitPaths : inferPathsFromRepoStructure(stepText, knownModules);
+        explicitPaths.length > 0
+          ? explicitPaths
+          : inferPathsFromRepoStructure(stepText, repoKnownModules);
       const isIntegration =
         idx === steps.length - 1 &&
         /test|verify|integration|联调|测试|验收/i.test(stepText) &&
@@ -237,6 +313,7 @@ export function heuristicDecomposeEpic(input: {
       }
       return {
         key: `step_${idx + 1}`,
+        ...(targetRepo && targetRepo.id !== input.repo.id ? { repoId: targetRepo.id } : {}),
         title: stepText.length > 72 ? `${stepText.slice(0, 69)}...` : stepText,
         description: `${input.title}\n\nSubtask focus: ${stepText}`,
         template: input.defaultTemplate,
@@ -246,7 +323,7 @@ export function heuristicDecomposeEpic(input: {
       };
     });
 
-    const sanitized = sanitizeEpicSubtasks(specs, input.defaultTemplate);
+    const sanitized = sanitizeEpicSubtasks(specs, input.defaultTemplate, sanitizeOpts);
     return {
       epicTitle: input.title,
       summary: `Decomposed ${steps.length} actionable steps into parallel/staged DAG.`,
@@ -285,12 +362,38 @@ export function heuristicDecomposeEpic(input: {
         acceptanceCriteria: [`Scoped changes in ${pathGlob} pass verification`],
       };
     });
-    const sanitized = sanitizeEpicSubtasks(specs, input.defaultTemplate);
+    const sanitized = sanitizeEpicSubtasks(specs, input.defaultTemplate, sanitizeOpts);
     return {
       epicTitle: input.title,
       summary: `Decomposed by module scope (${detectedPaths.length} modules).`,
       subtasks: sanitized,
     };
+  }
+
+  // Cross-repo heuristic if multiple repositories are explicitly referenced in title/description
+  if (input.availableRepos && input.availableRepos.length > 1) {
+    const combinedLower = `${input.title}\n${input.description}`.toLowerCase();
+    const mentionedRepos = input.availableRepos.filter((r) => {
+      const escapedName = r.name.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`\\b${escapedName}\\b`, "i").test(combinedLower);
+    });
+    if (mentionedRepos.length >= 2) {
+      const specs: EpicSubtaskSpec[] = mentionedRepos.slice(0, 5).map((r, idx) => ({
+        key: sanitizeKey(r.name, idx, new Set()),
+        repoId: r.id,
+        title: `[${r.name}] ${input.title}`,
+        description: `${input.description}\n\nImplement repository-specific changes in ${r.name}.`,
+        template: input.defaultTemplate,
+        allowedPaths: ["**"],
+        dependsOnKeys: idx > 0 ? [sanitizeKey(mentionedRepos[0]!.name, 0, new Set())] : [],
+        acceptanceCriteria: [`Changes in ${r.name} pass verification`],
+      }));
+      return {
+        epicTitle: input.title,
+        summary: `Cross-repo Epic DAG across ${mentionedRepos.map((r) => r.name).join(" -> ")}.`,
+        subtasks: sanitizeEpicSubtasks(specs, input.defaultTemplate, sanitizeOpts),
+      };
+    }
   }
 
   // Default vertical slice DAG (tailored to discovered repo structure if available)
@@ -322,7 +425,7 @@ export function heuristicDecomposeEpic(input: {
       return {
         epicTitle: input.title,
         summary: `Structure-aware 2-stage Epic DAG (${knownModules.slice(0, 5).join(", ")}).`,
-        subtasks: sanitizeEpicSubtasks(srcSpecs, input.defaultTemplate),
+        subtasks: sanitizeEpicSubtasks(srcSpecs, input.defaultTemplate, sanitizeOpts),
       };
     }
   }
@@ -359,6 +462,6 @@ export function heuristicDecomposeEpic(input: {
   return {
     epicTitle: input.title,
     summary: "Default 3-stage vertical Epic DAG (contracts -> backend -> UI & verification).",
-    subtasks: sanitizeEpicSubtasks(defaultSpecs, input.defaultTemplate),
+    subtasks: sanitizeEpicSubtasks(defaultSpecs, input.defaultTemplate, sanitizeOpts),
   };
 }

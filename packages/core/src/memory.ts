@@ -1,9 +1,12 @@
+import { formatUpstreamHandoversForPrompt } from "./handover.ts";
 import type { ArtifactStore, StateStore } from "./ports.ts";
 import type {
   ChainOfRecall,
+  HandoverDigest,
   InlineStageNote,
   MemorySearchHit,
   ReviewFinding,
+  SmokeCheckConfig,
   SpillArtifact,
   StageKind,
   StageRun,
@@ -13,8 +16,10 @@ import type {
 
 export interface WorkerPromptOptions {
   verificationCommands?: string[];
+  smokeCheck?: SmokeCheckConfig;
   repoConventions?: string;
   playbookContext?: string;
+  upstreamHandovers?: HandoverDigest[];
 }
 
 export class MemoryManager {
@@ -61,6 +66,11 @@ export class MemoryManager {
         `- Deterministic verification gate: ${verificationCommands.join(" && ")} (executed automatically by super-work after implement and rebase)`,
       );
     }
+    if (opts.smokeCheck?.enabled && opts.smokeCheck.startCommand?.trim()) {
+      sections.push(
+        `- Ephemeral runtime smoke gate: \`${opts.smokeCheck.startCommand}\` probed at \`${opts.smokeCheck.readyUrl || "http://127.0.0.1:$PORT"}\` (dynamic $PORT env injected by super-work)`,
+      );
+    }
 
     if (opts.repoConventions?.trim()) {
       sections.push(`\n## Repository Engineering Conventions\n${opts.repoConventions.trim()}`);
@@ -68,6 +78,13 @@ export class MemoryManager {
 
     if (opts.playbookContext?.trim()) {
       sections.push(`\n## Repository Playbook (Learned Rules & Guardrails)\n${opts.playbookContext.trim()}`);
+    }
+
+    if (opts.upstreamHandovers && opts.upstreamHandovers.length > 0) {
+      const handoverBlock = formatUpstreamHandoversForPrompt(opts.upstreamHandovers);
+      if (handoverBlock) {
+        sections.push(`\n## Upstream Dependency Contracts (Handover Digest)\n${handoverBlock}`);
+      }
     }
 
     if (ticket.inlineMemory.planSummary) {

@@ -22,6 +22,7 @@ import type {
   RepoConfig,
   RepoContractFile,
   RepoMetricsSummary,
+  SmokeCheckConfig,
   SpillArtifact,
   Ticket,
   TicketDetailResponse,
@@ -81,10 +82,14 @@ export const api = {
 
   patchRepo: (
     id: string,
-    patch: Omit<Partial<RepoConfig>, "maxConcurrentWorkers" | "dailyBudgetUsd" | "conventions"> & {
+    patch: Omit<
+      Partial<RepoConfig>,
+      "maxConcurrentWorkers" | "dailyBudgetUsd" | "conventions" | "smokeCheck"
+    > & {
       maxConcurrentWorkers?: number | null;
       dailyBudgetUsd?: number | null;
       conventions?: string | null;
+      smokeCheck?: SmokeCheckConfig | null;
     },
   ) =>
     request<{ repo: RepoConfig }>(`/api/repos/${id}`, {
@@ -147,6 +152,7 @@ export const api = {
     description: string;
     template?: PipelineTemplateId;
     allowedPaths?: string[];
+    dependsOn?: string[];
     maxCostUsd?: number;
     preferredEngine?: WorkerEngineId;
     modelOverride?: string;

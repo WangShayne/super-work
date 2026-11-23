@@ -11,9 +11,9 @@
 ## 核心能力
 
 - **Router + 隔离 Worker 双层架构**：
-  - **控制面（`EventIntakeRouter` & `MasterAssessor`）**：统一接收入站触发器（`web`、`github_issue`、`github_pr`、`github_ci`、`cli`），注入目标仓库真实目录结构（`RepoStructureScanner`）、仓库工程契约（`super-work.json`）与**自进化经验库 Playbook**（按路径匹配注入 Top 8 / `<= 1200` 字符），支持 `off` / `observe` / `auto` 模式、**Epic 统一集成分支（`super-work/epic/<id>`）+ 全局终验与单 PR 原子交付**、**PR 评审与 CI 失败同分支自动返修**，以及守护进程重启无损断点自愈。
-  - **执行面（`WorkerDriver` & `GitWorktreeProvider`）**：在独立的 `git worktree` 分支中调度成熟 Coding Agent（`ClaudeCodeDriver`、`CodexDriver`、`OpenCodeDriver`、`MockWorkerDriver`），新建工作树支持 **Worktree 预热命令（`setupCommands`）**，支持**结构化对抗式交叉盲审（`blocker`/`major`/`nit` 分级检查单）**、原生会话续跑与自动/一键 Worktree GC。
-- **工程契约（`super-work.json`）与闭环自进化 Playbook**：仓库根目录 `super-work.json` 承载团队共享的验证门禁、工作树预热命令、禁止路径、架构约定与共享规则，与本地 SQLite 个人运行态配置分层解耦；门禁/审查闭环修复后及 Inbox 人类批注会自动沉淀为避坑经验条目。
+  - **控制面（`EventIntakeRouter` & `MasterAssessor`）**：统一接收入站触发器（`web`、`github_issue`、`github_pr`、`github_ci`、`cli`），注入目标仓库真实目录结构（`RepoStructureScanner`）、仓库工程契约（`super-work.json`）与**自进化经验库 Playbook**（按路径匹配注入 Top 8 / `<= 1200` 字符），支持 `off` / `observe` / `auto` 模式、**跨仓库联合 Epic 与显式 `--depends-on` 依赖编排**及 **上游产物契约交接摘要（Handover Digest & 返工漂移提醒）**、**Epic 统一集成分支（`super-work/epic/<id>`）+ 全局终验与单 PR 原子交付**、**PR 评审与 CI 失败同分支自动返修**，以及守护进程重启无损断点自愈。
+  - **执行面（`WorkerDriver` & `GitWorktreeProvider`）**：在独立的 `git worktree` 分支中调度成熟 Coding Agent（`ClaudeCodeDriver`、`CodexDriver`、`OpenCodeDriver`、`MockWorkerDriver`），新建工作树支持 **Worktree 预热命令（`setupCommands`）**，支持**结构化对抗式交叉盲审（`blocker`/`major`/`nit` 分级检查单）**、**临时服务运行时冒烟门禁（`smokeCheck`，动态端口探测与整棵进程组回收）**、原生会话续跑与自动/一键 Worktree GC。
+- **工程契约（`super-work.json`）、运行时冒烟与闭环自进化 Playbook**：仓库根目录 `super-work.json` 承载团队共享的验证门禁、`smokeCheck` 运行时探针、工作树预热命令、禁止路径、架构约定与共享规则，与本地 SQLite 个人运行态配置分层解耦；验证与冒烟日志持久化为 `test_log` / `smoke_log` 产物并反哺避坑经验条目。
 - **双通道 `Transactional Outbox` 与安全一键回滚**：支持 **PR 推送/增量更新** 与 **本地 `--no-ff` 原子合入主干**，并在 Web 与 CLI 提供 **安全反向提交回滚（`git revert -m 1`）**。
 - **高信噪比注意力主动触达**：仅在新增 Inbox 阻塞待办、最终交付完成或异常失败时触发 **macOS 原生桌面通知** 与 **自适应 Webhook**（自动适配飞书/Lark、Slack、Discord 与带 HMAC 签名的通用 JSON）。
 - **分级不可变 `Mandate` 护栏、并发配额与每日预算柔性熔断**：

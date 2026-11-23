@@ -2,6 +2,7 @@ export * from "./types.ts";
 export * from "./utils.ts";
 export * from "./ports.ts";
 export * from "./mandate.ts";
+export * from "./handover.ts";
 export * from "./memory.ts";
 export * from "./playbook.ts";
 export * from "./review.ts";

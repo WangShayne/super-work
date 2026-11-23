@@ -4,6 +4,7 @@ import {
   Bot,
   BrainCircuit,
   Cpu,
+  FileJson2,
   FolderGit2,
   Languages,
   Plus,
@@ -33,6 +34,7 @@ interface HeaderBarProps {
   onOpenSimulate: () => void;
   onOpenAddRepo: () => void;
   onOpenRepoSettings: () => void;
+  onOpenContractSettings?: () => void;
   onOpenWorktrees: () => void;
   onOpenSetup: () => void;
 }
@@ -86,19 +88,19 @@ function StatusCapsule({
   );
 
   return (
-    <div className="relative group">
+    <div className="relative group shrink-0">
       {onClick ? (
         <button
           type="button"
           onClick={onClick}
-          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[11px] transition ${toneClasses} ${interactiveClass}`}
+          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] whitespace-nowrap transition ${toneClasses} ${interactiveClass}`}
         >
           {content}
         </button>
       ) : (
         <div
           tabIndex={0}
-          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[11px] transition ${toneClasses} ${interactiveClass}`}
+          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] whitespace-nowrap transition ${toneClasses} ${interactiveClass}`}
         >
           {content}
         </div>
@@ -133,6 +135,7 @@ export function HeaderBar({
   onOpenSimulate,
   onOpenAddRepo,
   onOpenRepoSettings,
+  onOpenContractSettings,
   onOpenWorktrees,
   onOpenSetup,
 }: HeaderBarProps) {
@@ -154,6 +157,15 @@ export function HeaderBar({
   const activeWorktrees = health?.counts.activeWorktrees ?? 0;
   const reclaimableWorktrees = health?.counts.reclaimableWorktrees ?? 0;
 
+  const implDisplay = formatEngineDisplayName(implEngine, locale);
+  const reviewDisplay = formatEngineDisplayName(reviewEngine, locale);
+  const enginesCompactValue =
+    implEngine === reviewEngine ? implDisplay : `${implDisplay} → ${reviewDisplay}`;
+  const smokeEnabled = Boolean(activeRepo?.smokeCheck?.enabled);
+  const hasStaticGate = Boolean(
+    activeRepo?.contractSyncedAt || (activeRepo?.verificationCommands?.length ?? 0) > 0,
+  );
+
   return (
     <header className="border-b border-zinc-800/80 bg-zinc-950/95 backdrop-blur sticky top-0 z-20">
       {/* Row 1: Primary Bar */}
@@ -166,6 +178,9 @@ export function HeaderBar({
             <div>
               <div className="flex items-center gap-2">
                 <span className="font-semibold tracking-tight text-zinc-100 text-sm">super-work</span>
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
+                  v0.6
+                </span>
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700/60">
                   {t("brand.badge")}
                 </span>
@@ -279,7 +294,7 @@ export function HeaderBar({
       </div>
 
       {/* Row 2: Self-Explanatory System Status Strip */}
-      <div className="px-5 py-2 border-t border-zinc-800/60 bg-zinc-900/40 flex flex-wrap items-center gap-2">
+      <div className="px-5 py-1.5 border-t border-zinc-800/60 bg-zinc-900/40 flex flex-wrap items-center gap-1.5">
         <StatusCapsule
           icon={
             <Radio
@@ -309,16 +324,44 @@ export function HeaderBar({
         <StatusCapsule
           icon={<Bot className="w-3 h-3 text-sky-400" />}
           label={t("strip.engines.label")}
-          value={`${t("strip.engines.coding")} ${formatEngineDisplayName(implEngine, locale)} · ${t(
-            "strip.engines.review",
-          )} ${formatEngineDisplayName(reviewEngine, locale)}`}
-          extra={`(${health?.availableEngines.length ?? 0} ${t("strip.engines.availableSuffix")})`}
+          value={enginesCompactValue}
+          extra={`(${health?.availableEngines.length ?? 0})`}
           align="left"
           onClick={onOpenSetup}
           tooltipTitle={t("strip.engines.label")}
           tooltipBody={t("strip.engines.desc")}
-          tooltipFooter={`${t("strip.engines.detectedPrefix")} ${availableList.join(", ") || "—"}`}
+          tooltipFooter={`${t("strip.engines.coding")}: ${implDisplay} · ${t("strip.engines.review")}: ${reviewDisplay} | ${t("strip.engines.detectedPrefix")} ${availableList.join(", ") || "—"}`}
         />
+
+        {activeRepo && (
+          <StatusCapsule
+            icon={
+              <FileJson2
+                className={`w-3 h-3 ${
+                  smokeEnabled ? "text-emerald-400" : hasStaticGate ? "text-indigo-400" : "text-zinc-400"
+                }`}
+              />
+            }
+            label={t("strip.contract.label")}
+            value={
+              smokeEnabled
+                ? t("strip.contract.smokeOn")
+                : hasStaticGate
+                  ? t("strip.contract.synced")
+                  : t("strip.contract.unset")
+            }
+            tone={smokeEnabled ? "good" : hasStaticGate ? "accent" : "neutral"}
+            align="left"
+            onClick={onOpenContractSettings ?? onOpenRepoSettings}
+            tooltipTitle={t("strip.contract.label")}
+            tooltipBody={t("strip.contract.desc")}
+            tooltipFooter={
+              smokeEnabled
+                ? `Smoke: ${activeRepo.smokeCheck?.startCommand}`
+                : `${activeRepo.verificationCommands?.length ?? 0} verification cmd(s)`
+            }
+          />
+        )}
 
         <StatusCapsule
           icon={

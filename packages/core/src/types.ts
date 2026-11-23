@@ -36,6 +36,29 @@ export type DeliveryChannel = "auto_pr_or_branch" | "local_merge" | "github_pr";
 
 export type EpicDeliveryMode = "unified" | "per_subtask";
 
+export type SmokeTriggerMode = "every_gate" | "delivery_only";
+
+export interface SmokeCheckConfig {
+  enabled: boolean;
+  startCommand: string;
+  readyUrl?: string;
+  startupTimeoutSec?: number;
+  checkCommands?: string[];
+  triggerMode?: SmokeTriggerMode;
+}
+
+export interface SmokeCheckResult {
+  ok: boolean;
+  port: number;
+  readyUrl: string;
+  startupDurationMs: number;
+  probeStatus?: number;
+  checkResults: VerificationCommandOutput[];
+  serverOutputTail: string;
+  failedStep?: string;
+  summary: string;
+}
+
 export interface VerificationCommandOutput {
   command: string;
   exitCode: number;
@@ -48,10 +71,26 @@ export interface VerificationRunResult {
   results: VerificationCommandOutput[];
   failedCommand?: string;
   summary: string;
+  smokeResult?: SmokeCheckResult;
+}
+
+export interface HandoverDigest {
+  ticketId: string;
+  repoId: string;
+  repoName?: string;
+  title: string;
+  summary: string;
+  changedFiles: string[];
+  exportedSymbols: string[];
+  contractSnippets: string[];
+  formattedMarkdown: string;
+  version: number;
+  generatedAt: string;
 }
 
 export interface EpicSubtaskSpec {
   key: string;
+  repoId?: string;
   title: string;
   description: string;
   template: PipelineTemplateId;
@@ -78,6 +117,7 @@ export interface RepoContractFile {
   defaultTemplate?: PipelineTemplateId;
   verificationCommands?: string[];
   setupCommands?: string[];
+  smokeCheck?: SmokeCheckConfig;
   forbiddenPaths?: string[];
   conventions?: string;
   playbook?: SharedPlaybookRuleSpec[];
@@ -146,6 +186,7 @@ export interface RepoConfig {
   autoCleanupWorktree?: boolean;
   verificationCommands?: string[];
   setupCommands?: string[];
+  smokeCheck?: SmokeCheckConfig;
   forbiddenPaths?: string[];
   conventions?: string;
   contractSyncedHash?: string;
@@ -252,6 +293,7 @@ export interface Ticket {
   modelOverride?: string;
   effortOverride?: ReasoningEffort;
   inlineMemory: InlineMemory;
+  handoverDigest?: HandoverDigest;
   costUsd: number;
   priority: number;
   errorMessage?: string;
@@ -275,7 +317,13 @@ export interface StageRun {
   spillTranscriptId?: string;
 }
 
-export type ArtifactKind = "transcript" | "diff" | "test_log" | "review_report";
+export type ArtifactKind =
+  | "transcript"
+  | "diff"
+  | "test_log"
+  | "smoke_log"
+  | "review_report"
+  | "handover";
 
 export interface SpillArtifact {
   id: string;

@@ -6,8 +6,34 @@ export type StageKind = "plan" | "implement" | "review" | "rebase";
 export type DeliveryChannel = "auto_pr_or_branch" | "local_merge" | "github_pr";
 export type EpicDeliveryMode = "unified" | "per_subtask";
 
+export type SmokeTriggerMode = "every_gate" | "delivery_only";
+
+export interface SmokeCheckConfig {
+  enabled: boolean;
+  startCommand: string;
+  readyUrl?: string;
+  startupTimeoutSec?: number;
+  checkCommands?: string[];
+  triggerMode?: SmokeTriggerMode;
+}
+
+export interface HandoverDigest {
+  ticketId: string;
+  repoId: string;
+  repoName?: string;
+  title: string;
+  summary: string;
+  changedFiles: string[];
+  exportedSymbols: string[];
+  contractSnippets: string[];
+  formattedMarkdown: string;
+  version: number;
+  generatedAt: string;
+}
+
 export interface EpicSubtaskSpec {
   key: string;
+  repoId?: string;
   title: string;
   description: string;
   template: PipelineTemplateId;
@@ -56,6 +82,7 @@ export interface RepoContractFile {
   defaultTemplate?: PipelineTemplateId;
   verificationCommands?: string[];
   setupCommands?: string[];
+  smokeCheck?: SmokeCheckConfig;
   forbiddenPaths?: string[];
   conventions?: string;
   playbook?: SharedPlaybookRuleSpec[];
@@ -109,6 +136,7 @@ export interface RepoConfig {
   autoCleanupWorktree?: boolean;
   verificationCommands?: string[];
   setupCommands?: string[];
+  smokeCheck?: SmokeCheckConfig;
   forbiddenPaths?: string[];
   conventions?: string;
   contractSyncedHash?: string;
@@ -184,6 +212,7 @@ export interface Ticket {
   nativeSessions: Partial<Record<WorkerEngineId, string>>;
   activeEngine?: WorkerEngineId;
   inlineMemory: InlineMemory;
+  handoverDigest?: HandoverDigest;
   costUsd: number;
   priority: number;
   errorMessage?: string;
@@ -209,7 +238,7 @@ export interface SpillArtifact {
   id: string;
   ticketId: string;
   stageRunId?: string;
-  kind: "transcript" | "diff" | "test_log" | "review_report";
+  kind: "transcript" | "diff" | "test_log" | "smoke_log" | "review_report" | "handover";
   summary: string;
   storageUri: string;
   byteSize: number;
@@ -336,6 +365,15 @@ export interface TicketDetailResponse {
   inboxItems: InboxItem[];
   outboxEntries: OutboxEntry[];
   diff: string;
+  subtasks?: Ticket[];
+  upstreamDependencies?: Array<{
+    id: string;
+    repoId: string;
+    repoName?: string;
+    title: string;
+    status: TicketStatus;
+    handoverDigest?: HandoverDigest;
+  }>;
 }
 
 export interface LiveEventLogEntry {

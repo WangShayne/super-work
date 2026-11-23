@@ -154,7 +154,7 @@ export function inferScopePathsFromFiles(
 }
 
 export function heuristicDistillPlaybookLesson(input: {
-  failureKind: "verification" | "review";
+  failureKind: "verification" | "smoke" | "review";
   failureSummary: string;
   fixSummary: string;
   changedFiles: string[];
@@ -167,9 +167,11 @@ export function heuristicDistillPlaybookLesson(input: {
     .trim()
     .slice(0, 120);
   const prefix =
-    input.failureKind === "verification"
-      ? "Verify and guard against check failure"
-      : "Prevent code-review issue";
+    input.failureKind === "smoke"
+      ? "Prevent runtime startup/smoke failure"
+      : input.failureKind === "verification"
+        ? "Verify and guard against check failure"
+        : "Prevent code-review issue";
   const rule = normalizePlaybookRuleText(
     `${prefix} (${cleanFailure || "check prior failure mode"}); apply fix pattern: ${input.fixSummary.slice(0, 90)}`,
   );

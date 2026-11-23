@@ -34,6 +34,7 @@ export function App() {
   const [repos, setRepos] = useState<RepoConfig[]>([]);
   const [selectedRepoId, setSelectedRepoId] = useState<string>("");
   const [tickets, setTickets] = useState<Ticket[]>([]);
+  const [allTickets, setAllTickets] = useState<Ticket[]>([]);
   const [inboxItems, setInboxItems] = useState<InboxItem[]>([]);
   const [metrics, setMetrics] = useState<RepoMetricsSummary | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
@@ -45,6 +46,9 @@ export function App() {
   const [simulateOpen, setSimulateOpen] = useState(false);
   const [addRepoOpen, setAddRepoOpen] = useState(false);
   const [repoSettingsOpen, setRepoSettingsOpen] = useState(false);
+  const [repoSettingsInitialTab, setRepoSettingsInitialTab] = useState<
+    "runtime" | "contract" | "playbook"
+  >("runtime");
   const [worktreesOpen, setWorktreesOpen] = useState(false);
   const [setupStatus, setSetupStatus] = useState<PublicSetupStatus | null>(null);
   const [setupOpen, setSetupOpen] = useState(false);
@@ -67,12 +71,21 @@ export function App() {
       setSelectedRepoId((prev) => prev || activeRepo);
     }
 
-    const [t, i, m] = await Promise.all([
-      api.listTickets(activeRepo || undefined),
+    const [tAll, i, m] = await Promise.all([
+      api.listTickets(),
       api.listInbox(activeRepo || undefined),
       api.getMetrics(activeRepo || undefined),
     ]);
-    setTickets(t.tickets);
+    setAllTickets(tAll.tickets);
+    const byId = new Map(tAll.tickets.map((tkt) => [tkt.id, tkt]));
+    const scopedTickets = activeRepo
+      ? tAll.tickets.filter(
+          (tkt) =>
+            tkt.repoId === activeRepo ||
+            (tkt.parentTicketId && byId.get(tkt.parentTicketId)?.repoId === activeRepo),
+        )
+      : tAll.tickets;
+    setTickets(scopedTickets);
     setInboxItems(i.items);
     setMetrics(m.metrics);
   }, []);
@@ -170,9 +183,9 @@ export function App() {
 
   const ticketsById = useMemo(() => {
     const map = new Map<string, Ticket>();
-    for (const t of tickets) map.set(t.id, t);
+    for (const t of allTickets) map.set(t.id, t);
     return map;
-  }, [tickets]);
+  }, [allTickets]);
 
   const pendingInboxCount = useMemo(
     () => inboxItems.filter((i) => i.status === "pending").length,
@@ -227,7 +240,14 @@ export function App() {
         onOpenDispatch={() => setDispatchOpen(true)}
         onOpenSimulate={() => setSimulateOpen(true)}
         onOpenAddRepo={() => setAddRepoOpen(true)}
-        onOpenRepoSettings={() => setRepoSettingsOpen(true)}
+        onOpenRepoSettings={() => {
+          setRepoSettingsInitialTab("runtime");
+          setRepoSettingsOpen(true);
+        }}
+        onOpenContractSettings={() => {
+          setRepoSettingsInitialTab("contract");
+          setRepoSettingsOpen(true);
+        }}
         onOpenWorktrees={() => setWorktreesOpen(true)}
         onOpenSetup={() => setSetupOpen(true)}
       />
@@ -287,12 +307,27 @@ export function App() {
           <InboxView
             items={inboxItems}
             ticketsById={ticketsById}
+            totalTicketCount={tickets.length}
+            runningTicketCount={runningTicketCount}
             onResolve={handleResolveInbox}
             onInspectTicket={(id) => setInspectedTicketId(id)}
+            onOpenDispatch={activeRepo ? () => setDispatchOpen(true) : undefined}
+            onSwitchToBoard={() => setActiveTab("board")}
+            onOpenContractSettings={
+              activeRepo
+                ? () => {
+                    setRepoSettingsInitialTab("contract");
+                    setRepoSettingsOpen(true);
+                  }
+                : undefined
+            }
           />
         ) : activeTab === "board" ? (
           <BoardView
             tickets={tickets}
+            allTickets={allTickets}
+            repos={repos}
+            selectedRepoId={selectedRepoId}
             onSelectTicket={(id) => setInspectedTicketId(id)}
           />
         ) : (
@@ -302,7 +337,8 @@ export function App() {
 
       <DeepDiveDrawer
         ticketId={inspectedTicketId}
-        allTickets={tickets}
+        allTickets={allTickets}
+        repos={repos}
         repo={activeRepo}
         liveEvents={liveEvents}
         onClose={() => setInspectedTicketId(null)}
@@ -315,6 +351,8 @@ export function App() {
           <DispatchTaskModal
             open={dispatchOpen}
             repoId={activeRepo.id}
+            repos={repos}
+            allTickets={allTickets}
             availableEngines={health?.availableEngines ?? ["mock"]}
             defaultTemplate={activeRepo.defaultTemplate}
             defaultEngine={activeRepo.preferredImplementEngine}
@@ -355,6 +393,7 @@ export function App() {
       <RepoSettingsModal
         open={repoSettingsOpen}
         repo={activeRepo ?? null}
+        initialTab={repoSettingsInitialTab}
         availableEngines={health?.availableEngines ?? ["mock"]}
         onClose={() => setRepoSettingsOpen(false)}
         onRefresh={() => void refreshAll(selectedRepoId || undefined)}

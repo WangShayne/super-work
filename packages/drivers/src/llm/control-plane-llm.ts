@@ -182,6 +182,7 @@ const EPIC_DECOMPOSITION_SCHEMA = {
         type: "object",
         properties: {
           key: { type: "string" },
+          repoId: { type: "string" },
           title: { type: "string" },
           description: { type: "string" },
           template: { type: "string", enum: ["fast", "standard", "strict"] },
@@ -203,6 +204,16 @@ const DISTILL_LESSON_SCHEMA = {
     scopePaths: { type: "array", items: { type: "string" } },
   },
   required: ["rule", "scopePaths"],
+};
+
+const HANDOVER_DIGEST_SCHEMA = {
+  type: "object",
+  properties: {
+    summary: { type: "string" },
+    exportedSymbols: { type: "array", items: { type: "string" } },
+    contractSnippets: { type: "array", items: { type: "string" } },
+  },
+  required: ["summary"],
 };
 
 export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
@@ -285,17 +296,20 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
     repoStructure?: string;
     playbookRules?: string;
     conventions?: string;
+    availableRepos?: Array<{ id: string; name: string; structure?: string }>;
   }): Promise<EpicDecompositionPlan> {
     const sys = [
       "You are the Super-agent Epic Architect.",
       "Decompose a complex software requirement into 2-6 focused subtasks with disjoint Mandate allowedPaths matching the real repository structure whenever possible so independent workers execute concurrently in separate worktrees.",
+      "When availableRepos contains multiple repositories and the requirement spans repositories, assign subtask.repoId to the target repo ID and use paths inside that repository.",
       "Only add dependsOnKeys when a subtask genuinely consumes contracts/APIs built by another subtask.",
       "Output ONLY valid JSON matching the schema:",
       JSON.stringify(EPIC_DECOMPOSITION_SCHEMA),
     ].join("\n");
 
     const user = JSON.stringify({
-      repo: { name: input.repo.name, baseBranch: input.repo.baseBranch },
+      repo: { id: input.repo.id, name: input.repo.name, baseBranch: input.repo.baseBranch },
+      availableRepos: input.availableRepos,
       repoStructure: input.repoStructure,
       conventions: input.conventions,
       playbookRules: input.playbookRules,
@@ -311,13 +325,13 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
   async distillPlaybookLesson(input: {
     repo: RepoConfig;
     ticket: Ticket;
-    failureKind: "verification" | "review";
+    failureKind: "verification" | "smoke" | "review";
     failureSummary: string;
     fixSummary: string;
     changedFiles: string[];
   }): Promise<{ rule: string; scopePaths: string[] } | null> {
     const sys = [
-      "Distill a single reusable, concise engineering guardrail rule (<= 180 chars) from a resolved verification or code review failure.",
+      "Distill a single reusable, concise engineering guardrail rule (<= 180 chars) from a resolved verification, runtime smoke, or code review failure.",
       "Output ONLY valid JSON matching:",
       JSON.stringify(DISTILL_LESSON_SCHEMA),
     ].join("\n");
@@ -337,6 +351,46 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
         Array.isArray(parsed.scopePaths) && parsed.scopePaths.length > 0
           ? parsed.scopePaths.map(String)
           : input.ticket.mandate.allowedPaths,
+    };
+  }
+
+  async distillHandoverDigest(input: {
+    repo: RepoConfig;
+    ticket: Ticket;
+    changedFiles: string[];
+    exportedSymbols: string[];
+    contractSnippets: string[];
+    diffExcerpt: string;
+    stageSummary: string;
+  }): Promise<{ summary: string; exportedSymbols?: string[]; contractSnippets?: string[] } | null> {
+    const sys = [
+      "Summarize the exported API, route, schema, or behavior contracts introduced by this completed engineering ticket in <= 300 chars so downstream tasks/repos integrate cleanly.",
+      "Output ONLY valid JSON matching:",
+      JSON.stringify(HANDOVER_DIGEST_SCHEMA),
+    ].join("\n");
+    const user = JSON.stringify({
+      repo: input.repo.name,
+      ticketTitle: input.ticket.title,
+      changedFiles: input.changedFiles.slice(0, 12),
+      exportedSymbols: input.exportedSymbols,
+      contractSnippets: input.contractSnippets,
+      stageSummary: input.stageSummary.slice(0, 500),
+      diffExcerpt: input.diffExcerpt.slice(0, 3500),
+    });
+    const parsed = await this.chatJson<{
+      summary?: string;
+      exportedSymbols?: string[];
+      contractSnippets?: string[];
+    }>(sys, user);
+    if (!parsed.summary?.trim()) return null;
+    return {
+      summary: parsed.summary.trim(),
+      exportedSymbols: Array.isArray(parsed.exportedSymbols)
+        ? parsed.exportedSymbols.map(String)
+        : undefined,
+      contractSnippets: Array.isArray(parsed.contractSnippets)
+        ? parsed.contractSnippets.map(String)
+        : undefined,
     };
   }
 
@@ -445,10 +499,14 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
     repoStructure?: string;
     playbookRules?: string;
     conventions?: string;
+    availableRepos?: Array<{ id: string; name: string; structure?: string }>;
   }): Promise<EpicDecompositionPlan> {
     const prompt = [
-      "Decompose this Epic requirement into a DAG of scoped subtasks with disjoint allowedPaths aligned to the real repository structure where independent.",
-      `Repo: ${input.repo.name}, DefaultTemplate: ${input.defaultTemplate}`,
+      "Decompose this Epic requirement into a DAG of scoped subtasks with disjoint allowedPaths aligned to the real repository structure where independent. Assign repoId if spanning availableRepos.",
+      `Repo: ${input.repo.name} (${input.repo.id}), DefaultTemplate: ${input.defaultTemplate}`,
+      input.availableRepos && input.availableRepos.length > 1
+        ? `AvailableRepos: ${JSON.stringify(input.availableRepos)}`
+        : "",
       input.repoStructure ? `RepoStructure:\n${input.repoStructure}` : "",
       input.conventions ? `Conventions:\n${input.conventions}` : "",
       input.playbookRules ? `Playbook:\n${input.playbookRules}` : "",
@@ -467,7 +525,7 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
   async distillPlaybookLesson(input: {
     repo: RepoConfig;
     ticket: Ticket;
-    failureKind: "verification" | "review";
+    failureKind: "verification" | "smoke" | "review";
     failureSummary: string;
     fixSummary: string;
     changedFiles: string[];
@@ -490,6 +548,40 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
         Array.isArray(parsed.scopePaths) && parsed.scopePaths.length > 0
           ? parsed.scopePaths.map(String)
           : input.ticket.mandate.allowedPaths,
+    };
+  }
+
+  async distillHandoverDigest(input: {
+    repo: RepoConfig;
+    ticket: Ticket;
+    changedFiles: string[];
+    exportedSymbols: string[];
+    contractSnippets: string[];
+    diffExcerpt: string;
+    stageSummary: string;
+  }): Promise<{ summary: string; exportedSymbols?: string[]; contractSnippets?: string[] } | null> {
+    const prompt = [
+      "Summarize the API/schema/behavior contract produced by this completed ticket in <= 300 chars for downstream integration.",
+      `Repo: ${input.repo.name}, Ticket: ${input.ticket.title}`,
+      `ChangedFiles: ${input.changedFiles.slice(0, 12).join(", ")}`,
+      `ExportedSymbols: ${input.exportedSymbols.join(" | ")}`,
+      `Contracts: ${input.contractSnippets.join(" | ")}`,
+      `StageSummary: ${input.stageSummary.slice(0, 400)}`,
+    ].join("\n");
+    const parsed = await this.runClaudeJson<{
+      summary?: string;
+      exportedSymbols?: string[];
+      contractSnippets?: string[];
+    }>(prompt, HANDOVER_DIGEST_SCHEMA);
+    if (!parsed.summary?.trim()) return null;
+    return {
+      summary: parsed.summary.trim(),
+      exportedSymbols: Array.isArray(parsed.exportedSymbols)
+        ? parsed.exportedSymbols.map(String)
+        : undefined,
+      contractSnippets: Array.isArray(parsed.contractSnippets)
+        ? parsed.contractSnippets.map(String)
+        : undefined,
     };
   }
 
@@ -594,10 +686,14 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
     repoStructure?: string;
     playbookRules?: string;
     conventions?: string;
+    availableRepos?: Array<{ id: string; name: string; structure?: string }>;
   }): Promise<EpicDecompositionPlan> {
     const prompt = [
-      "Decompose this Epic requirement into a DAG of scoped subtasks with disjoint allowedPaths aligned to the real repository structure where independent.",
-      `Repo: ${input.repo.name}, DefaultTemplate: ${input.defaultTemplate}`,
+      "Decompose this Epic requirement into a DAG of scoped subtasks with disjoint allowedPaths aligned to the real repository structure where independent. Assign repoId if spanning availableRepos.",
+      `Repo: ${input.repo.name} (${input.repo.id}), DefaultTemplate: ${input.defaultTemplate}`,
+      input.availableRepos && input.availableRepos.length > 1
+        ? `AvailableRepos: ${JSON.stringify(input.availableRepos)}`
+        : "",
       input.repoStructure ? `RepoStructure:\n${input.repoStructure}` : "",
       input.conventions ? `Conventions:\n${input.conventions}` : "",
       input.playbookRules ? `Playbook:\n${input.playbookRules}` : "",
@@ -616,7 +712,7 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
   async distillPlaybookLesson(input: {
     repo: RepoConfig;
     ticket: Ticket;
-    failureKind: "verification" | "review";
+    failureKind: "verification" | "smoke" | "review";
     failureSummary: string;
     fixSummary: string;
     changedFiles: string[];
@@ -639,6 +735,40 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
         Array.isArray(parsed.scopePaths) && parsed.scopePaths.length > 0
           ? parsed.scopePaths.map(String)
           : input.ticket.mandate.allowedPaths,
+    };
+  }
+
+  async distillHandoverDigest(input: {
+    repo: RepoConfig;
+    ticket: Ticket;
+    changedFiles: string[];
+    exportedSymbols: string[];
+    contractSnippets: string[];
+    diffExcerpt: string;
+    stageSummary: string;
+  }): Promise<{ summary: string; exportedSymbols?: string[]; contractSnippets?: string[] } | null> {
+    const prompt = [
+      "Summarize the API/schema/behavior contract produced by this completed ticket in <= 300 chars for downstream integration.",
+      `Repo: ${input.repo.name}, Ticket: ${input.ticket.title}`,
+      `ChangedFiles: ${input.changedFiles.slice(0, 12).join(", ")}`,
+      `ExportedSymbols: ${input.exportedSymbols.join(" | ")}`,
+      `Contracts: ${input.contractSnippets.join(" | ")}`,
+      `StageSummary: ${input.stageSummary.slice(0, 400)}`,
+    ].join("\n");
+    const parsed = await this.runCodexJson<{
+      summary?: string;
+      exportedSymbols?: string[];
+      contractSnippets?: string[];
+    }>(prompt, HANDOVER_DIGEST_SCHEMA);
+    if (!parsed.summary?.trim()) return null;
+    return {
+      summary: parsed.summary.trim(),
+      exportedSymbols: Array.isArray(parsed.exportedSymbols)
+        ? parsed.exportedSymbols.map(String)
+        : undefined,
+      contractSnippets: Array.isArray(parsed.contractSnippets)
+        ? parsed.contractSnippets.map(String)
+        : undefined,
     };
   }
 
@@ -815,6 +945,7 @@ export class HeuristicControlLLM implements ControlPlaneLLM {
     repoStructure?: string;
     playbookRules?: string;
     conventions?: string;
+    availableRepos?: Array<{ id: string; name: string; structure?: string }>;
   }): Promise<EpicDecompositionPlan> {
     return heuristicDecomposeEpic(input);
   }
@@ -822,7 +953,7 @@ export class HeuristicControlLLM implements ControlPlaneLLM {
   async distillPlaybookLesson(input: {
     repo: RepoConfig;
     ticket: Ticket;
-    failureKind: "verification" | "review";
+    failureKind: "verification" | "smoke" | "review";
     failureSummary: string;
     fixSummary: string;
     changedFiles: string[];
@@ -834,6 +965,10 @@ export class HeuristicControlLLM implements ControlPlaneLLM {
       changedFiles: input.changedFiles,
       allowedPaths: input.ticket.mandate.allowedPaths,
     });
+  }
+
+  async distillHandoverDigest(): Promise<null> {
+    return null;
   }
 }
 
@@ -888,6 +1023,7 @@ export class CompositeControlPlaneLLM implements ControlPlaneLLM {
     repoStructure?: string;
     playbookRules?: string;
     conventions?: string;
+    availableRepos?: Array<{ id: string; name: string; structure?: string }>;
   }): Promise<EpicDecompositionPlan> {
     for (const provider of this.chain) {
       if (!provider.planEpicDecomposition) continue;
@@ -903,7 +1039,7 @@ export class CompositeControlPlaneLLM implements ControlPlaneLLM {
   async distillPlaybookLesson(input: {
     repo: RepoConfig;
     ticket: Ticket;
-    failureKind: "verification" | "review";
+    failureKind: "verification" | "smoke" | "review";
     failureSummary: string;
     fixSummary: string;
     changedFiles: string[];
@@ -924,6 +1060,27 @@ export class CompositeControlPlaneLLM implements ControlPlaneLLM {
       changedFiles: input.changedFiles,
       allowedPaths: input.ticket.mandate.allowedPaths,
     });
+  }
+
+  async distillHandoverDigest(input: {
+    repo: RepoConfig;
+    ticket: Ticket;
+    changedFiles: string[];
+    exportedSymbols: string[];
+    contractSnippets: string[];
+    diffExcerpt: string;
+    stageSummary: string;
+  }): Promise<{ summary: string; exportedSymbols?: string[]; contractSnippets?: string[] } | null> {
+    for (const provider of this.chain) {
+      if (!provider.distillHandoverDigest) continue;
+      try {
+        const res = await provider.distillHandoverDigest(input);
+        if (res) return res;
+      } catch {
+        // Fallback to next control-plane provider
+      }
+    }
+    return null;
   }
 }
 
@@ -1061,6 +1218,7 @@ export class MutableControlPlaneLLM implements ControlPlaneLLM {
     repoStructure?: string;
     playbookRules?: string;
     conventions?: string;
+    availableRepos?: Array<{ id: string; name: string; structure?: string }>;
   }): Promise<EpicDecompositionPlan> {
     if (this.current.planEpicDecomposition) {
       return this.current.planEpicDecomposition(input);
@@ -1071,7 +1229,7 @@ export class MutableControlPlaneLLM implements ControlPlaneLLM {
   distillPlaybookLesson(input: {
     repo: RepoConfig;
     ticket: Ticket;
-    failureKind: "verification" | "review";
+    failureKind: "verification" | "smoke" | "review";
     failureSummary: string;
     fixSummary: string;
     changedFiles: string[];
@@ -1088,6 +1246,21 @@ export class MutableControlPlaneLLM implements ControlPlaneLLM {
         allowedPaths: input.ticket.mandate.allowedPaths,
       }),
     );
+  }
+
+  distillHandoverDigest(input: {
+    repo: RepoConfig;
+    ticket: Ticket;
+    changedFiles: string[];
+    exportedSymbols: string[];
+    contractSnippets: string[];
+    diffExcerpt: string;
+    stageSummary: string;
+  }): Promise<{ summary: string; exportedSymbols?: string[]; contractSnippets?: string[] } | null> {
+    if (this.current.distillHandoverDigest) {
+      return this.current.distillHandoverDigest(input);
+    }
+    return Promise.resolve(null);
   }
 }
 

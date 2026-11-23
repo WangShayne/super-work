@@ -6,8 +6,11 @@ import {
   DollarSign,
   Eye,
   FileCode2,
+  FileJson2,
   GitMerge,
   GitPullRequest,
+  Kanban,
+  Plus,
   Send,
   ShieldAlert,
   ShieldPlus,
@@ -19,6 +22,8 @@ import type { InboxItem, Ticket } from "../types.ts";
 interface InboxViewProps {
   items: InboxItem[];
   ticketsById: Map<string, Ticket>;
+  totalTicketCount?: number;
+  runningTicketCount?: number;
   onResolve: (
     id: string,
     decision: "approved" | "rejected",
@@ -27,6 +32,9 @@ interface InboxViewProps {
     options?: { expandMandate?: boolean; budgetIncreaseUsd?: number },
   ) => Promise<void>;
   onInspectTicket: (ticketId: string) => void;
+  onOpenDispatch?: () => void;
+  onSwitchToBoard?: () => void;
+  onOpenContractSettings?: () => void;
 }
 
 const KIND_STYLE: Record<InboxItem["kind"], { color: string; icon: typeof Eye }> = {
@@ -64,7 +72,17 @@ const KIND_STYLE: Record<InboxItem["kind"], { color: string; icon: typeof Eye }>
   },
 };
 
-export function InboxView({ items, ticketsById, onResolve, onInspectTicket }: InboxViewProps) {
+export function InboxView({
+  items,
+  ticketsById,
+  totalTicketCount = 0,
+  runningTicketCount = 0,
+  onResolve,
+  onInspectTicket,
+  onOpenDispatch,
+  onSwitchToBoard,
+  onOpenContractSettings,
+}: InboxViewProps) {
   const { locale, t } = useI18n();
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -101,12 +119,50 @@ export function InboxView({ items, ticketsById, onResolve, onInspectTicket }: In
       </div>
 
       {pending.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-zinc-800 bg-zinc-900/30 p-12 text-center">
-          <CheckCircle2 className="w-10 h-10 text-emerald-400/80 mx-auto mb-3" />
-          <h3 className="text-sm font-medium text-zinc-200">{t("inbox.emptyTitle")}</h3>
-          <p className="text-xs text-zinc-500 mt-1 max-w-md mx-auto">
-            {t("inbox.emptyDesc")}
-          </p>
+        <div className="rounded-xl border border-dashed border-zinc-800 bg-zinc-900/30 p-10 text-center space-y-5">
+          <div>
+            <CheckCircle2 className="w-10 h-10 text-emerald-400/80 mx-auto mb-3" />
+            <h3 className="text-sm font-medium text-zinc-200">{t("inbox.emptyTitle")}</h3>
+            <p className="text-xs text-zinc-500 mt-1 max-w-md mx-auto leading-relaxed">
+              {t("inbox.emptyDesc")}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center justify-center gap-2.5 text-xs">
+            {onOpenDispatch && (
+              <button
+                type="button"
+                onClick={onOpenDispatch}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium transition shadow-sm shadow-indigo-950"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                {t("inbox.ctaDispatch")}
+              </button>
+            )}
+            {onSwitchToBoard && (
+              <button
+                type="button"
+                onClick={onSwitchToBoard}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 font-medium transition"
+              >
+                <Kanban className="w-3.5 h-3.5 text-sky-400" />
+                <span>{t("inbox.ctaBoard")}</span>
+                <span className="font-mono text-[11px] text-zinc-400">({totalTicketCount})</span>
+                {runningTicketCount > 0 && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                )}
+              </button>
+            )}
+            {onOpenContractSettings && (
+              <button
+                type="button"
+                onClick={onOpenContractSettings}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg border border-zinc-800 bg-zinc-950 hover:bg-zinc-900 text-zinc-400 hover:text-zinc-200 transition"
+              >
+                <FileJson2 className="w-3.5 h-3.5 text-emerald-400" />
+                {t("inbox.ctaContract")}
+              </button>
+            )}
+          </div>
         </div>
       ) : (
         <div className="space-y-4">

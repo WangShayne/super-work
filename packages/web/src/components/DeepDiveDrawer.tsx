@@ -1,14 +1,21 @@
 import { useEffect, useState } from "react";
 import {
   Ban,
+  Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Copy,
   Database,
+  FileCode2,
   FileDiff,
+  FolderGit2,
   GitBranch,
   GitMerge,
   GitPullRequest,
   History,
   Layers,
+  Link2,
   RotateCcw,
   Search,
   Send,
@@ -27,6 +34,7 @@ import {
 } from "../i18n.tsx";
 import type {
   ChainOfRecall,
+  HandoverDigest,
   LiveEventLogEntry,
   MemorySearchHit,
   RepoConfig,
@@ -34,9 +42,136 @@ import type {
   TicketDetailResponse,
 } from "../types.ts";
 
+function HandoverDigestView({ digest }: { digest: HandoverDigest }) {
+  const { t } = useI18n();
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    const payload = digest.formattedMarkdown || digest.summary;
+    if (!payload) return;
+    navigator.clipboard
+      ?.writeText(payload)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1800);
+      })
+      .catch(() => {
+        setCopied(false);
+      });
+  };
+
+  const hasStructuredItems =
+    Boolean(digest.summary) ||
+    digest.changedFiles.length > 0 ||
+    digest.exportedSymbols.length > 0 ||
+    digest.contractSnippets.length > 0;
+
+  return (
+    <div className="space-y-2.5 text-xs">
+      <div className="flex items-start justify-between gap-2">
+        {digest.summary ? (
+          <p className="text-zinc-200 leading-relaxed flex-1">{digest.summary}</p>
+        ) : (
+          <span className="text-zinc-500 font-mono text-[11px]">
+            v{digest.version} · {digest.repoName ?? digest.repoId}
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={handleCopy}
+          className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 text-[11px] transition"
+        >
+          {copied ? (
+            <>
+              <Check className="w-3 h-3 text-emerald-400" />
+              <span className="text-emerald-300">{t("drawer.handoverCopied")}</span>
+            </>
+          ) : (
+            <>
+              <Copy className="w-3 h-3" />
+              <span>{t("drawer.handoverCopy")}</span>
+            </>
+          )}
+        </button>
+      </div>
+
+      {digest.changedFiles.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
+            {t("drawer.handoverFiles")} ({digest.changedFiles.length})
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {digest.changedFiles.map((file) => (
+              <span
+                key={file}
+                className="px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-800 font-mono text-[11px] text-zinc-200 break-all"
+              >
+                {file}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {digest.exportedSymbols.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-indigo-300/90">
+            {t("drawer.handoverSymbols")} ({digest.exportedSymbols.length})
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {digest.exportedSymbols.map((sym) => (
+              <span
+                key={sym}
+                className="px-1.5 py-0.5 rounded bg-indigo-500/10 border border-indigo-500/25 font-mono text-[11px] text-indigo-200"
+              >
+                {sym}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {digest.contractSnippets.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-amber-300/90">
+            {t("drawer.handoverContracts")} ({digest.contractSnippets.length})
+          </div>
+          <div className="space-y-1">
+            {digest.contractSnippets.map((snippet, idx) => (
+              <pre
+                key={`${idx}-${snippet.slice(0, 24)}`}
+                className="px-2 py-1 rounded bg-amber-500/10 border border-amber-500/25 font-mono text-[11px] text-amber-200 whitespace-pre-wrap break-words"
+              >
+                {snippet}
+              </pre>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {digest.formattedMarkdown && (
+        <details
+          open={!hasStructuredItems}
+          className="group rounded border border-zinc-800/80 bg-zinc-950/90"
+        >
+          <summary className="cursor-pointer select-none px-2.5 py-1.5 text-[11px] text-zinc-400 hover:text-zinc-200 flex items-center gap-1.5 list-none">
+            <ChevronRight className="w-3 h-3 group-open:hidden shrink-0" />
+            <ChevronDown className="w-3 h-3 hidden group-open:block shrink-0" />
+            <span>{t("drawer.handoverRawToggle")}</span>
+          </summary>
+          <pre className="px-2.5 pb-2.5 pt-1 border-t border-zinc-800/80 text-[11px] font-mono text-zinc-300 whitespace-pre-wrap leading-relaxed overflow-x-auto">
+            {digest.formattedMarkdown}
+          </pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
 interface DeepDiveDrawerProps {
   ticketId: string | null;
   allTickets?: Ticket[];
+  repos?: RepoConfig[];
   repo?: RepoConfig;
   liveEvents: LiveEventLogEntry[];
   onClose: () => void;
@@ -49,6 +184,7 @@ type DrawerTab = "stream" | "diff" | "recall" | "outbox";
 export function DeepDiveDrawer({
   ticketId,
   allTickets = [],
+  repos = [],
   repo,
   liveEvents,
   onClose,
@@ -93,6 +229,15 @@ export function DeepDiveDrawer({
       cancelled = true;
     };
   }, [ticketId, liveEvents.length]);
+
+  useEffect(() => {
+    if (!ticketId) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [ticketId, onClose]);
 
   if (!ticketId) return null;
 
@@ -169,9 +314,10 @@ export function DeepDiveDrawer({
     onRefresh();
   };
 
-  const childSubtasks = ticket?.isEpic
-    ? allTickets.filter((c) => c.parentTicketId === ticket.id)
-    : [];
+  const reposById = new Map(repos.map((r) => [r.id, r]));
+  const childSubtasks =
+    detail?.subtasks ??
+    (ticket?.isEpic ? allTickets.filter((c) => c.parentTicketId === ticket.id) : []);
   const parentEpic = ticket?.parentTicketId
     ? allTickets.find((p) => p.id === ticket.parentTicketId)
     : undefined;
@@ -219,7 +365,12 @@ export function DeepDiveDrawer({
   };
 
   return (
-    <div className="fixed inset-0 z-40 flex justify-end bg-black/60 backdrop-blur-xs">
+    <div
+      className="fixed inset-0 z-40 flex justify-end bg-black/60 backdrop-blur-xs"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
       <div className="w-full max-w-3xl bg-zinc-950 border-l border-zinc-800 h-full flex flex-col shadow-2xl">
         {/* Header */}
         <div className="px-5 py-4 border-b border-zinc-800 flex items-start justify-between gap-4">
@@ -412,34 +563,95 @@ export function DeepDiveDrawer({
                     {t("drawer.epicDagTitle")} ({childSubtasks.length})
                   </h3>
                   <div className="space-y-2">
-                    {childSubtasks.map((sub) => (
-                      <div
-                        key={sub.id}
-                        onClick={() => onSelectTicket?.(sub.id)}
-                        className="rounded-lg border border-zinc-800 bg-zinc-900/60 hover:border-indigo-500/50 p-3 text-xs flex items-center justify-between gap-3 cursor-pointer transition"
-                      >
-                        <div className="min-w-0 space-y-1">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            {sub.subtaskKey && (
-                              <span className="px-1.5 py-0.5 rounded bg-purple-500/15 border border-purple-500/30 text-purple-200 font-mono text-[10px]">
-                                {sub.subtaskKey}
-                              </span>
-                            )}
-                            <span className="font-medium text-zinc-100 truncate">{sub.title}</span>
+                    {childSubtasks.map((sub) => {
+                      const subRepoName = reposById.get(sub.repoId)?.name;
+                      return (
+                        <div
+                          key={sub.id}
+                          onClick={() => onSelectTicket?.(sub.id)}
+                          className="rounded-lg border border-zinc-800 bg-zinc-900/60 hover:border-indigo-500/50 p-3 text-xs flex items-center justify-between gap-3 cursor-pointer transition"
+                        >
+                          <div className="min-w-0 space-y-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              {sub.subtaskKey && (
+                                <span className="px-1.5 py-0.5 rounded bg-purple-500/15 border border-purple-500/30 text-purple-200 font-mono text-[10px]">
+                                  {sub.subtaskKey}
+                                </span>
+                              )}
+                              {subRepoName && (repos.length > 1 || sub.repoId !== ticket.repoId) && (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-sky-500/15 border border-sky-500/30 text-sky-300 font-mono text-[10px]">
+                                  <FolderGit2 className="w-2.5 h-2.5" />
+                                  {subRepoName}
+                                </span>
+                              )}
+                              <span className="font-medium text-zinc-100 truncate">{sub.title}</span>
+                            </div>
+                            <div className="text-[10px] font-mono text-zinc-400">
+                              {sub.mandate.allowedPaths.join(", ")}
+                              {sub.dependsOn.length > 0
+                                ? ` · deps: ${sub.dependsOn.join(", ")}`
+                                : ""}
+                            </div>
                           </div>
-                          <div className="text-[10px] font-mono text-zinc-400">
-                            {sub.mandate.allowedPaths.join(", ")}
-                            {sub.dependsOn.length > 0
-                              ? ` · deps: ${sub.dependsOn.join(", ")}`
-                              : ""}
-                          </div>
+                          <span className="shrink-0 px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-[10px] text-zinc-200">
+                            {formatTicketStatus(sub.status, locale)}
+                          </span>
                         </div>
-                        <span className="shrink-0 px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-[10px] text-zinc-200">
-                          {formatTicketStatus(sub.status, locale)}
-                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {(detail?.upstreamDependencies?.length ?? 0) > 0 && (
+                <div className="space-y-2">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-teal-300 flex items-center gap-1.5">
+                    <Link2 className="w-3.5 h-3.5" />
+                    {t("drawer.upstreamHandoverTitle")} ({detail!.upstreamDependencies!.length})
+                  </h3>
+                  <div className="space-y-2">
+                    {detail!.upstreamDependencies!.map((dep) => (
+                      <div
+                        key={dep.id}
+                        className="rounded-lg border border-teal-500/25 bg-teal-500/5 p-3 text-xs space-y-2"
+                      >
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <button
+                            type="button"
+                            onClick={() => onSelectTicket?.(dep.id)}
+                            className="inline-flex items-center gap-1.5 text-left font-medium text-teal-200 hover:text-teal-100"
+                          >
+                            <span className="px-1.5 py-0.5 rounded bg-sky-500/15 border border-sky-500/30 font-mono text-[10px] text-sky-300">
+                              {dep.repoName ?? dep.repoId}
+                            </span>
+                            <span>{dep.title}</span>
+                            <span className="font-mono text-[10px] text-zinc-400">({dep.id})</span>
+                          </button>
+                          <span className="px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 font-mono text-[10px] text-zinc-300">
+                            {formatTicketStatus(dep.status, locale)}
+                          </span>
+                        </div>
+                        {dep.handoverDigest && (
+                          <HandoverDigestView digest={dep.handoverDigest} />
+                        )}
                       </div>
                     ))}
                   </div>
+                </div>
+              )}
+
+              {ticket?.handoverDigest && (
+                <div className="rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3.5 text-xs space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-indigo-300 flex items-center gap-1.5">
+                      <FileCode2 className="w-3.5 h-3.5" />
+                      {t("drawer.exportedHandoverTitle")}
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded bg-indigo-500/15 border border-indigo-500/30 font-mono text-[10px] text-indigo-200">
+                      v{ticket.handoverDigest.version}
+                    </span>
+                  </div>
+                  <HandoverDigestView digest={ticket.handoverDigest} />
                 </div>
               )}
 
@@ -654,14 +866,22 @@ export function DeepDiveDrawer({
                           <div>
                             <span
                               className={`font-mono text-[10px] px-1.5 py-0.5 rounded mr-2 ${
-                                art.kind === "test_log"
+                                art.kind === "test_log" || art.kind === "smoke_log"
                                   ? art.summary.startsWith("FAIL")
                                     ? "bg-rose-500/20 text-rose-300 border border-rose-500/30"
                                     : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
-                                  : "bg-zinc-800 text-zinc-300"
+                                  : art.kind === "handover"
+                                    ? "bg-teal-500/20 text-teal-300 border border-teal-500/30"
+                                    : "bg-zinc-800 text-zinc-300"
                               }`}
                             >
-                              {art.kind === "test_log" ? t("drawer.testLogTag") : art.kind}
+                              {art.kind === "test_log"
+                                ? t("drawer.testLogTag")
+                                : art.kind === "smoke_log"
+                                  ? t("drawer.smokeLogTag")
+                                  : art.kind === "handover"
+                                    ? t("drawer.handoverTag")
+                                    : art.kind}
                             </span>
                             <span className="text-zinc-200">{art.summary}</span>
                             <span className="text-zinc-500 text-[11px] ml-2">
@@ -696,19 +916,6 @@ export function DeepDiveDrawer({
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
                   {t("drawer.outboxTitle")}
                 </h3>
-                {canDeliverActions && (
-                  <button
-                    type="button"
-                    disabled={delivering !== null}
-                    onClick={() => void handleDeliver("local_merge")}
-                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-emerald-500/40 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25 text-[11px] disabled:opacity-50"
-                  >
-                    <GitMerge className="w-3 h-3" />
-                    {delivering === "local_merge"
-                      ? t("drawer.merging")
-                      : t("drawer.localMergeButton")}
-                  </button>
-                )}
               </div>
               {detail?.outboxEntries.length === 0 ? (
                 <p className="text-xs text-zinc-500">{t("drawer.noOutbox")}</p>

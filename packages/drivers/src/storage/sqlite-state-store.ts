@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import type {
   ChainOfRecall,
   EngineMetricRow,
+  HandoverDigest,
   InboxItem,
   InboxItemStatus,
   MemorySearchHit,
@@ -10,6 +11,7 @@ import type {
   PlaybookEntry,
   RepoConfig,
   RepoMetricsSummary,
+  SmokeCheckConfig,
   SpillArtifact,
   StageRun,
   StateStore,
@@ -280,6 +282,9 @@ export class SqliteStateStore implements StateStore {
     if (!existingRepoCols.has("contract_synced_at")) {
       this.db.run("ALTER TABLE repos ADD COLUMN contract_synced_at TEXT;");
     }
+    if (!existingRepoCols.has("smoke_check_json")) {
+      this.db.run("ALTER TABLE repos ADD COLUMN smoke_check_json TEXT;");
+    }
 
     const cols = this.db
       .query("PRAGMA table_info(tickets)")
@@ -332,6 +337,9 @@ export class SqliteStateStore implements StateStore {
     if (!existingCols.has("revert_commit_sha")) {
       this.db.run("ALTER TABLE tickets ADD COLUMN revert_commit_sha TEXT;");
     }
+    if (!existingCols.has("handover_digest_json")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN handover_digest_json TEXT;");
+    }
   }
 
   // --- Repos ---
@@ -341,12 +349,12 @@ export class SqliteStateStore implements StateStore {
         `INSERT INTO repos (
           id, name, root_path, base_branch, mode, github_repo, default_template,
           preferred_implement_engine, preferred_review_engine, auto_cleanup_worktree,
-          verification_commands_json, setup_commands_json, forbidden_paths_json,
+          verification_commands_json, setup_commands_json, smoke_check_json, forbidden_paths_json,
           conventions, contract_synced_hash, contract_synced_at,
           default_delivery_channel,
           max_concurrent_workers, daily_budget_usd, daily_budget_override_usd, daily_budget_override_date,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           root_path = excluded.root_path,
@@ -359,6 +367,7 @@ export class SqliteStateStore implements StateStore {
           auto_cleanup_worktree = excluded.auto_cleanup_worktree,
           verification_commands_json = excluded.verification_commands_json,
           setup_commands_json = excluded.setup_commands_json,
+          smoke_check_json = excluded.smoke_check_json,
           forbidden_paths_json = excluded.forbidden_paths_json,
           conventions = excluded.conventions,
           contract_synced_hash = excluded.contract_synced_hash,
@@ -383,6 +392,7 @@ export class SqliteStateStore implements StateStore {
         repo.autoCleanupWorktree === false ? 0 : 1,
         JSON.stringify(repo.verificationCommands ?? []),
         JSON.stringify(repo.setupCommands ?? []),
+        repo.smokeCheck ? JSON.stringify(repo.smokeCheck) : null,
         JSON.stringify(repo.forbiddenPaths ?? []),
         repo.conventions ?? null,
         repo.contractSyncedHash ?? null,
@@ -495,8 +505,8 @@ export class SqliteStateStore implements StateStore {
           merged_commit_sha, reverted_at, revert_commit_sha,
           worktree_path, branch_name, worktree_cleaned_at,
           native_sessions_json, preferred_engine, active_engine, model_override, effort_override,
-          inline_memory_json, cost_usd, priority, error_message, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          inline_memory_json, handover_digest_json, cost_usd, priority, error_message, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           status = excluded.status,
           template = excluded.template,
@@ -524,6 +534,7 @@ export class SqliteStateStore implements StateStore {
           model_override = excluded.model_override,
           effort_override = excluded.effort_override,
           inline_memory_json = excluded.inline_memory_json,
+          handover_digest_json = excluded.handover_digest_json,
           cost_usd = excluded.cost_usd,
           priority = excluded.priority,
           error_message = excluded.error_message,
@@ -562,6 +573,7 @@ export class SqliteStateStore implements StateStore {
         ticket.modelOverride ?? null,
         ticket.effortOverride ?? null,
         JSON.stringify(ticket.inlineMemory),
+        ticket.handoverDigest ? JSON.stringify(ticket.handoverDigest) : null,
         ticket.costUsd,
         ticket.priority,
         ticket.errorMessage ?? null,
@@ -1211,6 +1223,9 @@ function mapRepoRow(r: Record<string, unknown>): RepoConfig {
     setupCommands: r.setup_commands_json
       ? (JSON.parse(String(r.setup_commands_json)) as string[])
       : [],
+    smokeCheck: r.smoke_check_json
+      ? (JSON.parse(String(r.smoke_check_json)) as SmokeCheckConfig)
+      : undefined,
     forbiddenPaths: r.forbidden_paths_json
       ? (JSON.parse(String(r.forbidden_paths_json)) as string[])
       : [],
@@ -1312,6 +1327,9 @@ function mapTicketRow(r: Record<string, unknown>): Ticket {
       ? (String(r.effort_override) as Ticket["effortOverride"])
       : undefined,
     inlineMemory: JSON.parse(String(r.inline_memory_json)),
+    handoverDigest: r.handover_digest_json
+      ? (JSON.parse(String(r.handover_digest_json)) as HandoverDigest)
+      : undefined,
     costUsd: Number(r.cost_usd),
     priority: Number(r.priority),
     errorMessage: r.error_message ? String(r.error_message) : undefined,

@@ -11,6 +11,7 @@ import type {
 } from "./ports.ts";
 import type {
   EpicDecompositionPlan,
+  EpicDeliveryMode,
   InboxItem,
   KernelEvent,
   Mandate,
@@ -468,8 +469,27 @@ export class EventIntakeRouter {
       maxDurationSec: input.maxDurationSec ?? 600,
     });
 
+    const explicitDeps: string[] = [];
+    let hasPendingDeps = false;
+    for (const rawDepId of input.dependsOn ?? []) {
+      const depId = rawDepId.trim();
+      if (!depId || explicitDeps.includes(depId)) continue;
+      const depTicket = await this.stateStore.getTicket(depId);
+      if (!depTicket) {
+        throw new Error(`Dependency ticket not found: ${depId}`);
+      }
+      explicitDeps.push(depId);
+      if (depTicket.status !== "delivered") {
+        hasPendingDeps = true;
+      }
+    }
+
     const activeTickets = await this.stateStore.listActiveTickets(repo.id);
-    const dependsOn = this.computeOverlappingDependencies(mandate, activeTickets);
+    const overlapDeps = this.computeOverlappingDependencies(mandate, activeTickets);
+    if (overlapDeps.length > 0) {
+      hasPendingDeps = true;
+    }
+    const dependsOn = Array.from(new Set([...explicitDeps, ...overlapDeps]));
     const template = input.template ?? repo.defaultTemplate;
 
     const ticket: Ticket = {
@@ -479,7 +499,7 @@ export class EventIntakeRouter {
       sourceTriggerId: trigger.id,
       title: input.title,
       description: input.description,
-      status: dependsOn.length > 0 ? "waiting_deps" : "queued",
+      status: hasPendingDeps ? "waiting_deps" : "queued",
       template,
       currentStage: getFirstStage(template),
       stageRetries: 0,
@@ -533,10 +553,28 @@ export class EventIntakeRouter {
       throw new Error(`Repository not found: ${input.repoId}`);
     }
     const defaultTemplate = input.template ?? repo.defaultTemplate;
-    const [repoStructure, playbookEntries] = await Promise.all([
+    const [allRepos, repoStructure, playbookEntries] = await Promise.all([
+      this.stateStore.listRepos(),
       this.resolveRepoStructure(repo),
       this.stateStore.listPlaybookEntries(repo.id, { onlyEnabled: true }),
     ]);
+
+    const availableRepos =
+      allRepos.length > 1
+        ? await Promise.all(
+            allRepos.map(async (r) => ({
+              id: r.id,
+              name: r.name,
+              structure: r.id === repo.id ? repoStructure : await this.resolveRepoStructure(r),
+            })),
+          )
+        : [{ id: repo.id, name: repo.name, structure: repoStructure }];
+    const sanitizeOpts = {
+      validRepoIds: new Set(allRepos.map((r) => r.id)),
+      repoIdByName: new Map(allRepos.map((r) => [r.name.toLowerCase(), r.id])),
+      defaultRepoId: repo.id,
+    };
+
     const playbookRules = formatPlaybookContext(playbookEntries, ["**"]) || undefined;
     if (this.llm.planEpicDecomposition) {
       const plan = await this.llm.planEpicDecomposition({
@@ -547,10 +585,11 @@ export class EventIntakeRouter {
         repoStructure,
         playbookRules,
         conventions: repo.conventions,
+        availableRepos,
       });
       return {
         ...plan,
-        subtasks: sanitizeEpicSubtasks(plan.subtasks, defaultTemplate),
+        subtasks: sanitizeEpicSubtasks(plan.subtasks, defaultTemplate, sanitizeOpts),
       };
     }
     return heuristicDecomposeEpic({
@@ -559,6 +598,7 @@ export class EventIntakeRouter {
       description: input.description,
       defaultTemplate,
       repoStructure,
+      availableRepos,
     });
   }
 
@@ -568,14 +608,22 @@ export class EventIntakeRouter {
       throw new Error(`Repository not found: ${input.repoId}`);
     }
 
+    const allRepos = await this.stateStore.listRepos();
+    const reposById = new Map(allRepos.map((r) => [r.id, r]));
+    reposById.set(repo.id, repo);
+    const sanitizeOpts = {
+      validRepoIds: new Set(reposById.keys()),
+      repoIdByName: new Map(Array.from(reposById.values()).map((r) => [r.name.toLowerCase(), r.id])),
+      defaultRepoId: repo.id,
+    };
+
     const defaultTemplate = input.template ?? repo.defaultTemplate;
-    const deliveryMode = input.epicDeliveryMode ?? "unified";
     const plan =
       input.subtasks && input.subtasks.length > 0
         ? {
             epicTitle: input.title,
             summary: `Epic decomposed into ${input.subtasks.length} subtask(s).`,
-            subtasks: sanitizeEpicSubtasks(input.subtasks, defaultTemplate),
+            subtasks: sanitizeEpicSubtasks(input.subtasks, defaultTemplate, sanitizeOpts),
           }
         : await this.previewEpic({
             repoId: repo.id,
@@ -583,6 +631,14 @@ export class EventIntakeRouter {
             description: input.description,
             template: defaultTemplate,
           });
+
+    const distinctRepoIds = new Set(
+      plan.subtasks.map((s) => (s.repoId && reposById.has(s.repoId) ? s.repoId : repo.id)),
+    );
+    const isCrossRepoEpic = distinctRepoIds.size > 1 || !distinctRepoIds.has(repo.id);
+    const deliveryMode: EpicDeliveryMode = isCrossRepoEpic
+      ? "per_subtask"
+      : (input.epicDeliveryMode ?? "unified");
 
     const ts = nowIso();
     const epicId = newId("epc");
@@ -593,7 +649,12 @@ export class EventIntakeRouter {
       source: "web",
       threadKey,
       title: input.title,
-      payload: { epic: true, epicDeliveryMode: deliveryMode },
+      payload: {
+        epic: true,
+        epicDeliveryMode: deliveryMode,
+        crossRepo: isCrossRepoEpic,
+        repoIds: Array.from(distinctRepoIds),
+      },
       rawText: input.description,
       createdAt: ts,
     };
@@ -604,7 +665,7 @@ export class EventIntakeRouter {
       id: newId("thr"),
       repoId: repo.id,
       threadKey,
-      metadata: { source: "web", epic: true, epicDeliveryMode: deliveryMode },
+      metadata: { source: "web", epic: true, epicDeliveryMode: deliveryMode, crossRepo: isCrossRepoEpic },
       createdAt: ts,
       updatedAt: ts,
     };
@@ -636,7 +697,10 @@ export class EventIntakeRouter {
         goal: input.description,
         acceptanceCriteria: plan.subtasks.map((s) => `[${s.key}] ${s.title}`),
         planSummary: `${plan.summary}\n${plan.subtasks
-          .map((s) => `- ${s.key}: ${s.title} (${s.allowedPaths.join(", ")})`)
+          .map((s) => {
+            const rName = s.repoId ? (reposById.get(s.repoId)?.name ?? s.repoId) : repo.name;
+            return `- ${s.key} (${rName}): ${s.title} (${s.allowedPaths.join(", ")})`;
+          })
           .join("\n")}`,
         stageNotes: [],
         threadUpdates: [],
@@ -656,18 +720,25 @@ export class EventIntakeRouter {
 
     const createdByKey = new Map<string, Ticket>();
     const subtasks: Ticket[] = [];
-    const activeBefore = (await this.stateStore.listActiveTickets(repo.id)).filter(
-      (t) => !t.isEpic,
-    );
+    const activeByRepo = new Map<string, Ticket[]>();
 
     for (const spec of plan.subtasks) {
+      const targetRepo = (spec.repoId ? reposById.get(spec.repoId) : undefined) ?? repo;
+      let activeBefore = activeByRepo.get(targetRepo.id);
+      if (!activeBefore) {
+        activeBefore = (await this.stateStore.listActiveTickets(targetRepo.id)).filter(
+          (t) => !t.isEpic,
+        );
+        activeByRepo.set(targetRepo.id, activeBefore);
+      }
+
       const subTs = nowIso();
       const subThreadKey = `${threadKey}:${spec.key}`;
       const subThread: Thread = {
         id: newId("thr"),
-        repoId: repo.id,
+        repoId: targetRepo.id,
         threadKey: subThreadKey,
-        metadata: { source: "web", epicId: epic.id, subtaskKey: spec.key },
+        metadata: { source: "web", epicId: epic.id, subtaskKey: spec.key, repoId: targetRepo.id },
         createdAt: subTs,
         updatedAt: subTs,
       };
@@ -675,22 +746,25 @@ export class EventIntakeRouter {
 
       const subMandate = createDefaultMandate({
         allowedPaths: spec.allowedPaths,
-        forbiddenPaths: repo.forbiddenPaths ?? [],
+        forbiddenPaths: targetRepo.forbiddenPaths ?? [],
         maxCostUsd: input.maxCostUsdPerSubtask ?? 2.0,
       });
 
       const explicitDeps = spec.dependsOnKeys
         .map((k) => createdByKey.get(k)?.id)
         .filter((id): id is string => Boolean(id));
+      const sameRepoPriorSubtasks = subtasks.filter(
+        (existing) => existing.repoId === targetRepo.id && !explicitDeps.includes(existing.id),
+      );
       const existingOverlapDeps = this.computeOverlappingDependencies(subMandate, [
         ...activeBefore,
-        ...subtasks.filter((existing) => !explicitDeps.includes(existing.id)),
+        ...sameRepoPriorSubtasks,
       ]);
       const dependsOn = Array.from(new Set([...explicitDeps, ...existingOverlapDeps]));
 
       const subTicket: Ticket = {
         id: newId("tkt"),
-        repoId: repo.id,
+        repoId: targetRepo.id,
         threadId: subThread.id,
         sourceTriggerId: trigger.id,
         title: spec.title,
@@ -731,7 +805,7 @@ export class EventIntakeRouter {
         entityType: "ticket",
         entityId: subTicket.id,
         ticketId: subTicket.id,
-        repoId: repo.id,
+        repoId: targetRepo.id,
         title: subTicket.title,
         body: `${subTicket.description}\nAllowed: ${subMandate.allowedPaths.join(", ")}`,
       });

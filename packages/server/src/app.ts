@@ -10,6 +10,7 @@ import type {
   DeliveryChannel,
   EngineModelProfile,
   EpicDeliveryMode,
+  HandoverDigest,
   InboxItemStatus,
   KernelEvent,
   LlmProviderPreset,
@@ -20,13 +21,15 @@ import type {
   PublicSetupStatus,
   ReasoningEffort,
   RepoConfig,
+  SmokeCheckConfig,
   StateStore,
   SuperWorkKernel,
   SystemSetupConfig,
+  Ticket,
   TicketStatus,
   WorkerEngineId,
 } from "@super-work/core";
-import { newId, normalizePlaybookRuleText, nowIso } from "@super-work/core";
+import { newId, normalizePlaybookRuleText, normalizeSmokeCheckConfig, nowIso } from "@super-work/core";
 import {
   CliEnvironmentScanner,
   DEFAULT_NOTIFICATION_CONFIG,
@@ -386,6 +389,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       setupCommands: Array.isArray(body.setupCommands)
         ? body.setupCommands.map((s) => String(s).trim()).filter(Boolean)
         : [],
+      smokeCheck: normalizeSmokeCheckConfig(body.smokeCheck),
       forbiddenPaths: Array.isArray(body.forbiddenPaths)
         ? body.forbiddenPaths.map((s) => String(s).trim()).filter(Boolean)
         : [],
@@ -415,11 +419,12 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     }
     const patch = (await c.req.json()) as Omit<
       Partial<RepoConfig>,
-      "maxConcurrentWorkers" | "dailyBudgetUsd" | "conventions"
+      "maxConcurrentWorkers" | "dailyBudgetUsd" | "conventions" | "smokeCheck"
     > & {
       maxConcurrentWorkers?: number | null;
       dailyBudgetUsd?: number | null;
       conventions?: string | null;
+      smokeCheck?: SmokeCheckConfig | null;
     };
     const updated: RepoConfig = {
       ...existing,
@@ -439,6 +444,12 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         patch.setupCommands !== undefined
           ? patch.setupCommands.map((s) => String(s).trim()).filter(Boolean)
           : (existing.setupCommands ?? []),
+      smokeCheck:
+        patch.smokeCheck !== undefined
+          ? patch.smokeCheck === null
+            ? undefined
+            : normalizeSmokeCheckConfig(patch.smokeCheck)
+          : existing.smokeCheck,
       forbiddenPaths:
         patch.forbiddenPaths !== undefined
           ? patch.forbiddenPaths.map((s) => String(s).trim()).filter(Boolean)
@@ -629,6 +640,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       template?: RepoConfig["defaultTemplate"];
       allowedPaths?: string[];
       forbiddenPaths?: string[];
+      dependsOn?: string[];
       maxCostUsd?: number;
       preferredEngine?: RepoConfig["preferredImplementEngine"];
       modelOverride?: string;
@@ -640,22 +652,30 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       return c.json({ error: "repoId, title, and description are required" }, 400);
     }
 
-    const ticket = await kernel.createDirectTicket({
-      repoId: body.repoId,
-      title: body.title,
-      description: body.description,
-      template: body.template,
-      allowedPaths: body.allowedPaths,
-      forbiddenPaths: body.forbiddenPaths,
-      maxCostUsd: body.maxCostUsd,
-      preferredEngine: body.preferredEngine,
-      modelOverride: body.modelOverride,
-      effortOverride: body.effortOverride,
-      acceptanceCriteria: body.acceptanceCriteria,
-    });
+    try {
+      const ticket = await kernel.createDirectTicket({
+        repoId: body.repoId,
+        title: body.title,
+        description: body.description,
+        template: body.template,
+        allowedPaths: body.allowedPaths,
+        forbiddenPaths: body.forbiddenPaths,
+        dependsOn: Array.isArray(body.dependsOn)
+          ? body.dependsOn.map((d) => String(d).trim()).filter(Boolean)
+          : undefined,
+        maxCostUsd: body.maxCostUsd,
+        preferredEngine: body.preferredEngine,
+        modelOverride: body.modelOverride,
+        effortOverride: body.effortOverride,
+        acceptanceCriteria: body.acceptanceCriteria,
+      });
 
-    void kernel.tick();
-    return c.json({ ticket }, 201);
+      void kernel.tick();
+      return c.json({ ticket }, 201);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, 400);
+    }
   });
 
   app.get("/api/tickets/:id", async (c) => {
@@ -664,13 +684,43 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     if (!ticket) {
       return c.json({ error: "Ticket not found" }, 404);
     }
-    const repo = await stateStore.getRepo(ticket.repoId);
-    const [stageRuns, artifacts, inboxItems, outboxEntries] = await Promise.all([
+    const [repo, allRepos, stageRuns, artifacts, inboxItems, outboxEntries] = await Promise.all([
+      stateStore.getRepo(ticket.repoId),
+      stateStore.listRepos(),
       stateStore.listStageRuns(ticket.id),
       stateStore.listArtifacts(ticket.id),
       stateStore.listInboxItems({ ticketId: ticket.id }),
       stateStore.listOutboxEntries({ ticketId: ticket.id }),
     ]);
+
+    const reposById = new Map(allRepos.map((r) => [r.id, r]));
+    const upstreamDependencies: Array<{
+      id: string;
+      repoId: string;
+      repoName?: string;
+      title: string;
+      status: TicketStatus;
+      handoverDigest?: HandoverDigest;
+    }> = [];
+    for (const depId of ticket.dependsOn) {
+      const dep = await stateStore.getTicket(depId);
+      if (dep) {
+        upstreamDependencies.push({
+          id: dep.id,
+          repoId: dep.repoId,
+          repoName: reposById.get(dep.repoId)?.name,
+          title: dep.title,
+          status: dep.status,
+          handoverDigest: dep.handoverDigest,
+        });
+      }
+    }
+
+    let subtasks: Ticket[] | undefined;
+    if (ticket.isEpic) {
+      const allTickets = await stateStore.listTickets();
+      subtasks = allTickets.filter((t) => t.parentTicketId === ticket.id);
+    }
 
     let diff = "";
     if (repo) {
@@ -706,6 +756,8 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       inboxItems,
       outboxEntries,
       diff,
+      ...(subtasks ? { subtasks } : {}),
+      ...(upstreamDependencies.length > 0 ? { upstreamDependencies } : {}),
     });
   });
 
@@ -935,7 +987,13 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         if (filterRepoId || filterTicketId) {
           const target = resolveEventTarget(event, ticketMeta);
           if (filterRepoId && target.repoId !== filterRepoId) {
-            return;
+            const parentId = target.ticketId
+              ? ticketMeta.get(target.ticketId)?.parentTicketId
+              : undefined;
+            const parentRepoId = parentId ? ticketMeta.get(parentId)?.repoId : undefined;
+            if (parentRepoId !== filterRepoId) {
+              return;
+            }
           }
           if (filterTicketId) {
             const evTktId = target.ticketId;
