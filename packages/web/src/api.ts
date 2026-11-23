@@ -12,12 +12,15 @@ import type {
   LlmProviderPreset,
   ManagedWorktreeItem,
   MemorySearchHit,
+  NotificationConfig,
   OperatingMode,
   OutboxEntry,
   PipelineTemplateId,
+  PlaybookEntry,
   PublicSetupStatus,
   ReasoningEffort,
   RepoConfig,
+  RepoContractFile,
   RepoMetricsSummary,
   SpillArtifact,
   Ticket,
@@ -26,11 +29,28 @@ import type {
   WorktreeGcResult,
 } from "./types.ts";
 
+export function getAuthToken(): string | undefined {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const qTok = params.get("token")?.trim();
+    if (qTok) {
+      localStorage.setItem("super_work_token", qTok);
+      return qTok;
+    }
+    const stored = localStorage.getItem("super_work_token")?.trim();
+    return stored || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getAuthToken();
   const res = await fetch(path, {
     ...init,
     headers: {
       "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init?.headers ?? {}),
     },
   });
@@ -61,14 +81,56 @@ export const api = {
 
   patchRepo: (
     id: string,
-    patch: Omit<Partial<RepoConfig>, "maxConcurrentWorkers" | "dailyBudgetUsd"> & {
+    patch: Omit<Partial<RepoConfig>, "maxConcurrentWorkers" | "dailyBudgetUsd" | "conventions"> & {
       maxConcurrentWorkers?: number | null;
       dailyBudgetUsd?: number | null;
+      conventions?: string | null;
     },
   ) =>
     request<{ repo: RepoConfig }>(`/api/repos/${id}`, {
       method: "PATCH",
       body: JSON.stringify(patch),
+    }),
+
+  syncRepoContract: (id: string) =>
+    request<{ repo: RepoConfig }>(`/api/repos/${id}/contract/sync`, {
+      method: "POST",
+      body: "{}",
+    }),
+
+  exportRepoContract: (id: string) =>
+    request<{ repo: RepoConfig; contract: RepoContractFile; filePath: string }>(
+      `/api/repos/${id}/contract/export`,
+      {
+        method: "POST",
+        body: "{}",
+      },
+    ),
+
+  listPlaybook: (repoId: string) =>
+    request<{ entries: PlaybookEntry[] }>(`/api/repos/${repoId}/playbook`),
+
+  addPlaybook: (
+    repoId: string,
+    payload: { rule: string; scopePaths?: string[]; pinned?: boolean; enabled?: boolean },
+  ) =>
+    request<{ entry: PlaybookEntry }>(`/api/repos/${repoId}/playbook`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  patchPlaybook: (
+    entryId: string,
+    payload: { rule?: string; scopePaths?: string[]; pinned?: boolean; enabled?: boolean },
+  ) =>
+    request<{ entry: PlaybookEntry }>(`/api/playbook/${entryId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+
+  deletePlaybook: (entryId: string) =>
+    request<{ ok: boolean; id: string }>(`/api/playbook/${entryId}`, {
+      method: "DELETE",
     }),
 
   getMetrics: (repoId?: string) =>
@@ -112,6 +174,12 @@ export const api = {
     request<{ ticket: Ticket; entry: OutboxEntry }>(`/api/tickets/${ticketId}/deliver`, {
       method: "POST",
       body: JSON.stringify({ action }),
+    }),
+
+  revertTicket: (ticketId: string) =>
+    request<{ ticket: Ticket; revertCommitSha: string }>(`/api/tickets/${ticketId}/revert`, {
+      method: "POST",
+      body: "{}",
     }),
 
   previewEpic: (payload: {
@@ -235,9 +303,19 @@ export const api = {
     claudeProfile?: EngineModelProfile;
     codexProfile?: EngineModelProfile;
     opencodeProfile?: EngineModelProfile;
+    notifications?: Partial<NotificationConfig> & { clearWebhookSecret?: boolean };
   }) =>
     request<PublicSetupStatus>("/api/setup/configure", {
       method: "POST",
       body: JSON.stringify(payload),
+    }),
+
+  testNotification: (notifications?: Partial<NotificationConfig>) =>
+    request<{
+      ok: boolean;
+      results: Array<{ channel: string; ok: boolean; detail?: string }>;
+    }>("/api/notifications/test", {
+      method: "POST",
+      body: JSON.stringify(notifications ? { notifications } : {}),
     }),
 };

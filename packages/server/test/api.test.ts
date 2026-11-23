@@ -1,14 +1,16 @@
+import { readFile } from "node:fs/promises";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
-import { SuperWorkKernel, type OutboxExecutor } from "@super-work/core";
+import { SuperWorkKernel, nowIso, type OutboxExecutor } from "@super-work/core";
 import {
   FsArtifactStore,
   GhOutboxExecutor,
   GitWorktreeProvider,
   HeuristicControlLLM,
   MockWorkerDriver,
+  NotificationDispatcher,
   SqliteStateStore,
   runGit,
 } from "@super-work/drivers";
@@ -453,6 +455,203 @@ describe("@super-work/server REST + SSE API", () => {
     };
     expect(patched.repo.maxConcurrentWorkers).toBeUndefined();
     expect(patched.repo.dailyBudgetUsd).toBe(25);
+
+    await kernel.stop();
+    stateStore.close();
+  });
+
+  it("supports Playbook CRUD, super-work.json contract sync/export, ticket revert, notification test, filtered SSE, and SUPER_WORK_TOKEN auth", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sw-v050-api-"));
+    tempDirs.push(dir);
+    const repoDir = await createTempGitRepo(dir);
+    await writeFile(
+      join(repoDir, "super-work.json"),
+      JSON.stringify({
+        version: 1,
+        defaultTemplate: "fast",
+        setupCommands: ["git status --short"],
+        verificationCommands: ["git status --short"],
+        conventions: "Keep modules clean.",
+        playbook: [{ rule: "Shared contract rule for API", scopePaths: ["src/**"], pinned: true }],
+      }),
+      "utf8",
+    );
+
+    const stateStore = new SqliteStateStore(join(dir, "state.db"));
+    const artifactStore = new FsArtifactStore(join(dir, "artifacts"));
+    const workspace = new GitWorktreeProvider(join(dir, "worktrees"));
+    const llm = new HeuristicControlLLM();
+    const kernel = new SuperWorkKernel({
+      stateStore,
+      artifactStore,
+      workspace,
+      llm,
+      drivers: [new MockWorkerDriver({ engine: "mock", stepDelayMs: 1 })],
+      outboxExecutor: new GhOutboxExecutor(workspace),
+    });
+
+    const macosCalls: string[] = [];
+    const dispatcher = new NotificationDispatcher(stateStore, {
+      macosSender: async (title) => {
+        macosCalls.push(title);
+      },
+    });
+    const app = createServerApp({
+      kernel,
+      stateStore,
+      artifactStore,
+      llmProviderName: llm.providerName,
+      notificationDispatcher: dispatcher,
+      authToken: "secret-v050-token",
+    });
+
+    // 1. Auth gating: unauthenticated -> 401, Bearer -> 200
+    const unauth = await app.request("/api/health");
+    expect(unauth.status).toBe(401);
+    const authHdr = { Authorization: "Bearer secret-v050-token" };
+    const healthOk = await app.request("/api/health", { headers: authHdr });
+    expect(healthOk.status).toBe(200);
+
+    // 2. Register repo -> auto-syncs super-work.json
+    const regRes = await app.request("/api/repos", {
+      method: "POST",
+      headers: { ...authHdr, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: "repo_v050",
+        name: "v050-api",
+        rootPath: repoDir,
+        baseBranch: "main",
+        mode: "auto",
+        defaultDeliveryChannel: "local_merge",
+        preferredImplementEngine: "mock",
+        preferredReviewEngine: "mock",
+      }),
+    });
+    expect(regRes.status).toBe(201);
+    const regJson = (await regRes.json()) as {
+      repo: { defaultTemplate: string; setupCommands?: string[]; conventions?: string };
+    };
+    expect(regJson.repo.defaultTemplate).toBe("fast");
+    expect(regJson.repo.setupCommands).toEqual(["git status --short"]);
+    expect(regJson.repo.conventions).toBe("Keep modules clean.");
+
+    // 3. Playbook CRUD & Contract Export
+    const pbAdd = await app.request("/api/repos/repo_v050/playbook", {
+      method: "POST",
+      headers: { ...authHdr, "Content-Type": "application/json" },
+      body: JSON.stringify({ rule: "Custom API human rule", scopePaths: ["src/**"], pinned: false }),
+    });
+    expect(pbAdd.status).toBe(201);
+    const { entry: addedPb } = (await pbAdd.json()) as { entry: { id: string; enabled: boolean } };
+
+    const pbPatch = await app.request(`/api/playbook/${addedPb.id}`, {
+      method: "PATCH",
+      headers: { ...authHdr, "Content-Type": "application/json" },
+      body: JSON.stringify({ pinned: true }),
+    });
+    expect(pbPatch.status).toBe(200);
+
+    const pbList = await app.request("/api/repos/repo_v050/playbook", { headers: authHdr });
+    const pbListJson = (await pbList.json()) as { entries: Array<{ id: string }> };
+    expect(pbListJson.entries.length).toBeGreaterThanOrEqual(2);
+
+    const exportRes = await app.request("/api/repos/repo_v050/contract/export", {
+      method: "POST",
+      headers: authHdr,
+    });
+    expect(exportRes.status).toBe(200);
+    const contractFile = await readFile(join(repoDir, "super-work.json"), "utf8");
+    expect(contractFile).toContain("Custom API human rule");
+
+    const pbDel = await app.request(`/api/playbook/${addedPb.id}`, {
+      method: "DELETE",
+      headers: authHdr,
+    });
+    expect(pbDel.status).toBe(200);
+
+    // 4. Test Notification endpoint
+    const notifTest = await app.request("/api/notifications/test", {
+      method: "POST",
+      headers: { ...authHdr, "Content-Type": "application/json" },
+      body: JSON.stringify({ notifications: { macosEnabled: true, webhookEnabled: false } }),
+    });
+    expect(notifTest.status).toBe(200);
+    expect(macosCalls).toHaveLength(1);
+
+    // 5. Filtered SSE & 1-Click Revert via HTTP
+    const epicCreate = await app.request("/api/epics", {
+      method: "POST",
+      headers: { ...authHdr, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        repoId: "repo_v050",
+        title: "SSE Filter Epic",
+        description: "1. packages/a part 1\n2. packages/b part 2",
+        preferredEngine: "mock",
+      }),
+    });
+    expect(epicCreate.status).toBe(201);
+    const { epic, subtasks } = (await epicCreate.json()) as {
+      epic: { id: string };
+      subtasks: Array<{ id: string }>;
+    };
+
+    const unrelated = await kernel.createDirectTicket({
+      repoId: "repo_v050",
+      title: "Unrelated single task",
+      description: "Scope docs/u.md",
+      allowedPaths: ["docs/**"],
+      preferredEngine: "mock",
+    });
+
+    // Open SSE filtered strictly to `epic.id` via ?token=...
+    const server = Bun.serve({ port: 0, fetch: app.fetch });
+    try {
+      const ac = new AbortController();
+      const sseRes = await fetch(
+        `http://127.0.0.1:${server.port}/api/events?ticketId=${epic.id}&token=secret-v050-token`,
+        { signal: ac.signal },
+      );
+      expect(sseRes.status).toBe(200);
+      const reader = sseRes.body!.getReader();
+      let sseChunks = "";
+      const pumpPromise = (async () => {
+        const dec = new TextDecoder();
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          sseChunks += dec.decode(value, { stream: true });
+        }
+      })().catch(() => {});
+
+      await new Promise((r) => setTimeout(r, 40));
+      await kernel.runUntilIdle();
+      await new Promise((r) => setTimeout(r, 80));
+      ac.abort("done");
+      await pumpPromise;
+
+      // Child subtask events streamed through parent Epic filter, while unrelated ticket was excluded
+      expect(sseChunks).toContain(subtasks[0]!.id);
+      expect(sseChunks).not.toContain(unrelated.id);
+    } finally {
+      server.stop(true);
+    }
+
+    // Revert the delivered Epic merge via REST
+    const epicDone = await stateStore.getTicket(epic.id);
+    expect(epicDone?.status).toBe("delivered");
+    expect(epicDone?.mergedCommitSha).toBeTruthy();
+
+    const revertRes = await app.request(`/api/tickets/${epic.id}/revert`, {
+      method: "POST",
+      headers: authHdr,
+    });
+    expect(revertRes.status).toBe(200);
+    const revJson = (await revertRes.json()) as {
+      ticket: { revertedAt?: string; revertCommitSha?: string };
+      revertCommitSha: string;
+    };
+    expect(revJson.revertCommitSha).toBeTruthy();
+    expect(revJson.ticket.revertedAt).toBeTruthy();
 
     await kernel.stop();
     stateStore.close();

@@ -317,19 +317,22 @@ export class GhOutboxExecutor implements OutboxExecutor {
       }
       const provider =
         this.workspace ?? new GitWorktreeProvider(`${repo.rootPath}/.super-work/worktrees`);
-      const { commitSha, branchCleaned } = await provider.mergeBranchToBase({
+      const { commitSha, beforeSha, isMergeCommit, branchCleaned } = await provider.mergeBranchToBase({
         rootRepoPath: repo.rootPath,
         baseBranch: repo.baseBranch,
         branchName,
         worktreePath,
         commitMessage: `Merge ${branchName}: ${ticket.title}`,
         deleteBranch: true,
+        noFf: true,
       });
       return {
         mode: "local_merged",
         baseBranch: repo.baseBranch,
         branchName,
         commitSha,
+        beforeSha,
+        isMergeCommit,
         branchCleaned,
       };
     }

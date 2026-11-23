@@ -9,3 +9,4 @@ export * from "./workers/opencode-driver.ts";
 export * from "./llm/control-plane-llm.ts";
 export * from "./sources/gh-cli-source.ts";
 export * from "./env/cli-scanner.ts";
+export * from "./notifications/notification-dispatcher.ts";

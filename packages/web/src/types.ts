@@ -44,6 +44,58 @@ export type TicketStatus =
   | "failed"
   | "cancelled";
 
+export interface SharedPlaybookRuleSpec {
+  id?: string;
+  rule: string;
+  scopePaths?: string[];
+  pinned?: boolean;
+}
+
+export interface RepoContractFile {
+  version?: 1;
+  defaultTemplate?: PipelineTemplateId;
+  verificationCommands?: string[];
+  setupCommands?: string[];
+  forbiddenPaths?: string[];
+  conventions?: string;
+  playbook?: SharedPlaybookRuleSpec[];
+}
+
+export type PlaybookSource = "human" | "auto_healed" | "repo_contract";
+
+export interface PlaybookEntry {
+  id: string;
+  repoId: string;
+  rule: string;
+  scopePaths: string[];
+  source: PlaybookSource;
+  sourceTicketId?: string;
+  enabled: boolean;
+  pinned: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ReviewSeverity = "blocker" | "major" | "nit";
+
+export interface ReviewFinding {
+  severity: ReviewSeverity;
+  file?: string;
+  line?: number;
+  message: string;
+  suggestion?: string;
+}
+
+export interface NotificationConfig {
+  macosEnabled: boolean;
+  webhookEnabled: boolean;
+  webhookUrl?: string;
+  webhookSecret?: string;
+  notifyOnInbox: boolean;
+  notifyOnDelivery: boolean;
+  notifyOnFailure: boolean;
+}
+
 export interface RepoConfig {
   id: string;
   name: string;
@@ -56,6 +108,11 @@ export interface RepoConfig {
   preferredReviewEngine: WorkerEngineId;
   autoCleanupWorktree?: boolean;
   verificationCommands?: string[];
+  setupCommands?: string[];
+  forbiddenPaths?: string[];
+  conventions?: string;
+  contractSyncedHash?: string;
+  contractSyncedAt?: string;
   defaultDeliveryChannel?: DeliveryChannel;
   maxConcurrentWorkers?: number;
   dailyBudgetUsd?: number;
@@ -83,6 +140,7 @@ export interface InlineStageNote {
   changedFiles: string[];
   verificationPassed: boolean;
   reviewApproved?: boolean;
+  reviewFindings?: ReviewFinding[];
   spillArtifactIds: string[];
   createdAt: string;
 }
@@ -116,6 +174,9 @@ export interface Ticket {
   prNumber?: number;
   prUrl?: string;
   prAutoFollowupCount?: number;
+  mergedCommitSha?: string;
+  revertedAt?: string;
+  revertCommitSha?: string;
   pendingViolationPaths?: string[];
   worktreePath?: string;
   branchName?: string;
@@ -330,6 +391,10 @@ export interface PublicSetupStatus {
     claudeProfile?: EngineModelProfile;
     codexProfile?: EngineModelProfile;
     opencodeProfile?: EngineModelProfile;
+    notifications?: Omit<NotificationConfig, "webhookSecret"> & {
+      hasWebhookSecret: boolean;
+      maskedWebhookSecret?: string;
+    };
     updatedAt: string;
     hasApiKey: boolean;
     maskedApiKey?: string;

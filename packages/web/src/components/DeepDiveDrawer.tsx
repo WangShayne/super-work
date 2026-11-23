@@ -9,6 +9,7 @@ import {
   GitPullRequest,
   History,
   Layers,
+  RotateCcw,
   Search,
   Send,
   Shield,
@@ -17,6 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { api } from "../api.ts";
+import { DiffStudio } from "./DiffStudio.tsx";
 import {
   formatOutboxStatus,
   formatStage,
@@ -61,6 +63,7 @@ export function DeepDiveDrawer({
   const [followUp, setFollowUp] = useState("");
   const [sendingMsg, setSendingMsg] = useState(false);
   const [delivering, setDelivering] = useState<"local_merge" | "push_and_create_pr" | null>(null);
+  const [reverting, setReverting] = useState(false);
   const [deliveryError, setDeliveryError] = useState<string | null>(null);
 
   const [artifactContent, setArtifactContent] = useState<{ id: string; text: string } | null>(null);
@@ -140,6 +143,30 @@ export function DeepDiveDrawer({
     } finally {
       setDelivering(null);
     }
+  };
+
+  const handleRevert = async () => {
+    setReverting(true);
+    setDeliveryError(null);
+    try {
+      await api.revertTicket(ticketId);
+      const [d, r] = await Promise.all([api.getTicketDetail(ticketId), api.getRecall(ticketId)]);
+      setDetail(d);
+      setRecall(r.chain);
+      onRefresh();
+    } catch (err) {
+      setDeliveryError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReverting(false);
+    }
+  };
+
+  const handleSendFileFeedback = async (filePath: string, comment: string) => {
+    await api.sendThreadMessage(ticketId, `[File: ${filePath}] ${comment}`);
+    const [d, r] = await Promise.all([api.getTicketDetail(ticketId), api.getRecall(ticketId)]);
+    setDetail(d);
+    setRecall(r.chain);
+    onRefresh();
   };
 
   const childSubtasks = ticket?.isEpic
@@ -244,6 +271,13 @@ export function DeepDiveDrawer({
                       {t("drawer.localMergedTag")}
                     </span>
                   )}
+                  {ticket.revertedAt && (
+                    <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-300">
+                      <RotateCcw className="w-2.5 h-2.5" />
+                      {t("drawer.revertedBadge")}{" "}
+                      {ticket.revertCommitSha ? `(${ticket.revertCommitSha.slice(0, 7)})` : ""}
+                    </span>
+                  )}
                   {ticket.worktreePath ? (
                     <span className="inline-flex items-center gap-1.5 text-[10px] font-mono px-2 py-0.5 rounded bg-sky-500/10 border border-sky-500/30 text-sky-300">
                       {t("drawer.worktreeActive")}
@@ -272,6 +306,17 @@ export function DeepDiveDrawer({
           </div>
 
           <div className="flex items-center gap-2 flex-wrap justify-end">
+            {hasMergedLocally && !ticket?.revertedAt && (
+              <button
+                type="button"
+                disabled={reverting}
+                onClick={() => void handleRevert()}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-amber-500/40 bg-amber-500/15 text-amber-200 hover:bg-amber-500/25 text-xs disabled:opacity-50"
+              >
+                <RotateCcw className={`w-3 h-3 ${reverting ? "animate-spin" : ""}`} />
+                {reverting ? t("drawer.reverting") : t("drawer.revertButton")}
+              </button>
+            )}
             {canDeliverActions && (
               <button
                 type="button"
@@ -510,26 +555,11 @@ export function DeepDiveDrawer({
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
                   {t("drawer.diffTitle")}
                 </h3>
-                <pre className="rounded-lg border border-zinc-800 bg-zinc-900/80 p-3 font-mono text-[11px] overflow-x-auto leading-relaxed">
-                  {detail?.diff ? (
-                    detail.diff.split("\n").map((line, i) => {
-                      const cls = line.startsWith("+") && !line.startsWith("+++")
-                        ? "text-emerald-400"
-                        : line.startsWith("-") && !line.startsWith("---")
-                          ? "text-rose-400"
-                          : line.startsWith("@@")
-                            ? "text-sky-400"
-                            : "text-zinc-400";
-                      return (
-                        <div key={i} className={cls}>
-                          {line}
-                        </div>
-                      );
-                    })
-                  ) : (
-                    <span className="text-zinc-600">{t("drawer.noDiff")}</span>
-                  )}
-                </pre>
+                <DiffStudio
+                  diff={detail?.diff ?? ""}
+                  stageNotes={ticket.inlineMemory.stageNotes}
+                  onSendFileFeedback={handleSendFileFeedback}
+                />
               </div>
             </div>
           )}

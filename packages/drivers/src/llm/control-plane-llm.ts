@@ -2,7 +2,12 @@ import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getAlternateEngine, normalizeEpicDecompositionPlan, heuristicDecomposeEpic } from "@super-work/core";
+import {
+  getAlternateEngine,
+  heuristicDecomposeEpic,
+  heuristicDistillPlaybookLesson,
+  normalizeEpicDecompositionPlan,
+} from "@super-work/core";
 import type {
   ControlPlaneLLM,
   EpicDecompositionPlan,
@@ -191,6 +196,15 @@ const EPIC_DECOMPOSITION_SCHEMA = {
   required: ["epicTitle", "summary", "subtasks"],
 };
 
+const DISTILL_LESSON_SCHEMA = {
+  type: "object",
+  properties: {
+    rule: { type: "string" },
+    scopePaths: { type: "array", items: { type: "string" } },
+  },
+  required: ["rule", "scopePaths"],
+};
+
 export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
   readonly providerName: string;
 
@@ -204,6 +218,8 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
     activeTickets: Ticket[];
     relatedMemory: MemorySearchHit[];
     repoStructure?: string;
+    playbookRules?: string;
+    conventions?: string;
   }): Promise<TriageProposal> {
     const sys = [
       "You are the Super-agent MasterAssessor / Router.",
@@ -219,6 +235,8 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
         defaultTemplate: input.repo.defaultTemplate,
       },
       repoStructure: input.repoStructure,
+      conventions: input.conventions,
+      playbookRules: input.playbookRules,
       trigger: {
         source: input.trigger.source,
         title: input.trigger.title,
@@ -265,6 +283,8 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
     description: string;
     defaultTemplate: PipelineTemplateId;
     repoStructure?: string;
+    playbookRules?: string;
+    conventions?: string;
   }): Promise<EpicDecompositionPlan> {
     const sys = [
       "You are the Super-agent Epic Architect.",
@@ -277,6 +297,8 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
     const user = JSON.stringify({
       repo: { name: input.repo.name, baseBranch: input.repo.baseBranch },
       repoStructure: input.repoStructure,
+      conventions: input.conventions,
+      playbookRules: input.playbookRules,
       title: input.title,
       description: input.description,
       defaultTemplate: input.defaultTemplate,
@@ -284,6 +306,38 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
 
     const parsed = await this.chatJson<Partial<EpicDecompositionPlan>>(sys, user);
     return normalizeEpicDecompositionPlan(parsed, input);
+  }
+
+  async distillPlaybookLesson(input: {
+    repo: RepoConfig;
+    ticket: Ticket;
+    failureKind: "verification" | "review";
+    failureSummary: string;
+    fixSummary: string;
+    changedFiles: string[];
+  }): Promise<{ rule: string; scopePaths: string[] } | null> {
+    const sys = [
+      "Distill a single reusable, concise engineering guardrail rule (<= 180 chars) from a resolved verification or code review failure.",
+      "Output ONLY valid JSON matching:",
+      JSON.stringify(DISTILL_LESSON_SCHEMA),
+    ].join("\n");
+    const user = JSON.stringify({
+      repo: input.repo.name,
+      ticketTitle: input.ticket.title,
+      failureKind: input.failureKind,
+      failureSummary: input.failureSummary.slice(0, 500),
+      fixSummary: input.fixSummary.slice(0, 400),
+      changedFiles: input.changedFiles.slice(0, 8),
+    });
+    const parsed = await this.chatJson<{ rule?: string; scopePaths?: string[] }>(sys, user);
+    if (!parsed.rule?.trim()) return null;
+    return {
+      rule: parsed.rule.trim(),
+      scopePaths:
+        Array.isArray(parsed.scopePaths) && parsed.scopePaths.length > 0
+          ? parsed.scopePaths.map(String)
+          : input.ticket.mandate.allowedPaths,
+    };
   }
 
   private async chatJson<T>(systemPrompt: string, userPrompt: string): Promise<T> {
@@ -348,11 +402,15 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
     activeTickets: Ticket[];
     relatedMemory: MemorySearchHit[];
     repoStructure?: string;
+    playbookRules?: string;
+    conventions?: string;
   }): Promise<TriageProposal> {
     const prompt = [
       "Evaluate this development trigger and return structured JSON triage proposal.",
       `Repo: ${input.repo.name}, DefaultTemplate: ${input.repo.defaultTemplate}`,
       input.repoStructure ? `RepoStructure:\n${input.repoStructure}` : "",
+      input.conventions ? `Conventions:\n${input.conventions}` : "",
+      input.playbookRules ? `Playbook:\n${input.playbookRules}` : "",
       `Source: ${input.trigger.source}, Title: ${input.trigger.title}`,
       `Body: ${input.trigger.rawText}`,
     ]
@@ -385,11 +443,15 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
     description: string;
     defaultTemplate: PipelineTemplateId;
     repoStructure?: string;
+    playbookRules?: string;
+    conventions?: string;
   }): Promise<EpicDecompositionPlan> {
     const prompt = [
       "Decompose this Epic requirement into a DAG of scoped subtasks with disjoint allowedPaths aligned to the real repository structure where independent.",
       `Repo: ${input.repo.name}, DefaultTemplate: ${input.defaultTemplate}`,
       input.repoStructure ? `RepoStructure:\n${input.repoStructure}` : "",
+      input.conventions ? `Conventions:\n${input.conventions}` : "",
+      input.playbookRules ? `Playbook:\n${input.playbookRules}` : "",
       `Title: ${input.title}`,
       `Description: ${input.description}`,
     ]
@@ -400,6 +462,35 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
       EPIC_DECOMPOSITION_SCHEMA,
     );
     return normalizeEpicDecompositionPlan(parsed, input);
+  }
+
+  async distillPlaybookLesson(input: {
+    repo: RepoConfig;
+    ticket: Ticket;
+    failureKind: "verification" | "review";
+    failureSummary: string;
+    fixSummary: string;
+    changedFiles: string[];
+  }): Promise<{ rule: string; scopePaths: string[] } | null> {
+    const prompt = [
+      "Distill a single concise engineering guardrail rule (<= 180 chars) from this resolved failure.",
+      `Repo: ${input.repo.name}, Ticket: ${input.ticket.title}, Kind: ${input.failureKind}`,
+      `Failure: ${input.failureSummary.slice(0, 400)}`,
+      `Fix: ${input.fixSummary.slice(0, 300)}`,
+      `Files: ${input.changedFiles.slice(0, 6).join(", ")}`,
+    ].join("\n");
+    const parsed = await this.runClaudeJson<{ rule?: string; scopePaths?: string[] }>(
+      prompt,
+      DISTILL_LESSON_SCHEMA,
+    );
+    if (!parsed.rule?.trim()) return null;
+    return {
+      rule: parsed.rule.trim(),
+      scopePaths:
+        Array.isArray(parsed.scopePaths) && parsed.scopePaths.length > 0
+          ? parsed.scopePaths.map(String)
+          : input.ticket.mandate.allowedPaths,
+    };
   }
 
   private async runClaudeJson<T>(prompt: string, schema: Record<string, unknown>): Promise<T> {
@@ -460,11 +551,15 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
     activeTickets: Ticket[];
     relatedMemory: MemorySearchHit[];
     repoStructure?: string;
+    playbookRules?: string;
+    conventions?: string;
   }): Promise<TriageProposal> {
     const prompt = [
       "Evaluate this development trigger and return structured JSON triage proposal.",
       `Repo: ${input.repo.name}, DefaultTemplate: ${input.repo.defaultTemplate}`,
       input.repoStructure ? `RepoStructure:\n${input.repoStructure}` : "",
+      input.conventions ? `Conventions:\n${input.conventions}` : "",
+      input.playbookRules ? `Playbook:\n${input.playbookRules}` : "",
       `Source: ${input.trigger.source}, Title: ${input.trigger.title}`,
       `Body: ${input.trigger.rawText}`,
     ]
@@ -497,11 +592,15 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
     description: string;
     defaultTemplate: PipelineTemplateId;
     repoStructure?: string;
+    playbookRules?: string;
+    conventions?: string;
   }): Promise<EpicDecompositionPlan> {
     const prompt = [
       "Decompose this Epic requirement into a DAG of scoped subtasks with disjoint allowedPaths aligned to the real repository structure where independent.",
       `Repo: ${input.repo.name}, DefaultTemplate: ${input.defaultTemplate}`,
       input.repoStructure ? `RepoStructure:\n${input.repoStructure}` : "",
+      input.conventions ? `Conventions:\n${input.conventions}` : "",
+      input.playbookRules ? `Playbook:\n${input.playbookRules}` : "",
       `Title: ${input.title}`,
       `Description: ${input.description}`,
     ]
@@ -512,6 +611,35 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
       EPIC_DECOMPOSITION_SCHEMA,
     );
     return normalizeEpicDecompositionPlan(parsed, input);
+  }
+
+  async distillPlaybookLesson(input: {
+    repo: RepoConfig;
+    ticket: Ticket;
+    failureKind: "verification" | "review";
+    failureSummary: string;
+    fixSummary: string;
+    changedFiles: string[];
+  }): Promise<{ rule: string; scopePaths: string[] } | null> {
+    const prompt = [
+      "Distill a single concise engineering guardrail rule (<= 180 chars) from this resolved failure.",
+      `Repo: ${input.repo.name}, Ticket: ${input.ticket.title}, Kind: ${input.failureKind}`,
+      `Failure: ${input.failureSummary.slice(0, 400)}`,
+      `Fix: ${input.fixSummary.slice(0, 300)}`,
+      `Files: ${input.changedFiles.slice(0, 6).join(", ")}`,
+    ].join("\n");
+    const parsed = await this.runCodexJson<{ rule?: string; scopePaths?: string[] }>(
+      prompt,
+      DISTILL_LESSON_SCHEMA,
+    );
+    if (!parsed.rule?.trim()) return null;
+    return {
+      rule: parsed.rule.trim(),
+      scopePaths:
+        Array.isArray(parsed.scopePaths) && parsed.scopePaths.length > 0
+          ? parsed.scopePaths.map(String)
+          : input.ticket.mandate.allowedPaths,
+    };
   }
 
   private async runCodexJson<T>(prompt: string, schema: Record<string, unknown>): Promise<T> {
@@ -685,8 +813,27 @@ export class HeuristicControlLLM implements ControlPlaneLLM {
     description: string;
     defaultTemplate: PipelineTemplateId;
     repoStructure?: string;
+    playbookRules?: string;
+    conventions?: string;
   }): Promise<EpicDecompositionPlan> {
     return heuristicDecomposeEpic(input);
+  }
+
+  async distillPlaybookLesson(input: {
+    repo: RepoConfig;
+    ticket: Ticket;
+    failureKind: "verification" | "review";
+    failureSummary: string;
+    fixSummary: string;
+    changedFiles: string[];
+  }): Promise<{ rule: string; scopePaths: string[] } | null> {
+    return heuristicDistillPlaybookLesson({
+      failureKind: input.failureKind,
+      failureSummary: input.failureSummary,
+      fixSummary: input.fixSummary,
+      changedFiles: input.changedFiles,
+      allowedPaths: input.ticket.mandate.allowedPaths,
+    });
   }
 }
 
@@ -703,6 +850,8 @@ export class CompositeControlPlaneLLM implements ControlPlaneLLM {
     activeTickets: Ticket[];
     relatedMemory: MemorySearchHit[];
     repoStructure?: string;
+    playbookRules?: string;
+    conventions?: string;
   }): Promise<TriageProposal> {
     for (const provider of this.chain) {
       try {
@@ -737,6 +886,8 @@ export class CompositeControlPlaneLLM implements ControlPlaneLLM {
     description: string;
     defaultTemplate: PipelineTemplateId;
     repoStructure?: string;
+    playbookRules?: string;
+    conventions?: string;
   }): Promise<EpicDecompositionPlan> {
     for (const provider of this.chain) {
       if (!provider.planEpicDecomposition) continue;
@@ -747,6 +898,32 @@ export class CompositeControlPlaneLLM implements ControlPlaneLLM {
       }
     }
     return heuristicDecomposeEpic(input);
+  }
+
+  async distillPlaybookLesson(input: {
+    repo: RepoConfig;
+    ticket: Ticket;
+    failureKind: "verification" | "review";
+    failureSummary: string;
+    fixSummary: string;
+    changedFiles: string[];
+  }): Promise<{ rule: string; scopePaths: string[] } | null> {
+    for (const provider of this.chain) {
+      if (!provider.distillPlaybookLesson) continue;
+      try {
+        const res = await provider.distillPlaybookLesson(input);
+        if (res) return res;
+      } catch {
+        // Fallback to next control-plane provider
+      }
+    }
+    return heuristicDistillPlaybookLesson({
+      failureKind: input.failureKind,
+      failureSummary: input.failureSummary,
+      fixSummary: input.fixSummary,
+      changedFiles: input.changedFiles,
+      allowedPaths: input.ticket.mandate.allowedPaths,
+    });
   }
 }
 
@@ -860,6 +1037,8 @@ export class MutableControlPlaneLLM implements ControlPlaneLLM {
     activeTickets: Ticket[];
     relatedMemory: MemorySearchHit[];
     repoStructure?: string;
+    playbookRules?: string;
+    conventions?: string;
   }): Promise<TriageProposal> {
     return this.current.triageTrigger(input);
   }
@@ -880,11 +1059,35 @@ export class MutableControlPlaneLLM implements ControlPlaneLLM {
     description: string;
     defaultTemplate: PipelineTemplateId;
     repoStructure?: string;
+    playbookRules?: string;
+    conventions?: string;
   }): Promise<EpicDecompositionPlan> {
     if (this.current.planEpicDecomposition) {
       return this.current.planEpicDecomposition(input);
     }
     return Promise.resolve(heuristicDecomposeEpic(input));
+  }
+
+  distillPlaybookLesson(input: {
+    repo: RepoConfig;
+    ticket: Ticket;
+    failureKind: "verification" | "review";
+    failureSummary: string;
+    fixSummary: string;
+    changedFiles: string[];
+  }): Promise<{ rule: string; scopePaths: string[] } | null> {
+    if (this.current.distillPlaybookLesson) {
+      return this.current.distillPlaybookLesson(input);
+    }
+    return Promise.resolve(
+      heuristicDistillPlaybookLesson({
+        failureKind: input.failureKind,
+        failureSummary: input.failureSummary,
+        fixSummary: input.fixSummary,
+        changedFiles: input.changedFiles,
+        allowedPaths: input.ticket.mandate.allowedPaths,
+      }),
+    );
   }
 }
 

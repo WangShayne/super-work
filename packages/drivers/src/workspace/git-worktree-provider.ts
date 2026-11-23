@@ -1,8 +1,10 @@
 import { existsSync } from "node:fs";
-import { access, lstat, mkdir, readdir, readlink, rm, symlink } from "node:fs/promises";
+import { access, lstat, mkdir, readdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import type {
   RepoConfig,
+  RepoContractFile,
+  RevertResult,
   Ticket,
   VerificationCommandOutput,
   VerificationRunResult,
@@ -61,6 +63,33 @@ export class GitWorktreeProvider implements WorkspaceProvider {
 
   async getRepoStructureSummary(rootRepoPath: string): Promise<string> {
     return scanRepoStructureSummary(rootRepoPath);
+  }
+
+  async loadRepoContract(
+    rootRepoPath: string,
+  ): Promise<{ contract: RepoContractFile; rawHash: string; filePath: string } | null> {
+    const filePath = join(resolve(rootRepoPath), "super-work.json");
+    if (!existsSync(filePath)) {
+      return null;
+    }
+    const rawText = await readFile(filePath, "utf8");
+    const parsed = JSON.parse(rawText) as RepoContractFile;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`Invalid super-work.json contract in ${filePath}: expected JSON object`);
+    }
+    const rawHash = new Bun.CryptoHasher("sha256").update(rawText).digest("hex");
+    return { contract: parsed, rawHash, filePath };
+  }
+
+  async writeRepoContract(
+    rootRepoPath: string,
+    contract: RepoContractFile,
+  ): Promise<{ filePath: string; rawHash: string }> {
+    const filePath = join(resolve(rootRepoPath), "super-work.json");
+    const serialized = `${JSON.stringify(contract, null, 2)}\n`;
+    await writeFile(filePath, serialized, "utf8");
+    const rawHash = new Bun.CryptoHasher("sha256").update(serialized).digest("hex");
+    return { filePath, rawHash };
   }
 
   async prepareWorkspace(
@@ -125,6 +154,18 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     }
 
     await this.linkRepoNodeModules(repo.rootPath, worktreePath);
+
+    const setupCommands = (repo.setupCommands ?? []).map((c) => c.trim()).filter(Boolean);
+    if (setupCommands.length > 0) {
+      const setupRes = await this.runVerificationCommands(worktreePath, setupCommands, 120);
+      if (!setupRes.ok) {
+        await this.cleanupWorkspace(worktreePath, repo.rootPath);
+        throw new Error(
+          `Worktree setup failed (${setupRes.failedCommand ?? "setup"}): ${setupRes.summary}`,
+        );
+      }
+    }
+
     return { worktreePath, branchName };
   }
 
@@ -434,11 +475,15 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     worktreePath?: string;
     commitMessage: string;
     deleteBranch?: boolean;
-  }): Promise<{ commitSha: string; branchCleaned: boolean }> {
+    noFf?: boolean;
+  }): Promise<{ commitSha: string; beforeSha?: string; isMergeCommit?: boolean; branchCleaned: boolean }> {
     const branchVerify = await runGit(["rev-parse", "--verify", input.branchName], input.rootRepoPath);
     if (branchVerify.exitCode !== 0) {
       throw new Error(`Branch not found: ${input.branchName}`);
     }
+
+    const beforeRes = await runGit(["rev-parse", "--short", input.baseBranch], input.rootRepoPath);
+    const beforeSha = beforeRes.exitCode === 0 ? beforeRes.stdout.trim() : undefined;
 
     if (input.worktreePath) {
       await this.cleanupWorkspace(input.worktreePath, input.rootRepoPath);
@@ -466,6 +511,7 @@ export class GitWorktreeProvider implements WorkspaceProvider {
 
     const headRes = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], input.rootRepoPath);
     const currentBranch = headRes.stdout.trim();
+    const forceNoFf = Boolean(input.noFf);
 
     if (currentBranch === input.baseBranch) {
       const dirty = await runGit(
@@ -478,7 +524,9 @@ export class GitWorktreeProvider implements WorkspaceProvider {
         );
       }
 
-      let mergeRes = await runGit(["merge", "--ff-only", input.branchName], input.rootRepoPath);
+      let mergeRes = forceNoFf
+        ? { exitCode: 1, stdout: "", stderr: "" }
+        : await runGit(["merge", "--ff-only", input.branchName], input.rootRepoPath);
       if (mergeRes.exitCode !== 0) {
         const userCheck = await runGit(["config", "user.name"], input.rootRepoPath);
         const mergeArgs = userCheck.stdout.trim()
@@ -503,12 +551,11 @@ export class GitWorktreeProvider implements WorkspaceProvider {
         }
       }
     } else {
-      const ffRes = await runGit(
-        ["fetch", ".", `${input.branchName}:${input.baseBranch}`],
-        input.rootRepoPath,
-      );
+      const ffRes = forceNoFf
+        ? { exitCode: 1, stdout: "", stderr: "" }
+        : await runGit(["fetch", ".", `${input.branchName}:${input.baseBranch}`], input.rootRepoPath);
       if (ffRes.exitCode !== 0) {
-        // Non-fast-forward merge into an un-checked-out target branch (e.g. Epic staging branch)
+        // Merge into an un-checked-out target branch (e.g. Epic staging branch or force --no-ff atomic commit)
         await mkdir(this.worktreesDir, { recursive: true });
         const mergeWt = join(
           this.worktreesDir,
@@ -560,7 +607,93 @@ export class GitWorktreeProvider implements WorkspaceProvider {
       branchCleaned = delRes.exitCode === 0;
     }
 
-    return { commitSha, branchCleaned };
+    return { commitSha, beforeSha, isMergeCommit: forceNoFf, branchCleaned };
+  }
+
+  async revertMergedCommit(input: {
+    rootRepoPath: string;
+    baseBranch: string;
+    commitSha: string;
+  }): Promise<RevertResult> {
+    const parentsRes = await runGit(
+      ["rev-list", "--parents", "-n", "1", input.commitSha],
+      input.rootRepoPath,
+    );
+    if (parentsRes.exitCode !== 0 || !parentsRes.stdout.trim()) {
+      return {
+        ok: false,
+        error: `Commit '${input.commitSha}' not found in repository.`,
+      };
+    }
+
+    const parentTokens = parentsRes.stdout.trim().split(/\s+/);
+    const isMergeCommit = parentTokens.length >= 3;
+
+    const executeRevertInDir = async (cwd: string): Promise<RevertResult> => {
+      const userCheck = await runGit(["config", "user.name"], cwd);
+      const baseArgs = isMergeCommit
+        ? ["revert", "--no-edit", "-m", "1", input.commitSha]
+        : ["revert", "--no-edit", input.commitSha];
+      const args = userCheck.stdout.trim()
+        ? baseArgs
+        : ["-c", "user.name=super-work", "-c", "user.email=super-work@local", ...baseArgs];
+
+      const revRes = await runGit(args, cwd);
+      if (revRes.exitCode !== 0) {
+        const conflictsRes = await runGit(["diff", "--name-only", "--diff-filter=U"], cwd);
+        const conflictFiles = conflictsRes.stdout
+          .split("\n")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        await runGit(["revert", "--abort"], cwd);
+        return {
+          ok: false,
+          conflictFiles: conflictFiles.length > 0 ? conflictFiles : undefined,
+          error: revRes.stderr.trim() || revRes.stdout.trim() || "git revert failed",
+        };
+      }
+
+      const newShaRes = await runGit(["rev-parse", "--short", "HEAD"], cwd);
+      return {
+        ok: true,
+        revertCommitSha: newShaRes.stdout.trim() || undefined,
+      };
+    };
+
+    const headRes = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], input.rootRepoPath);
+    const currentBranch = headRes.stdout.trim();
+
+    if (currentBranch === input.baseBranch) {
+      const dirty = await runGit(
+        ["status", "--porcelain", "--untracked-files=no"],
+        input.rootRepoPath,
+      );
+      if (dirty.stdout.trim()) {
+        return {
+          ok: false,
+          error: `Base repository (${input.baseBranch}) has uncommitted tracked changes; commit or stash before reverting.`,
+        };
+      }
+      return executeRevertInDir(input.rootRepoPath);
+    }
+
+    await mkdir(this.worktreesDir, { recursive: true });
+    const revertWt = join(
+      this.worktreesDir,
+      `_revert_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    );
+    const wtAdd = await runGit(["worktree", "add", revertWt, input.baseBranch], input.rootRepoPath);
+    if (wtAdd.exitCode !== 0) {
+      return {
+        ok: false,
+        error: `Failed to checkout '${input.baseBranch}' in temporary worktree for revert: ${wtAdd.stderr.trim() || wtAdd.stdout.trim()}`,
+      };
+    }
+    try {
+      return await executeRevertInDir(revertWt);
+    } finally {
+      await this.cleanupWorkspace(revertWt, input.rootRepoPath);
+    }
   }
 
   async revertPaths(worktreePath: string, paths: string[]): Promise<void> {

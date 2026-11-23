@@ -11,9 +11,12 @@ import type {
   EngineModelProfile,
   EpicDeliveryMode,
   InboxItemStatus,
+  KernelEvent,
   LlmProviderPreset,
+  NotificationConfig,
   OutboxStatus,
   PipelineTemplateId,
+  PlaybookEntry,
   PublicSetupStatus,
   ReasoningEffort,
   RepoConfig,
@@ -23,10 +26,12 @@ import type {
   TicketStatus,
   WorkerEngineId,
 } from "@super-work/core";
-import { newId, nowIso } from "@super-work/core";
+import { newId, normalizePlaybookRuleText, nowIso } from "@super-work/core";
 import {
   CliEnvironmentScanner,
+  DEFAULT_NOTIFICATION_CONFIG,
   MutableControlPlaneLLM,
+  NotificationDispatcher,
   buildControlPlaneLLMFromSetup,
   sanitizeCliModelName,
   testControlPlaneLLMConnection,
@@ -46,6 +51,8 @@ export interface ServerAppDeps {
   llmProviderName?: string;
   mutableLlm?: MutableControlPlaneLLM;
   cliScanner?: CliEnvironmentScanner;
+  notificationDispatcher?: NotificationDispatcher;
+  authToken?: string;
   webDistDir?: string;
 }
 
@@ -72,9 +79,15 @@ export function toPublicSetupStatus(
     claudeProfile: {},
     codexProfile: {},
     opencodeProfile: {},
+    notifications: { ...DEFAULT_NOTIFICATION_CONFIG },
     updatedAt: scanReport.scannedAt,
   };
-  const { llmApiKey, ...rest } = cfg;
+  const { llmApiKey, notifications, ...rest } = cfg;
+  const mergedNotifs: NotificationConfig = {
+    ...DEFAULT_NOTIFICATION_CONFIG,
+    ...(notifications ?? {}),
+  };
+  const { webhookSecret, ...notifRest } = mergedNotifs;
   return {
     initialized: cfg.initialized,
     activeLlmProvider,
@@ -83,19 +96,80 @@ export function toPublicSetupStatus(
       llmModel: normalizeSetupModel(cfg.llmPreset, rest.llmModel),
       hasApiKey: Boolean(llmApiKey?.trim()),
       maskedApiKey: maskApiKey(llmApiKey),
+      notifications: {
+        ...notifRest,
+        hasWebhookSecret: Boolean(webhookSecret?.trim()),
+        maskedWebhookSecret: maskApiKey(webhookSecret),
+      },
     },
     scanReport,
   };
 }
 
+function resolveEventTarget(
+  event: KernelEvent,
+  ticketMeta: Map<string, { repoId: string; parentTicketId?: string }>,
+): { repoId?: string; ticketId?: string } {
+  switch (event.type) {
+    case "repo_updated":
+      return { repoId: event.repo.id };
+    case "playbook_updated":
+      return { repoId: event.repoId, ticketId: event.entry?.sourceTicketId };
+    case "trigger_ingested":
+      return { repoId: event.trigger.repoId };
+    case "ticket_created":
+    case "ticket_updated":
+      return { repoId: event.ticket.repoId, ticketId: event.ticket.id };
+    case "thread_routed":
+    case "stage_started":
+    case "worker_event":
+    case "stage_completed":
+    case "watchdog_decision":
+    case "verification_completed":
+      return { repoId: ticketMeta.get(event.ticketId)?.repoId, ticketId: event.ticketId };
+    case "watchdog_signal":
+      return {
+        repoId: ticketMeta.get(event.signal.ticketId)?.repoId,
+        ticketId: event.signal.ticketId,
+      };
+    case "inbox_created":
+    case "inbox_resolved":
+      return { repoId: event.item.repoId, ticketId: event.item.ticketId };
+    case "outbox_queued":
+    case "outbox_sent":
+    case "outbox_failed":
+      return { repoId: event.entry.repoId, ticketId: event.entry.ticketId };
+    case "worktrees_gc":
+      return {};
+  }
+}
+
 export function createServerApp(deps: ServerAppDeps): Hono {
   const { kernel, stateStore, artifactStore, webDistDir } = deps;
   const scanner = deps.cliScanner ?? new CliEnvironmentScanner();
+  const notificationDispatcher =
+    deps.notificationDispatcher ?? new NotificationDispatcher(stateStore);
+  const expectedToken = deps.authToken?.trim() || undefined;
   const getActiveProviderName = () =>
     deps.mutableLlm?.providerName ?? deps.llmProviderName ?? "heuristic:local";
   const app = new Hono();
 
   app.use("/api/*", cors());
+
+  if (expectedToken) {
+    app.use("/api/*", async (c, next) => {
+      if (c.req.method === "OPTIONS") {
+        return next();
+      }
+      const authHeader = c.req.header("authorization") ?? "";
+      const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+      const queryToken = c.req.query("token")?.trim() ?? "";
+      if (bearer !== expectedToken && queryToken !== expectedToken) {
+        return c.json({ error: "Unauthorized" }, 401);
+      }
+      return next();
+    });
+  }
 
   app.get("/api/health", async (c) => {
     const [repos, tickets, pendingInbox, pendingOutbox, availableEngines, worktrees] =
@@ -179,6 +253,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       claudeProfile?: EngineModelProfile;
       codexProfile?: EngineModelProfile;
       opencodeProfile?: EngineModelProfile;
+      notifications?: Partial<NotificationConfig> & { clearWebhookSecret?: boolean };
     };
 
     const existing = await stateStore.getSystemSetting<SystemSetupConfig>("setup_config");
@@ -200,6 +275,29 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     });
 
     const nextPreset: LlmProviderPreset = body.llmPreset ?? existing?.llmPreset ?? "heuristic";
+    const existingNotifs: NotificationConfig = {
+      ...DEFAULT_NOTIFICATION_CONFIG,
+      ...(existing?.notifications ?? {}),
+    };
+    const nextNotifications: NotificationConfig = body.notifications
+      ? {
+          macosEnabled: body.notifications.macosEnabled ?? existingNotifs.macosEnabled,
+          webhookEnabled: body.notifications.webhookEnabled ?? existingNotifs.webhookEnabled,
+          webhookUrl:
+            body.notifications.webhookUrl !== undefined
+              ? body.notifications.webhookUrl.trim() || undefined
+              : existingNotifs.webhookUrl,
+          webhookSecret: body.notifications.clearWebhookSecret
+            ? undefined
+            : body.notifications.webhookSecret?.trim()
+              ? body.notifications.webhookSecret.trim()
+              : existingNotifs.webhookSecret,
+          notifyOnInbox: body.notifications.notifyOnInbox ?? existingNotifs.notifyOnInbox,
+          notifyOnDelivery: body.notifications.notifyOnDelivery ?? existingNotifs.notifyOnDelivery,
+          notifyOnFailure: body.notifications.notifyOnFailure ?? existingNotifs.notifyOnFailure,
+        }
+      : existingNotifs;
+
     const nextConfig: SystemSetupConfig = {
       initialized: true,
       llmPreset: nextPreset,
@@ -227,6 +325,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         body.opencodeProfile !== undefined
           ? cleanProfile(body.opencodeProfile)
           : (existing?.opencodeProfile ?? {}),
+      notifications: nextNotifications,
       updatedAt: nowIso(),
     };
 
@@ -247,6 +346,15 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     }
 
     return c.json(toPublicSetupStatus(nextConfig, scanReport, getActiveProviderName()));
+  });
+
+  app.post("/api/notifications/test", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      notifications?: Partial<NotificationConfig>;
+    };
+    const results = await notificationDispatcher.sendTestNotification(body.notifications);
+    const ok = results.length > 0 && results.every((r) => r.ok);
+    return c.json({ ok, results });
   });
 
   // --- Repositories ---
@@ -275,6 +383,13 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       verificationCommands: Array.isArray(body.verificationCommands)
         ? body.verificationCommands.map((s) => String(s).trim()).filter(Boolean)
         : [],
+      setupCommands: Array.isArray(body.setupCommands)
+        ? body.setupCommands.map((s) => String(s).trim()).filter(Boolean)
+        : [],
+      forbiddenPaths: Array.isArray(body.forbiddenPaths)
+        ? body.forbiddenPaths.map((s) => String(s).trim()).filter(Boolean)
+        : [],
+      conventions: body.conventions?.trim() || undefined,
       defaultDeliveryChannel: body.defaultDeliveryChannel ?? "auto_pr_or_branch",
       maxConcurrentWorkers:
         typeof body.maxConcurrentWorkers === "number" && body.maxConcurrentWorkers > 0
@@ -288,7 +403,8 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       updatedAt: ts,
     };
     await stateStore.upsertRepo(repo);
-    return c.json({ repo }, 201);
+    const syncedRepo = (await kernel.syncRepoContract(repo.id).catch(() => repo)) ?? repo;
+    return c.json({ repo: syncedRepo }, 201);
   });
 
   app.patch("/api/repos/:id", async (c) => {
@@ -297,9 +413,13 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     if (!existing) {
       return c.json({ error: "Repository not found" }, 404);
     }
-    const patch = (await c.req.json()) as Partial<RepoConfig> & {
+    const patch = (await c.req.json()) as Omit<
+      Partial<RepoConfig>,
+      "maxConcurrentWorkers" | "dailyBudgetUsd" | "conventions"
+    > & {
       maxConcurrentWorkers?: number | null;
       dailyBudgetUsd?: number | null;
+      conventions?: string | null;
     };
     const updated: RepoConfig = {
       ...existing,
@@ -315,6 +435,18 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         patch.verificationCommands !== undefined
           ? patch.verificationCommands.map((s) => String(s).trim()).filter(Boolean)
           : (existing.verificationCommands ?? []),
+      setupCommands:
+        patch.setupCommands !== undefined
+          ? patch.setupCommands.map((s) => String(s).trim()).filter(Boolean)
+          : (existing.setupCommands ?? []),
+      forbiddenPaths:
+        patch.forbiddenPaths !== undefined
+          ? patch.forbiddenPaths.map((s) => String(s).trim()).filter(Boolean)
+          : (existing.forbiddenPaths ?? []),
+      conventions:
+        patch.conventions !== undefined
+          ? patch.conventions?.trim() || undefined
+          : existing.conventions,
       defaultDeliveryChannel:
         (patch.defaultDeliveryChannel as DeliveryChannel | undefined) ??
         existing.defaultDeliveryChannel ??
@@ -337,6 +469,111 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     };
     await stateStore.upsertRepo(updated);
     return c.json({ repo: updated });
+  });
+
+  // --- Repo Contract (super-work.json) & Playbook ---
+  app.post("/api/repos/:id/contract/sync", async (c) => {
+    const id = c.req.param("id");
+    const existing = await stateStore.getRepo(id);
+    if (!existing) {
+      return c.json({ error: "Repository not found" }, 404);
+    }
+    try {
+      const repo = (await kernel.syncRepoContract(id, true)) ?? existing;
+      return c.json({ repo });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.post("/api/repos/:id/contract/export", async (c) => {
+    const id = c.req.param("id");
+    try {
+      const result = await kernel.exportRepoContract(id);
+      return c.json(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("Repository not found") ? 404 : 400);
+    }
+  });
+
+  app.get("/api/repos/:id/playbook", async (c) => {
+    const id = c.req.param("id");
+    const repo = await stateStore.getRepo(id);
+    if (!repo) {
+      return c.json({ error: "Repository not found" }, 404);
+    }
+    const entries = await stateStore.listPlaybookEntries(id);
+    return c.json({ entries });
+  });
+
+  app.post("/api/repos/:id/playbook", async (c) => {
+    const id = c.req.param("id");
+    const repo = await stateStore.getRepo(id);
+    if (!repo) {
+      return c.json({ error: "Repository not found" }, 404);
+    }
+    const body = (await c.req.json()) as {
+      rule?: string;
+      scopePaths?: string[];
+      pinned?: boolean;
+      enabled?: boolean;
+    };
+    if (!body.rule?.trim()) {
+      return c.json({ error: "rule is required" }, 400);
+    }
+    const entry = await kernel.addOrUpdatePlaybookRule({
+      repoId: id,
+      rule: body.rule.trim(),
+      scopePaths: Array.isArray(body.scopePaths) ? body.scopePaths : undefined,
+      source: "human",
+      pinned: body.pinned,
+      enabled: body.enabled,
+    });
+    if (!entry) {
+      return c.json({ error: "Invalid rule text" }, 400);
+    }
+    return c.json({ entry }, 201);
+  });
+
+  app.patch("/api/playbook/:entryId", async (c) => {
+    const entryId = c.req.param("entryId");
+    const existing = await stateStore.getPlaybookEntry(entryId);
+    if (!existing) {
+      return c.json({ error: "Playbook entry not found" }, 404);
+    }
+    const patch = (await c.req.json()) as {
+      rule?: string;
+      scopePaths?: string[];
+      pinned?: boolean;
+      enabled?: boolean;
+    };
+    const nextRule = patch.rule !== undefined ? normalizePlaybookRuleText(patch.rule) : existing.rule;
+    if (!nextRule) {
+      return c.json({ error: "rule cannot be empty" }, 400);
+    }
+    const updated: PlaybookEntry = {
+      ...existing,
+      rule: nextRule,
+      scopePaths:
+        patch.scopePaths !== undefined
+          ? patch.scopePaths.map((s) => String(s).trim()).filter(Boolean)
+          : existing.scopePaths,
+      pinned: patch.pinned !== undefined ? Boolean(patch.pinned) : existing.pinned,
+      enabled: patch.enabled !== undefined ? Boolean(patch.enabled) : existing.enabled,
+      updatedAt: nowIso(),
+    };
+    await stateStore.savePlaybookEntry(updated);
+    return c.json({ entry: updated });
+  });
+
+  app.delete("/api/playbook/:entryId", async (c) => {
+    const entryId = c.req.param("entryId");
+    const deleted = await stateStore.deletePlaybookEntry(entryId);
+    if (!deleted) {
+      return c.json({ error: "Playbook entry not found" }, 404);
+    }
+    return c.json({ ok: true, id: entryId });
   });
 
   // --- Metrics & Quota ---
@@ -518,6 +755,22 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     }
   });
 
+  app.post("/api/tickets/:id/revert", async (c) => {
+    const id = c.req.param("id");
+    try {
+      const result = await kernel.revertTicketDelivery(id);
+      return c.json(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const status = msg.includes("not found")
+        ? 404
+        : msg.includes("conflicted")
+          ? 409
+          : 400;
+      return c.json({ error: msg }, status);
+    }
+  });
+
   // --- Epic DAG Planning & Dispatch ---
   app.post("/api/epics/preview", async (c) => {
     const body = (await c.req.json()) as {
@@ -599,6 +852,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       deliveryAction?: "local_merge" | "push_and_create_pr";
       expandMandate?: boolean;
       budgetIncreaseUsd?: number;
+      saveToPlaybook?: boolean;
     };
     if (body.decision !== "approved" && body.decision !== "rejected") {
       return c.json({ error: "decision must be 'approved' or 'rejected'" }, 400);
@@ -607,6 +861,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       deliveryAction: body.deliveryAction,
       expandMandate: body.expandMandate,
       budgetIncreaseUsd: body.budgetIncreaseUsd,
+      saveToPlaybook: body.saveToPlaybook,
     });
     void kernel.tick();
     void kernel.outbox.processDueEntries();
@@ -651,7 +906,16 @@ export function createServerApp(deps: ServerAppDeps): Hono {
   });
 
   // --- Real-time SSE Bus ---
-  app.get("/api/events", (c) => {
+  app.get("/api/events", async (c) => {
+    const filterRepoId = c.req.query("repoId") || undefined;
+    const filterTicketId = c.req.query("ticketId") || undefined;
+
+    const existingTickets = await stateStore.listTickets();
+    const ticketMeta = new Map<string, { repoId: string; parentTicketId?: string }>();
+    for (const t of existingTickets) {
+      ticketMeta.set(t.id, { repoId: t.repoId, parentTicketId: t.parentTicketId });
+    }
+
     return streamSSE(c, async (stream) => {
       let closed = false;
       let resolveClosed!: () => void;
@@ -661,6 +925,30 @@ export function createServerApp(deps: ServerAppDeps): Hono {
 
       const unsubscribe = kernel.subscribe((event) => {
         if (closed) return;
+        if (event.type === "ticket_created" || event.type === "ticket_updated") {
+          ticketMeta.set(event.ticket.id, {
+            repoId: event.ticket.repoId,
+            parentTicketId: event.ticket.parentTicketId,
+          });
+        }
+
+        if (filterRepoId || filterTicketId) {
+          const target = resolveEventTarget(event, ticketMeta);
+          if (filterRepoId && target.repoId !== filterRepoId) {
+            return;
+          }
+          if (filterTicketId) {
+            const evTktId = target.ticketId;
+            const matchesSelf = evTktId === filterTicketId;
+            const matchesChild = Boolean(
+              evTktId && ticketMeta.get(evTktId)?.parentTicketId === filterTicketId,
+            );
+            if (!matchesSelf && !matchesChild) {
+              return;
+            }
+          }
+        }
+
         void stream.writeSSE({
           event: event.type,
           data: JSON.stringify(event),

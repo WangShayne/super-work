@@ -13,6 +13,7 @@ import {
   GitWorktreeProvider,
   MockWorkerDriver,
   MutableControlPlaneLLM,
+  NotificationDispatcher,
   OpenCodeDriver,
   SqliteStateStore,
   buildControlPlaneLLMFromSetup,
@@ -33,6 +34,7 @@ export interface StartedDaemon {
   kernel: SuperWorkKernel;
   stateStore: SqliteStateStore;
   ghPoller: GhCliPollingSource;
+  notificationDispatcher: NotificationDispatcher;
   stop: () => Promise<void>;
 }
 
@@ -40,6 +42,7 @@ export async function startDaemon(options?: {
   port?: number;
   dataDir?: string;
   defaultRepoPath?: string;
+  authToken?: string;
   enableMockFallback?: boolean;
 }): Promise<StartedDaemon> {
   const port = options?.port ?? Number(process.env.PORT ?? 4318);
@@ -117,6 +120,9 @@ export async function startDaemon(options?: {
 
   const here = dirname(fileURLToPath(import.meta.url));
   const webDistDir = resolve(here, "../../web/dist");
+  const notificationDispatcher = new NotificationDispatcher(stateStore);
+  const detachNotifications = notificationDispatcher.attachToKernel(kernel);
+  const authToken = options?.authToken ?? (process.env.SUPER_WORK_TOKEN?.trim() || undefined);
 
   const app = createServerApp({
     kernel,
@@ -124,6 +130,8 @@ export async function startDaemon(options?: {
     artifactStore,
     mutableLlm,
     cliScanner,
+    notificationDispatcher,
+    authToken,
     webDistDir,
   });
 
@@ -144,13 +152,14 @@ export async function startDaemon(options?: {
   });
 
   const stop = async () => {
+    detachNotifications();
     ghPoller.stop();
     await kernel.stop();
     server.stop(true);
     stateStore.close();
   };
 
-  return { server, kernel, stateStore, ghPoller, stop };
+  return { server, kernel, stateStore, ghPoller, notificationDispatcher, stop };
 }
 
 if (import.meta.main) {

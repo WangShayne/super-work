@@ -78,6 +78,45 @@ export function selectEngineForStage(
   return repo.preferredImplementEngine;
 }
 
+export function selectReviewEngine(input: {
+  repo: RepoConfig;
+  implementEngine: WorkerEngineId;
+  availableEngines: WorkerEngineId[];
+  explicitWatchdogEngine?: WorkerEngineId;
+}): WorkerEngineId {
+  const { repo, implementEngine, availableEngines, explicitWatchdogEngine } = input;
+  if (explicitWatchdogEngine && availableEngines.includes(explicitWatchdogEngine)) {
+    return explicitWatchdogEngine;
+  }
+
+  const realAvailable = availableEngines.filter((e) => e !== "mock");
+
+  if (implementEngine !== "mock") {
+    if (
+      repo.preferredReviewEngine !== "mock" &&
+      repo.preferredReviewEngine !== implementEngine &&
+      realAvailable.includes(repo.preferredReviewEngine)
+    ) {
+      return repo.preferredReviewEngine;
+    }
+
+    const altReal = getAlternateEngine(implementEngine, realAvailable);
+    if (altReal) {
+      return altReal;
+    }
+
+    if (realAvailable.includes(implementEngine)) {
+      // Single real-engine environment: run an isolated blind review session on the same engine
+      return implementEngine;
+    }
+  }
+
+  if (availableEngines.includes(repo.preferredReviewEngine)) {
+    return repo.preferredReviewEngine;
+  }
+  return availableEngines[0] ?? repo.preferredReviewEngine;
+}
+
 export function getAlternateEngine(
   current: WorkerEngineId,
   available: WorkerEngineId[],

@@ -66,6 +66,73 @@ export interface EpicDecompositionPlan {
   subtasks: EpicSubtaskSpec[];
 }
 
+export interface SharedPlaybookRuleSpec {
+  id?: string;
+  rule: string;
+  scopePaths?: string[];
+  pinned?: boolean;
+}
+
+export interface RepoContractFile {
+  version?: 1;
+  defaultTemplate?: PipelineTemplateId;
+  verificationCommands?: string[];
+  setupCommands?: string[];
+  forbiddenPaths?: string[];
+  conventions?: string;
+  playbook?: SharedPlaybookRuleSpec[];
+}
+
+export type PlaybookSource = "human" | "auto_healed" | "repo_contract";
+
+export interface PlaybookEntry {
+  id: string;
+  repoId: string;
+  rule: string;
+  scopePaths: string[];
+  source: PlaybookSource;
+  sourceTicketId?: string;
+  enabled: boolean;
+  pinned: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ReviewSeverity = "blocker" | "major" | "nit";
+
+export interface ReviewFinding {
+  severity: ReviewSeverity;
+  file?: string;
+  line?: number;
+  message: string;
+  suggestion?: string;
+}
+
+export interface ReviewReport {
+  verdict: "approved" | "changes_requested";
+  summary: string;
+  findings: ReviewFinding[];
+  reviewedByEngine: WorkerEngineId;
+  createdAt: string;
+}
+
+export interface RevertResult {
+  ok: boolean;
+  revertCommitSha?: string;
+  conflictFiles?: string[];
+  error?: string;
+}
+
+export interface NotificationConfig {
+  macosEnabled: boolean;
+  webhookEnabled: boolean;
+  webhookUrl?: string;
+  webhookSecret?: string;
+  notifyOnInbox: boolean;
+  notifyOnDelivery: boolean;
+  notifyOnFailure: boolean;
+}
+
 export interface RepoConfig {
   id: string;
   name: string;
@@ -78,6 +145,11 @@ export interface RepoConfig {
   preferredReviewEngine: WorkerEngineId;
   autoCleanupWorktree?: boolean;
   verificationCommands?: string[];
+  setupCommands?: string[];
+  forbiddenPaths?: string[];
+  conventions?: string;
+  contractSyncedHash?: string;
+  contractSyncedAt?: string;
   defaultDeliveryChannel?: DeliveryChannel;
   maxConcurrentWorkers?: number;
   dailyBudgetUsd?: number;
@@ -127,6 +199,7 @@ export interface InlineStageNote {
   changedFiles: string[];
   verificationPassed: boolean;
   reviewApproved?: boolean;
+  reviewFindings?: ReviewFinding[];
   spillArtifactIds: string[];
   createdAt: string;
 }
@@ -166,6 +239,9 @@ export interface Ticket {
   prNumber?: number;
   prUrl?: string;
   prAutoFollowupCount?: number;
+  mergedCommitSha?: string;
+  revertedAt?: string;
+  revertCommitSha?: string;
   pendingViolationPaths?: string[];
   worktreePath?: string;
   branchName?: string;
@@ -275,6 +351,7 @@ export type WorkerStreamEvent =
         planSummary?: string;
         changedFiles?: string[];
         verificationPassed?: boolean;
+        reviewFindings?: ReviewFinding[];
       };
       timestamp: string;
     }
@@ -384,6 +461,13 @@ export type KernelEvent =
       stageRunId: string;
       result: VerificationRunResult;
       timestamp: string;
+    }
+  | {
+      type: "playbook_updated";
+      repoId: string;
+      entry?: PlaybookEntry;
+      deletedId?: string;
+      timestamp: string;
     };
 
 export interface ManagedWorktreeItem {
@@ -447,15 +531,20 @@ export interface SystemSetupConfig {
   claudeProfile?: EngineModelProfile;
   codexProfile?: EngineModelProfile;
   opencodeProfile?: EngineModelProfile;
+  notifications?: NotificationConfig;
   updatedAt: string;
 }
 
 export interface PublicSetupStatus {
   initialized: boolean;
   activeLlmProvider: string;
-  config: Omit<SystemSetupConfig, "llmApiKey"> & {
+  config: Omit<SystemSetupConfig, "llmApiKey" | "notifications"> & {
     hasApiKey: boolean;
     maskedApiKey?: string;
+    notifications?: Omit<NotificationConfig, "webhookSecret"> & {
+      hasWebhookSecret: boolean;
+      maskedWebhookSecret?: string;
+    };
   };
   scanReport: CliScanReport;
 }

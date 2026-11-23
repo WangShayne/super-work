@@ -3,6 +3,8 @@ export * from "./utils.ts";
 export * from "./ports.ts";
 export * from "./mandate.ts";
 export * from "./memory.ts";
+export * from "./playbook.ts";
+export * from "./review.ts";
 export * from "./pipeline.ts";
 export * from "./watchdog.ts";
 export * from "./outbox.ts";

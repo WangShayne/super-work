@@ -13,7 +13,8 @@ export type MockScenarioKind =
   | "violate_mandate"
   | "infinite_error_loop"
   | "diff_oscillation"
-  | "review_reject_once";
+  | "review_reject_once"
+  | "review_nit_only";
 
 export interface MockDriverOptions {
   engine?: WorkerEngineId;
@@ -207,10 +208,35 @@ export class MockWorkerDriver implements WorkerDriver {
     if (input.stage === "review") {
       const count = (this.reviewAttempts.get(input.ticketId) ?? 0) + 1;
       this.reviewAttempts.set(input.ticketId, count);
+      const targetFile = pickTargetFile(input.mandate.allowedPaths, input.ticketId);
       const rejectOnce = scenario === "review_reject_once" && count === 1;
+      const nitOnly = scenario === "review_nit_only";
       const approved = !rejectOnce;
+
+      const reviewFindings = rejectOnce
+        ? [
+            {
+              severity: "major" as const,
+              file: targetFile,
+              line: 2,
+              message: "Missing edge-case validation",
+              suggestion: "Guard empty or invalid input before returning",
+            },
+          ]
+        : nitOnly
+          ? [
+              {
+                severity: "nit" as const,
+                file: targetFile,
+                line: 1,
+                message: "Consider adding brief JSDoc comment for clarity",
+                suggestion: "Add a 1-line module doc comment",
+              },
+            ]
+          : [];
+
       const text = approved
-        ? `Code review passed via ${this.engine}. VERDICT: APPROVED`
+        ? `Code review passed via ${this.engine}.${nitOnly ? " (1 advisory nit)" : ""} VERDICT: APPROVED`
         : `Missing edge-case assertion via ${this.engine}. VERDICT: REJECTED - add extra validation`;
 
       yield { type: "text", text, timestamp: nowIso() };
@@ -222,6 +248,7 @@ export class MockWorkerDriver implements WorkerDriver {
         structuredOutput: {
           approved,
           feedback: approved ? undefined : "Add edge-case validation",
+          reviewFindings,
         },
         timestamp: nowIso(),
       };

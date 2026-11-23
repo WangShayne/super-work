@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { FolderGit2, GitBranch, Layers, Plus, RefreshCw, Sparkles, Trash2, X } from "lucide-react";
+import { BookOpen, Download, FileJson2, FolderGit2, GitBranch, Layers, Pin, Plus, RefreshCw, Sparkles, Trash2, Upload, X } from "lucide-react";
 import { api } from "../api.ts";
 import { formatTemplate, formatTicketStatus, useI18n } from "../i18n.tsx";
 import type {
@@ -10,6 +10,7 @@ import type {
   ManagedWorktreeItem,
   OperatingMode,
   PipelineTemplateId,
+  PlaybookEntry,
   ReasoningEffort,
   RepoConfig,
   WorkerEngineId,
@@ -794,23 +795,29 @@ interface RepoSettingsModalProps {
   repo: RepoConfig | null;
   availableEngines: WorkerEngineId[];
   onClose: () => void;
+  onRefresh?: () => void;
   onSubmit: (
     repoId: string,
-    patch: Omit<Partial<RepoConfig>, "maxConcurrentWorkers" | "dailyBudgetUsd"> & {
+    patch: Omit<Partial<RepoConfig>, "maxConcurrentWorkers" | "dailyBudgetUsd" | "conventions"> & {
       maxConcurrentWorkers?: number | null;
       dailyBudgetUsd?: number | null;
+      conventions?: string | null;
     },
   ) => Promise<void>;
 }
+
+type SettingsTab = "runtime" | "contract" | "playbook";
 
 export function RepoSettingsModal({
   open,
   repo,
   availableEngines,
   onClose,
+  onRefresh,
   onSubmit,
 }: RepoSettingsModalProps) {
   const { locale, t } = useI18n();
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("runtime");
   const [name, setName] = useState("");
   const [baseBranch, setBaseBranch] = useState("main");
   const [githubRepo, setGithubRepo] = useState("");
@@ -820,13 +827,37 @@ export function RepoSettingsModal({
   const [reviewEngine, setReviewEngine] = useState<WorkerEngineId>("codex");
   const [deliveryChannel, setDeliveryChannel] = useState<DeliveryChannel>("auto_pr_or_branch");
   const [verificationInput, setVerificationInput] = useState("");
+  const [setupInput, setSetupInput] = useState("");
+  const [forbiddenInput, setForbiddenInput] = useState("");
+  const [conventions, setConventions] = useState("");
   const [maxConcurrentInput, setMaxConcurrentInput] = useState("");
   const [dailyBudgetInput, setDailyBudgetInput] = useState("");
   const [autoCleanupWorktree, setAutoCleanupWorktree] = useState(true);
   const [submitting, setSubmitting] = useState(false);
 
+  const [contractNotice, setContractNotice] = useState<string | null>(null);
+  const [syncingContract, setSyncingContract] = useState(false);
+
+  const [playbook, setPlaybook] = useState<PlaybookEntry[]>([]);
+  const [playbookLoading, setPlaybookLoading] = useState(false);
+  const [newRule, setNewRule] = useState("");
+  const [newRuleScope, setNewRuleScope] = useState("");
+  const [newRulePinned, setNewRulePinned] = useState(false);
+
+  const loadPlaybook = async (repoId: string) => {
+    setPlaybookLoading(true);
+    try {
+      const res = await api.listPlaybook(repoId);
+      setPlaybook(res.entries);
+    } finally {
+      setPlaybookLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (!open || !repo) return;
+    setSettingsTab("runtime");
+    setContractNotice(null);
     setName(repo.name);
     setBaseBranch(repo.baseBranch);
     setGithubRepo(repo.githubRepo ?? "");
@@ -836,11 +867,15 @@ export function RepoSettingsModal({
     setReviewEngine(repo.preferredReviewEngine);
     setDeliveryChannel(repo.defaultDeliveryChannel ?? "auto_pr_or_branch");
     setVerificationInput((repo.verificationCommands ?? []).join(", "));
+    setSetupInput((repo.setupCommands ?? []).join(", "));
+    setForbiddenInput((repo.forbiddenPaths ?? []).join(", "));
+    setConventions(repo.conventions ?? "");
     setMaxConcurrentInput(
       repo.maxConcurrentWorkers ? String(repo.maxConcurrentWorkers) : "",
     );
     setDailyBudgetInput(repo.dailyBudgetUsd ? String(repo.dailyBudgetUsd) : "");
     setAutoCleanupWorktree(repo.autoCleanupWorktree !== false);
+    void loadPlaybook(repo.id);
   }, [open, repo]);
 
   if (!open || !repo) return null;
@@ -863,6 +898,14 @@ export function RepoSettingsModal({
         .split(/[\n,]+/)
         .map((s) => s.trim())
         .filter(Boolean);
+      const setupCommands = setupInput
+        .split(/[\n,]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const forbiddenPaths = forbiddenInput
+        .split(/[\n,]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
       const parsedMaxConcurrent = Number(maxConcurrentInput.trim());
       const parsedDailyBudget = Number(dailyBudgetInput.trim());
       await onSubmit(repo.id, {
@@ -875,6 +918,9 @@ export function RepoSettingsModal({
         preferredReviewEngine: reviewEngine,
         defaultDeliveryChannel: deliveryChannel,
         verificationCommands,
+        setupCommands,
+        forbiddenPaths,
+        conventions: conventions.trim() || null,
         maxConcurrentWorkers:
           maxConcurrentInput.trim() && Number.isFinite(parsedMaxConcurrent) && parsedMaxConcurrent > 0
             ? Math.floor(parsedMaxConcurrent)
@@ -891,214 +937,517 @@ export function RepoSettingsModal({
     }
   };
 
+  const handleSyncContract = async () => {
+    setSyncingContract(true);
+    setContractNotice(null);
+    try {
+      const res = await api.syncRepoContract(repo.id);
+      setVerificationInput((res.repo.verificationCommands ?? []).join(", "));
+      setSetupInput((res.repo.setupCommands ?? []).join(", "));
+      setForbiddenInput((res.repo.forbiddenPaths ?? []).join(", "));
+      setConventions(res.repo.conventions ?? "");
+      setDefaultTemplate(res.repo.defaultTemplate);
+      await loadPlaybook(repo.id);
+      onRefresh?.();
+      setContractNotice(`Synced super-work.json (${res.repo.contractSyncedAt ?? "ok"})`);
+    } catch (err) {
+      setContractNotice(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSyncingContract(false);
+    }
+  };
+
+  const handleExportContract = async () => {
+    setSyncingContract(true);
+    setContractNotice(null);
+    try {
+      const res = await api.exportRepoContract(repo.id);
+      onRefresh?.();
+      setContractNotice(`Exported super-work.json -> ${res.filePath}`);
+    } catch (err) {
+      setContractNotice(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSyncingContract(false);
+    }
+  };
+
+  const handleAddPlaybookRule = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newRule.trim()) return;
+    const scopePaths = newRuleScope
+      .split(/[\n,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    await api.addPlaybook(repo.id, {
+      rule: newRule.trim(),
+      scopePaths: scopePaths.length > 0 ? scopePaths : undefined,
+      pinned: newRulePinned,
+      enabled: true,
+    });
+    setNewRule("");
+    setNewRuleScope("");
+    setNewRulePinned(false);
+    await loadPlaybook(repo.id);
+    onRefresh?.();
+  };
+
+  const handleTogglePlaybook = async (entry: PlaybookEntry, field: "enabled" | "pinned") => {
+    await api.patchPlaybook(entry.id, { [field]: !entry[field] });
+    await loadPlaybook(repo.id);
+    onRefresh?.();
+  };
+
+  const handleDeletePlaybook = async (entryId: string) => {
+    await api.deletePlaybook(entryId);
+    await loadPlaybook(repo.id);
+    onRefresh?.();
+  };
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
-      <div className="w-full max-w-lg rounded-xl border border-zinc-800 bg-zinc-950 p-5 space-y-4 shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 overflow-y-auto">
+      <div className="w-full max-w-2xl rounded-xl border border-zinc-800 bg-zinc-950 p-5 space-y-4 shadow-2xl my-4">
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-zinc-100">{t("modal.repoSettings.title")}</h3>
+          <div>
+            <h3 className="text-sm font-semibold text-zinc-100">{t("modal.repoSettings.title")}</h3>
+            <div className="font-mono text-[10px] text-zinc-500 mt-0.5 truncate max-w-md">
+              {repo.rootPath}
+            </div>
+          </div>
           <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200">
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-3 text-xs">
-          <div>
-            <label className="block text-zinc-400 mb-1">{t("modal.repoSettings.rootPath")}</label>
-            <div className="w-full bg-zinc-900/60 border border-zinc-800/80 rounded-lg px-3 py-2 font-mono text-zinc-400 truncate">
-              {repo.rootPath}
-            </div>
-          </div>
+        {/* Settings Tab Bar */}
+        <div className="flex items-center gap-1 border-b border-zinc-800 text-xs">
+          <button
+            type="button"
+            onClick={() => setSettingsTab("runtime")}
+            className={`px-3 py-2 border-b-2 font-medium transition ${
+              settingsTab === "runtime"
+                ? "border-indigo-500 text-indigo-300"
+                : "border-transparent text-zinc-500 hover:text-zinc-300"
+            }`}
+          >
+            {t("modal.repoSettings.tab.runtime")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setSettingsTab("contract")}
+            className={`inline-flex items-center gap-1.5 px-3 py-2 border-b-2 font-medium transition ${
+              settingsTab === "contract"
+                ? "border-indigo-500 text-indigo-300"
+                : "border-transparent text-zinc-500 hover:text-zinc-300"
+            }`}
+          >
+            <FileJson2 className="w-3.5 h-3.5" />
+            {t("modal.repoSettings.tab.contract")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setSettingsTab("playbook")}
+            className={`inline-flex items-center gap-1.5 px-3 py-2 border-b-2 font-medium transition ${
+              settingsTab === "playbook"
+                ? "border-indigo-500 text-indigo-300"
+                : "border-transparent text-zinc-500 hover:text-zinc-300"
+            }`}
+          >
+            <BookOpen className="w-3.5 h-3.5" />
+            {t("modal.repoSettings.tab.playbook")} ({playbook.length})
+          </button>
+        </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-zinc-400 mb-1">{t("modal.repo.name")}</label>
+        {settingsTab !== "playbook" ? (
+          <form onSubmit={handleSubmit} className="space-y-3 text-xs max-h-[68vh] overflow-y-auto pr-1">
+            {settingsTab === "runtime" && (
+              <>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-zinc-400 mb-1">{t("modal.repo.name")}</label>
+                    <input
+                      required
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-100"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-zinc-400 mb-1">{t("modal.repo.baseBranch")}</label>
+                    <input
+                      required
+                      value={baseBranch}
+                      onChange={(e) => setBaseBranch(e.target.value)}
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-zinc-400 mb-1">
+                      {t("modal.repoSettings.defaultTemplate")}
+                    </label>
+                    <select
+                      value={defaultTemplate}
+                      onChange={(e) => setDefaultTemplate(e.target.value as PipelineTemplateId)}
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-2 text-zinc-100"
+                    >
+                      <option value="fast">{formatTemplate("fast", locale)}</option>
+                      <option value="standard">{formatTemplate("standard", locale)}</option>
+                      <option value="strict">{formatTemplate("strict", locale)}</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-zinc-400 mb-1">{t("modal.repo.initialMode")}</label>
+                    <select
+                      value={mode}
+                      onChange={(e) => setMode(e.target.value as OperatingMode)}
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-2 text-zinc-100"
+                    >
+                      <option value="observe">{t("header.mode.observe")} (observe)</option>
+                      <option value="auto">{t("header.mode.auto")} (auto)</option>
+                      <option value="off">{t("header.mode.off")} (off)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-zinc-400 mb-1">
+                      {t("modal.repoSettings.implEngine")}
+                    </label>
+                    <select
+                      value={implEngine}
+                      onChange={(e) => setImplEngine(e.target.value as WorkerEngineId)}
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-2 font-mono text-zinc-100"
+                    >
+                      {engineOptions.map((eng) => (
+                        <option key={eng} value={eng}>
+                          {eng}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-zinc-400 mb-1">
+                      {t("modal.repoSettings.reviewEngine")}
+                    </label>
+                    <select
+                      value={reviewEngine}
+                      onChange={(e) => setReviewEngine(e.target.value as WorkerEngineId)}
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-2 font-mono text-zinc-100"
+                    >
+                      {engineOptions.map((eng) => (
+                        <option key={eng} value={eng}>
+                          {eng}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-zinc-400 mb-1">{t("modal.repo.githubRepo")}</label>
+                  <input
+                    value={githubRepo}
+                    onChange={(e) => setGithubRepo(e.target.value)}
+                    placeholder={t("modal.repo.githubPlaceholder")}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-zinc-400 mb-1">
+                    {t("modal.repoSettings.deliveryChannel")}
+                  </label>
+                  <select
+                    value={deliveryChannel}
+                    onChange={(e) => setDeliveryChannel(e.target.value as DeliveryChannel)}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-2 text-zinc-100"
+                  >
+                    <option value="auto_pr_or_branch">{t("modal.repoSettings.channel.auto")}</option>
+                    <option value="local_merge">{t("modal.repoSettings.channel.localMerge")}</option>
+                    <option value="github_pr">{t("modal.repoSettings.channel.githubPr")}</option>
+                  </select>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-zinc-400 mb-1">
+                      {t("modal.repoSettings.maxConcurrent")}
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={maxConcurrentInput}
+                      onChange={(e) => setMaxConcurrentInput(e.target.value)}
+                      placeholder={t("modal.repoSettings.quotaPlaceholder")}
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-zinc-400 mb-1">
+                      {t("modal.repoSettings.dailyBudget")}
+                    </label>
+                    <input
+                      type="number"
+                      min="0.1"
+                      step="0.5"
+                      value={dailyBudgetInput}
+                      onChange={(e) => setDailyBudgetInput(e.target.value)}
+                      placeholder={t("modal.repoSettings.quotaPlaceholder")}
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
+                    />
+                  </div>
+                </div>
+
+                <label className="flex items-start gap-2.5 rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={autoCleanupWorktree}
+                    onChange={(e) => setAutoCleanupWorktree(e.target.checked)}
+                    className="mt-0.5 rounded border-zinc-700 bg-zinc-950 text-indigo-500 focus:ring-indigo-500"
+                  />
+                  <div>
+                    <div className="font-medium text-zinc-200">
+                      {t("modal.repoSettings.autoCleanupLabel")}
+                    </div>
+                    <p className="text-[11px] text-zinc-400 mt-0.5">
+                      {t("modal.repoSettings.autoCleanupDesc")}
+                    </p>
+                  </div>
+                </label>
+              </>
+            )}
+
+            {settingsTab === "contract" && (
+              <>
+                <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3 flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-[11px] text-zinc-400">
+                    {repo.contractSyncedAt
+                      ? `${t("modal.repoSettings.contractSyncedPrefix")} ${repo.contractSyncedAt}`
+                      : "super-work.json"}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={syncingContract}
+                      onClick={() => void handleSyncContract()}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-sky-500/40 bg-sky-500/15 hover:bg-sky-500/25 text-sky-200 text-[11px] disabled:opacity-50"
+                    >
+                      <Download className="w-3 h-3" />
+                      {t("modal.repoSettings.syncContractBtn")}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={syncingContract}
+                      onClick={() => void handleExportContract()}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-indigo-500/40 bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-200 text-[11px] disabled:opacity-50"
+                    >
+                      <Upload className="w-3 h-3" />
+                      {t("modal.repoSettings.exportContractBtn")}
+                    </button>
+                  </div>
+                </div>
+
+                {contractNotice && (
+                  <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-200">
+                    {contractNotice}
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-zinc-400 mb-1">
+                    {t("modal.repoSettings.verificationCommands")}
+                  </label>
+                  <input
+                    value={verificationInput}
+                    onChange={(e) => setVerificationInput(e.target.value)}
+                    placeholder={t("modal.repoSettings.verificationPlaceholder")}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
+                  />
+                  <p className="text-[11px] text-zinc-500 mt-1">
+                    {t("modal.repoSettings.verificationHint")}
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-zinc-400 mb-1">
+                    {t("modal.repoSettings.setupCommands")}
+                  </label>
+                  <input
+                    value={setupInput}
+                    onChange={(e) => setSetupInput(e.target.value)}
+                    placeholder={t("modal.repoSettings.setupPlaceholder")}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
+                  />
+                  <p className="text-[11px] text-zinc-500 mt-1">
+                    {t("modal.repoSettings.setupHint")}
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-zinc-400 mb-1">
+                    {t("modal.repoSettings.forbiddenPaths")}
+                  </label>
+                  <input
+                    value={forbiddenInput}
+                    onChange={(e) => setForbiddenInput(e.target.value)}
+                    placeholder={t("modal.repoSettings.forbiddenPlaceholder")}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-zinc-400 mb-1">
+                    {t("modal.repoSettings.conventions")}
+                  </label>
+                  <textarea
+                    rows={4}
+                    value={conventions}
+                    onChange={(e) => setConventions(e.target.value)}
+                    placeholder={t("modal.repoSettings.conventionsPlaceholder")}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-100"
+                  />
+                </div>
+              </>
+            )}
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-3 py-1.5 rounded-lg border border-zinc-800 text-zinc-400 hover:text-zinc-200"
+              >
+                {t("modal.repo.cancel")}
+              </button>
+              <button
+                type="submit"
+                disabled={submitting}
+                className="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium disabled:opacity-50"
+              >
+                {submitting ? t("modal.repoSettings.saving") : t("modal.repoSettings.save")}
+              </button>
+            </div>
+          </form>
+        ) : (
+          <div className="space-y-3 text-xs">
+            <form onSubmit={(e) => void handleAddPlaybookRule(e)} className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3 space-y-2">
               <input
                 required
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-100"
+                value={newRule}
+                onChange={(e) => setNewRule(e.target.value)}
+                placeholder={t("modal.repoSettings.playbookAddPlaceholder")}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-zinc-100"
               />
-            </div>
-            <div>
-              <label className="block text-zinc-400 mb-1">{t("modal.repo.baseBranch")}</label>
-              <input
-                required
-                value={baseBranch}
-                onChange={(e) => setBaseBranch(e.target.value)}
-                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-zinc-400 mb-1">
-                {t("modal.repoSettings.defaultTemplate")}
-              </label>
-              <select
-                value={defaultTemplate}
-                onChange={(e) => setDefaultTemplate(e.target.value as PipelineTemplateId)}
-                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-2 text-zinc-100"
-              >
-                <option value="fast">{formatTemplate("fast", locale)}</option>
-                <option value="standard">{formatTemplate("standard", locale)}</option>
-                <option value="strict">{formatTemplate("strict", locale)}</option>
-              </select>
-            </div>
-            <div>
-              <label className="block text-zinc-400 mb-1">{t("modal.repo.initialMode")}</label>
-              <select
-                value={mode}
-                onChange={(e) => setMode(e.target.value as OperatingMode)}
-                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-2 text-zinc-100"
-              >
-                <option value="observe">{t("header.mode.observe")} (observe)</option>
-                <option value="auto">{t("header.mode.auto")} (auto)</option>
-                <option value="off">{t("header.mode.off")} (off)</option>
-              </select>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-zinc-400 mb-1">
-                {t("modal.repoSettings.implEngine")}
-              </label>
-              <select
-                value={implEngine}
-                onChange={(e) => setImplEngine(e.target.value as WorkerEngineId)}
-                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-2 font-mono text-zinc-100"
-              >
-                {engineOptions.map((eng) => (
-                  <option key={eng} value={eng}>
-                    {eng}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-zinc-400 mb-1">
-                {t("modal.repoSettings.reviewEngine")}
-              </label>
-              <select
-                value={reviewEngine}
-                onChange={(e) => setReviewEngine(e.target.value as WorkerEngineId)}
-                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-2 font-mono text-zinc-100"
-              >
-                {engineOptions.map((eng) => (
-                  <option key={eng} value={eng}>
-                    {eng}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-zinc-400 mb-1">{t("modal.repo.githubRepo")}</label>
-            <input
-              value={githubRepo}
-              onChange={(e) => setGithubRepo(e.target.value)}
-              placeholder={t("modal.repo.githubPlaceholder")}
-              className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
-            />
-          </div>
-
-          <div>
-            <label className="block text-zinc-400 mb-1">
-              {t("modal.repoSettings.deliveryChannel")}
-            </label>
-            <select
-              value={deliveryChannel}
-              onChange={(e) => setDeliveryChannel(e.target.value as DeliveryChannel)}
-              className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-2 text-zinc-100"
-            >
-              <option value="auto_pr_or_branch">{t("modal.repoSettings.channel.auto")}</option>
-              <option value="local_merge">{t("modal.repoSettings.channel.localMerge")}</option>
-              <option value="github_pr">{t("modal.repoSettings.channel.githubPr")}</option>
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-zinc-400 mb-1">
-              {t("modal.repoSettings.verificationCommands")}
-            </label>
-            <input
-              value={verificationInput}
-              onChange={(e) => setVerificationInput(e.target.value)}
-              placeholder={t("modal.repoSettings.verificationPlaceholder")}
-              className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
-            />
-            <p className="text-[11px] text-zinc-500 mt-1">
-              {t("modal.repoSettings.verificationHint")}
-            </p>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-zinc-400 mb-1">
-                {t("modal.repoSettings.maxConcurrent")}
-              </label>
-              <input
-                type="number"
-                min="1"
-                step="1"
-                value={maxConcurrentInput}
-                onChange={(e) => setMaxConcurrentInput(e.target.value)}
-                placeholder={t("modal.repoSettings.quotaPlaceholder")}
-                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
-              />
-            </div>
-            <div>
-              <label className="block text-zinc-400 mb-1">
-                {t("modal.repoSettings.dailyBudget")}
-              </label>
-              <input
-                type="number"
-                min="0.1"
-                step="0.5"
-                value={dailyBudgetInput}
-                onChange={(e) => setDailyBudgetInput(e.target.value)}
-                placeholder={t("modal.repoSettings.quotaPlaceholder")}
-                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
-              />
-            </div>
-          </div>
-
-          <label className="flex items-start gap-2.5 rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-3 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={autoCleanupWorktree}
-              onChange={(e) => setAutoCleanupWorktree(e.target.checked)}
-              className="mt-0.5 rounded border-zinc-700 bg-zinc-950 text-indigo-500 focus:ring-indigo-500"
-            />
-            <div>
-              <div className="font-medium text-zinc-200">
-                {t("modal.repoSettings.autoCleanupLabel")}
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  value={newRuleScope}
+                  onChange={(e) => setNewRuleScope(e.target.value)}
+                  placeholder={t("modal.repoSettings.playbookScopePlaceholder")}
+                  className="flex-1 min-w-44 bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1 font-mono text-[11px] text-emerald-300"
+                />
+                <label className="inline-flex items-center gap-1.5 text-zinc-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={newRulePinned}
+                    onChange={(e) => setNewRulePinned(e.target.checked)}
+                    className="rounded border-zinc-700 bg-zinc-950 text-indigo-500"
+                  />
+                  {t("modal.repoSettings.playbookPin")}
+                </label>
+                <button
+                  type="submit"
+                  className="inline-flex items-center gap-1 px-3 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-medium"
+                >
+                  <Plus className="w-3 h-3" />
+                  {t("modal.repoSettings.playbookAddBtn")}
+                </button>
               </div>
-              <p className="text-[11px] text-zinc-400 mt-0.5">
-                {t("modal.repoSettings.autoCleanupDesc")}
-              </p>
-            </div>
-          </label>
+            </form>
 
-          <div className="flex justify-end gap-2 pt-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-3 py-1.5 rounded-lg border border-zinc-800 text-zinc-400 hover:text-zinc-200"
-            >
-              {t("modal.repo.cancel")}
-            </button>
-            <button
-              type="submit"
-              disabled={submitting}
-              className="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium disabled:opacity-50"
-            >
-              {submitting ? t("modal.repoSettings.saving") : t("modal.repoSettings.save")}
-            </button>
+            <div className="max-h-64 overflow-y-auto space-y-2">
+              {playbookLoading ? (
+                <div className="py-6 text-center text-zinc-500">{t("drawer.loading")}</div>
+              ) : playbook.length === 0 ? (
+                <div className="py-6 px-4 text-center rounded-lg border border-dashed border-zinc-800 text-zinc-500">
+                  {t("modal.repoSettings.playbookEmpty")}
+                </div>
+              ) : (
+                playbook.map((entry) => (
+                  <div
+                    key={entry.id}
+                    className={`rounded-lg border p-2.5 space-y-1.5 ${
+                      entry.enabled
+                        ? "border-zinc-800 bg-zinc-900/60"
+                        : "border-zinc-800/50 bg-zinc-900/20 opacity-60"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="space-y-1 min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="px-1.5 py-0.2 rounded font-mono text-[10px] bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
+                            {entry.source}
+                          </span>
+                          {entry.pinned && (
+                            <span className="px-1.5 py-0.2 rounded font-mono text-[10px] bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                              PIN
+                            </span>
+                          )}
+                          <span className="font-mono text-[10px] text-emerald-300">
+                            [{entry.scopePaths.join(", ")}]
+                          </span>
+                        </div>
+                        <p className="text-zinc-200 leading-relaxed">{entry.rule}</p>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => void handleTogglePlaybook(entry, "pinned")}
+                          title={entry.pinned ? t("modal.repoSettings.playbookUnpin") : t("modal.repoSettings.playbookPin")}
+                          className={`p-1 rounded border ${
+                            entry.pinned
+                              ? "border-amber-500/40 bg-amber-500/15 text-amber-300"
+                              : "border-zinc-800 text-zinc-500 hover:text-zinc-200"
+                          }`}
+                        >
+                          <Pin className="w-3 h-3" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleTogglePlaybook(entry, "enabled")}
+                          className="px-2 py-0.5 rounded border border-zinc-800 text-[10px] text-zinc-300 hover:bg-zinc-800"
+                        >
+                          {entry.enabled
+                            ? t("modal.repoSettings.playbookDisable")
+                            : t("modal.repoSettings.playbookEnable")}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleDeletePlaybook(entry.id)}
+                          className="p-1 rounded text-zinc-500 hover:text-rose-400"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="flex justify-end pt-2 border-t border-zinc-800/80">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-3 py-1.5 rounded-lg border border-zinc-800 text-zinc-400 hover:text-zinc-200"
+              >
+                {t("modal.worktrees.close")}
+              </button>
+            </div>
           </div>
-        </form>
+        )}
       </div>
     </div>
   );

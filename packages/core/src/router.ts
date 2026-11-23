@@ -1,6 +1,7 @@
 import { heuristicDecomposeEpic, sanitizeEpicSubtasks } from "./epic.ts";
 import { createDefaultMandate, mandateScopesOverlap } from "./mandate.ts";
 import { getFirstStage } from "./pipeline.ts";
+import { formatPlaybookContext } from "./playbook.ts";
 import type {
   ControlPlaneLLM,
   CreateEpicInput,
@@ -331,13 +332,19 @@ export class EventIntakeRouter {
       repo.id,
     );
 
-    const repoStructure = await this.resolveRepoStructure(repo);
+    const [repoStructure, playbookEntries] = await Promise.all([
+      this.resolveRepoStructure(repo),
+      this.stateStore.listPlaybookEntries(repo.id, { onlyEnabled: true }),
+    ]);
+    const playbookRules = formatPlaybookContext(playbookEntries, ["**"]) || undefined;
     const proposal = await this.llm.triageTrigger({
       repo,
       trigger,
       activeTickets,
       relatedMemory,
       repoStructure,
+      playbookRules,
+      conventions: repo.conventions,
     });
 
     if (!proposal.shouldCreateTicket) {
@@ -346,6 +353,7 @@ export class EventIntakeRouter {
 
     const mandate = createDefaultMandate({
       allowedPaths: proposal.allowedPaths.length > 0 ? proposal.allowedPaths : ["**"],
+      forbiddenPaths: repo.forbiddenPaths ?? [],
     });
     const dependsOn = this.computeOverlappingDependencies(mandate, activeTickets);
     const template = proposal.template ?? repo.defaultTemplate;
@@ -455,7 +463,7 @@ export class EventIntakeRouter {
 
     const mandate = createDefaultMandate({
       allowedPaths: input.allowedPaths && input.allowedPaths.length > 0 ? input.allowedPaths : ["**"],
-      forbiddenPaths: input.forbiddenPaths ?? [],
+      forbiddenPaths: [...(repo.forbiddenPaths ?? []), ...(input.forbiddenPaths ?? [])],
       maxCostUsd: input.maxCostUsd ?? 2.0,
       maxDurationSec: input.maxDurationSec ?? 600,
     });
@@ -525,7 +533,11 @@ export class EventIntakeRouter {
       throw new Error(`Repository not found: ${input.repoId}`);
     }
     const defaultTemplate = input.template ?? repo.defaultTemplate;
-    const repoStructure = await this.resolveRepoStructure(repo);
+    const [repoStructure, playbookEntries] = await Promise.all([
+      this.resolveRepoStructure(repo),
+      this.stateStore.listPlaybookEntries(repo.id, { onlyEnabled: true }),
+    ]);
+    const playbookRules = formatPlaybookContext(playbookEntries, ["**"]) || undefined;
     if (this.llm.planEpicDecomposition) {
       const plan = await this.llm.planEpicDecomposition({
         repo,
@@ -533,6 +545,8 @@ export class EventIntakeRouter {
         description: input.description,
         defaultTemplate,
         repoStructure,
+        playbookRules,
+        conventions: repo.conventions,
       });
       return {
         ...plan,
@@ -609,6 +623,7 @@ export class EventIntakeRouter {
       stageRetries: 0,
       mandate: createDefaultMandate({
         allowedPaths: ["**"],
+        forbiddenPaths: repo.forbiddenPaths ?? [],
         maxCostUsd: (input.maxCostUsdPerSubtask ?? 2.0) * Math.max(1, plan.subtasks.length),
       }),
       dependsOn: [],
@@ -660,6 +675,7 @@ export class EventIntakeRouter {
 
       const subMandate = createDefaultMandate({
         allowedPaths: spec.allowedPaths,
+        forbiddenPaths: repo.forbiddenPaths ?? [],
         maxCostUsd: input.maxCostUsdPerSubtask ?? 2.0,
       });
 

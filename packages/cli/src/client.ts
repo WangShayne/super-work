@@ -3,9 +3,13 @@ import type {
   EpicDeliveryMode,
   InboxItem,
   InboxItemStatus,
+  OutboxEntry,
   PipelineTemplateId,
+  PlaybookEntry,
   RepoConfig,
+  RepoContractFile,
   RepoMetricsSummary,
+  SpillArtifact,
   StageRun,
   Ticket,
   WorkerEngineId,
@@ -48,9 +52,15 @@ export interface ParsedSseEvent {
 
 export class SuperWorkHttpClient {
   readonly baseUrl: string;
+  readonly token?: string;
 
-  constructor(baseUrl: string) {
+  constructor(baseUrl: string, token?: string) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
+    this.token = token?.trim() || undefined;
+  }
+
+  private authHeaders(): Record<string, string> {
+    return this.token ? { Authorization: `Bearer ${this.token}` } : {};
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -60,6 +70,7 @@ export class SuperWorkHttpClient {
         ...init,
         headers: {
           "Content-Type": "application/json",
+          ...this.authHeaders(),
           ...(init?.headers ?? {}),
         },
       });
@@ -94,10 +105,68 @@ export class SuperWorkHttpClient {
   getTicketDetail(id: string): Promise<{
     ticket: Ticket;
     stageRuns: StageRun[];
+    artifacts: SpillArtifact[];
     inboxItems: InboxItem[];
+    outboxEntries: OutboxEntry[];
     diff: string;
   }> {
     return this.request(`/api/tickets/${encodeURIComponent(id)}`);
+  }
+
+  getArtifact(id: string): Promise<{ artifact: SpillArtifact; content: string }> {
+    return this.request(`/api/artifacts/${encodeURIComponent(id)}`);
+  }
+
+  revertTicket(id: string): Promise<{ ticket: Ticket; revertCommitSha: string }> {
+    return this.request(`/api/tickets/${encodeURIComponent(id)}/revert`, {
+      method: "POST",
+    });
+  }
+
+  listPlaybook(repoId: string): Promise<{ entries: PlaybookEntry[] }> {
+    return this.request(`/api/repos/${encodeURIComponent(repoId)}/playbook`);
+  }
+
+  addPlaybook(
+    repoId: string,
+    payload: { rule: string; scopePaths?: string[]; pinned?: boolean; enabled?: boolean },
+  ): Promise<{ entry: PlaybookEntry }> {
+    return this.request(`/api/repos/${encodeURIComponent(repoId)}/playbook`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  patchPlaybook(
+    entryId: string,
+    payload: { rule?: string; scopePaths?: string[]; pinned?: boolean; enabled?: boolean },
+  ): Promise<{ entry: PlaybookEntry }> {
+    return this.request(`/api/playbook/${encodeURIComponent(entryId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  deletePlaybook(entryId: string): Promise<{ ok: boolean; id: string }> {
+    return this.request(`/api/playbook/${encodeURIComponent(entryId)}`, {
+      method: "DELETE",
+    });
+  }
+
+  syncContract(repoId: string): Promise<{ repo: RepoConfig }> {
+    return this.request(`/api/repos/${encodeURIComponent(repoId)}/contract/sync`, {
+      method: "POST",
+    });
+  }
+
+  exportContract(repoId: string): Promise<{
+    repo: RepoConfig;
+    contract: RepoContractFile;
+    filePath: string;
+  }> {
+    return this.request(`/api/repos/${encodeURIComponent(repoId)}/contract/export`, {
+      method: "POST",
+    });
   }
 
   createTicket(payload: {
@@ -172,73 +241,115 @@ export class SuperWorkHttpClient {
   async streamEvents(
     onEvent: (event: ParsedSseEvent) => void | Promise<void>,
     signal?: AbortSignal,
+    options?: {
+      repoId?: string;
+      ticketId?: string;
+      reconnect?: boolean;
+      reconnectDelayMs?: number;
+    },
   ): Promise<void> {
-    let res: Response;
-    try {
-      res = await fetch(`${this.baseUrl}/api/events`, {
-        headers: { Accept: "text/event-stream" },
-        signal,
-      });
-    } catch (err) {
-      if (signal?.aborted) return;
-      throw new DaemonNotReachableError(this.baseUrl, err);
-    }
+    const params = new URLSearchParams();
+    if (options?.repoId) params.set("repoId", options.repoId);
+    if (options?.ticketId) params.set("ticketId", options.ticketId);
+    const qs = params.toString();
+    const ssePath = qs ? `/api/events?${qs}` : "/api/events";
 
-    if (!res.ok || !res.body) {
-      throw new Error(`Failed to open SSE stream: HTTP ${res.status}`);
-    }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let eventName = "message";
-    const dataLines: string[] = [];
-
-    const flushEvent = async () => {
-      if (dataLines.length === 0) return;
-      const rawData = dataLines.join("\n");
-      dataLines.length = 0;
-      const currentEvent = eventName || "message";
-      eventName = "message";
+    const pumpOnce = async () => {
+      let res: Response;
       try {
-        const parsed = JSON.parse(rawData) as Record<string, unknown>;
-        await onEvent({ event: currentEvent, data: parsed });
-      } catch {
-        // Ignore malformed SSE JSON payload
+        res = await fetch(`${this.baseUrl}${ssePath}`, {
+          headers: {
+            Accept: "text/event-stream",
+            ...this.authHeaders(),
+          },
+          signal,
+        });
+      } catch (err) {
+        if (signal?.aborted) return;
+        throw new DaemonNotReachableError(this.baseUrl, err);
+      }
+
+      if (!res.ok || !res.body) {
+        throw new Error(`Failed to open SSE stream: HTTP ${res.status}`);
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let eventName = "message";
+      const dataLines: string[] = [];
+
+      const flushEvent = async () => {
+        if (dataLines.length === 0) return;
+        const rawData = dataLines.join("\n");
+        dataLines.length = 0;
+        const currentEvent = eventName || "message";
+        eventName = "message";
+        try {
+          const parsed = JSON.parse(rawData) as Record<string, unknown>;
+          await onEvent({ event: currentEvent, data: parsed });
+        } catch {
+          // Ignore malformed SSE JSON payload
+        }
+      };
+
+      try {
+        while (!signal?.aborted) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          let newlineIdx = buffer.indexOf("\n");
+          while (newlineIdx !== -1) {
+            const line = buffer.slice(0, newlineIdx).replace(/\r$/, "");
+            buffer = buffer.slice(newlineIdx + 1);
+
+            if (line === "") {
+              await flushEvent();
+            } else if (line.startsWith("event:")) {
+              eventName = line.slice("event:".length).trim();
+            } else if (line.startsWith("data:")) {
+              dataLines.push(line.slice("data:".length).trim());
+            }
+            newlineIdx = buffer.indexOf("\n");
+          }
+        }
+      } catch (err) {
+        if (!signal?.aborted) {
+          throw err;
+        }
+      } finally {
+        try {
+          await reader.cancel();
+        } catch {
+          // Ignore reader cancel errors
+        }
       }
     };
 
-    try {
-      while (!signal?.aborted) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        let newlineIdx = buffer.indexOf("\n");
-        while (newlineIdx !== -1) {
-          const line = buffer.slice(0, newlineIdx).replace(/\r$/, "");
-          buffer = buffer.slice(newlineIdx + 1);
-
-          if (line === "") {
-            await flushEvent();
-          } else if (line.startsWith("event:")) {
-            eventName = line.slice("event:".length).trim();
-          } else if (line.startsWith("data:")) {
-            dataLines.push(line.slice("data:".length).trim());
+    const delayMs = options?.reconnectDelayMs ?? 1000;
+    do {
+      try {
+        await pumpOnce();
+      } catch (err) {
+        if (!options?.reconnect || signal?.aborted || err instanceof DaemonNotReachableError) {
+          if (err instanceof DaemonNotReachableError && options?.reconnect && !signal?.aborted) {
+            // Allow transient reconnect when server restarts
+          } else {
+            throw err;
           }
-          newlineIdx = buffer.indexOf("\n");
         }
       }
-    } catch (err) {
-      if (!signal?.aborted) {
-        throw err;
+      if (!options?.reconnect || signal?.aborted) {
+        break;
       }
-    } finally {
-      try {
-        await reader.cancel();
-      } catch {
-        // Ignore reader cancel errors
-      }
-    }
+      await new Promise<void>((resolveWait) => {
+        const timer = setTimeout(resolveWait, delayMs);
+        signal?.addEventListener("abort", () => {
+          clearTimeout(timer);
+          resolveWait();
+        }, { once: true });
+      });
+    } while (!signal?.aborted);
   }
 }

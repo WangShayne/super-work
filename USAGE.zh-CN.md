@@ -61,7 +61,7 @@ bun run setup -- --auto
 3. **效能与预算（Metrics & Budget）**：展示当日预算水位进度条、端到端交付成功率、累计花费及按引擎统计的平均阶段耗时。
 4. **下钻详情抽屉 & 命令行客户端（`bun run cli` / `super-work`）**：
    - `super-work up [-d]`：前台或后台守护模式拉起本地服务。
-   - `super-work status`、`dispatch <title> -d <desc> [--wait]`、`epic <title> --preview-only`、`inbox list|approve <id> [--expand-mandate]`、`logs <ticketId> [-f]`：在终端直接派单、清收件箱与实时订阅 SSE 日志（传入 `--auto-start` 可自动拉起守护进程）。
+   - `super-work status`、`dispatch <title> -d <desc> [--wait]`、`epic <title> [--preview-only|--wait]`、`inbox list|approve <id> [--expand-mandate]`、`logs <ticketId> [-f]`、`watch [--repo <id>|--ticket <id>]`、`revert <ticketId>`、`playbook [list|add|toggle|delete|sync --export]`：在终端直接派单、管理经验库、追踪含 Epic 子任务的实时 SSE、回放历史日志或安全回滚合入（支持 `--token` / `SUPER_WORK_TOKEN` 与 `--auto-start`）。
 
 ### 3. 三种流水线模板对比
 
@@ -86,17 +86,17 @@ bun run setup -- --auto
 3. 提交后，事件会先经过 `MasterAssessor` 评估，随后在 **决策收件箱** 出现一条「观察模式拟单」。
 4. 你可在输入框补充额外提示，点击 **「批准并继续」**，任务立即转入独立 `git worktree` 开始执行。
 
-### 3. 在详情抽屉跟踪执行、通过 Thread 订阅追问与链式召回
-1. 在态势看板点击任一运行中或已完成的任务，打开 **下钻详情抽屉**：
+### 3. 文件树 Diff 审查台、定向文件返修与链式召回
+1. 在态势看板点击任一任务，打开 **下钻详情抽屉**：
    - **执行轨迹**：查看各阶段耗时、花费与实时 SSE 事件流。
-   - **Diff 与授权边界**：核对当前工作树相对于基准分支的统一 `git diff`。
-   - **链式召回**：沿 `Trigger → Thread → Inline 摘要 → Spill 溢出产物` 溯源；点击 **「读取产物」** 按需加载完整 JSONL 执行日志或补丁，或使用顶部 FTS5 搜索框跨任务回忆历史经验。
-2. **Thread 订阅追问**：在抽屉底部的输入框直接发送补充要求（例如“请同时补一个边界单测”），消息会直接注入该任务对应的活跃 `Thread` 上下文，无需另开新单。
+   - **Diff 与授权边界**：通过 **文件树 Diff 审查台** 查看分文件 `+`/`-` 统计与折叠代码块，浏览内联 **结构化对抗审查清单（`blocker`/`major`/`nit`）**，还可点击任意文件右上角 **「针对此文件返修」** 直接注入精准修复指令。
+   - **链式召回**：沿 `Trigger → Thread → Inline 摘要 → Spill 溢出产物`（含结构化 JSON `review_report` 与 `test_log`）溯源，或用 FTS5 搜索历史经验。
+2. **Thread 订阅追问**：在抽屉底部输入框发送补充要求，消息直接注入活跃 `Thread`。
 
-### 4. 处理看门狗升级、并发预算配额与本地合入 / 确定性验收
-- 在 **仓库偏好设置** 中可配置 **单仓最大并发 Worker 数**、**每日预算上限（USD）** 以及 **确定性质量门禁命令**（如 `bun run typecheck, bun test`）；当日花费触及上限时，内核会等当前阶段执行完毕，暂停后续排队并向收件箱发送 `每日预算触顶` 审批卡（一键临时提额 `+$5` 即可恢复）。
-- 当 Worker 连续遇到相同错误、文件 Diff 发生 `A -> B -> A` 振荡或静默超时时，**看门狗** 会先尝试自动注入纠偏提示或切换备用引擎自愈；若超出重试上限，会在收件箱生成 **看门狗升级告警** 交由你裁决。
-- 在 `strict` 模式下，Rebase 通过后会暂停在 `outbox_pending`，可在收件箱直接选择 **「批准并继续」**（提 PR）或 **「批准并本地合入主干」**；对于纯本地已交付分支，也可在任务 **详情抽屉** 顶部一键点击 **「本地合入主干」** 自动 Merge 并清理临时分支。
+### 4. 工程契约 (`super-work.json`)、自进化经验库、主动通知与一键安全回滚
+- 在 **仓库偏好设置** 的三个标签页中，除设置并发/每日预算上限（触顶后推送 `每日预算触顶` 审批卡）外，还可在 **工程契约** 页配置 `setupCommands` Worktree 预热命令、附加 `forbiddenPaths`、仓库 `conventions` 并双向 **同步/导出 `super-work.json`**；在 **Playbook 经验库** 页查看、置顶、启停自动提炼或人类批注沉淀的避坑规则。
+- 在 **环境与模型设置** 底部配置 **主动注意力触达**（勾选 macOS 原生系统通知与飞书/Slack/Discord/通用 JSON Webhook，仅在 Inbox 阻塞待办、最终交付与任务失败时发送）并一键 **「发送测试通知」**。
+- 通过 `local_merge`（统一 `--no-ff` 生成单点 Merge Commit）本地合入主干后，抽屉顶部提供 **「一键安全回滚」** 按钮（或运行 `super-work revert <ticketId>`），执行非破坏性 `git revert -m 1` 生成反向提交。
 
 ---
 

@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import {
   AlertTriangle,
+  Bell,
   CheckCircle2,
   Cpu,
   RefreshCw,
+  Send,
   Sparkles,
   Terminal,
   Wrench,
@@ -62,6 +64,16 @@ export function SetupWizardModal({
   const [opencodeModel, setOpencodeModel] = useState("");
   const [opencodeEffort, setOpencodeEffort] = useState<ReasoningEffort | "">("");
 
+  const [macosEnabled, setMacosEnabled] = useState(false);
+  const [webhookEnabled, setWebhookEnabled] = useState(false);
+  const [webhookUrl, setWebhookUrl] = useState("");
+  const [webhookSecret, setWebhookSecret] = useState("");
+  const [notifyOnInbox, setNotifyOnInbox] = useState(true);
+  const [notifyOnDelivery, setNotifyOnDelivery] = useState(true);
+  const [notifyOnFailure, setNotifyOnFailure] = useState(true);
+  const [testingNotify, setTestingNotify] = useState(false);
+  const [notifyTestMsg, setNotifyTestMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
   const [scanning, setScanning] = useState(false);
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -85,6 +97,14 @@ export function SetupWizardModal({
     setCodexEffort(cfg.codexProfile?.effort ?? "");
     setOpencodeModel(cfg.opencodeProfile?.model ?? "");
     setOpencodeEffort(cfg.opencodeProfile?.effort ?? "");
+    setMacosEnabled(cfg.notifications?.macosEnabled ?? false);
+    setWebhookEnabled(cfg.notifications?.webhookEnabled ?? false);
+    setWebhookUrl(cfg.notifications?.webhookUrl ?? "");
+    setWebhookSecret("");
+    setNotifyOnInbox(cfg.notifications?.notifyOnInbox ?? true);
+    setNotifyOnDelivery(cfg.notifications?.notifyOnDelivery ?? true);
+    setNotifyOnFailure(cfg.notifications?.notifyOnFailure ?? true);
+    setNotifyTestMsg(null);
     setApiKey("");
     setTestResult(null);
   }, [open, setupStatus]);
@@ -163,11 +183,48 @@ export function SetupWizardModal({
           model: opencodeModel.trim() || undefined,
           effort: opencodeEffort || undefined,
         },
+        notifications: {
+          macosEnabled,
+          webhookEnabled,
+          webhookUrl: webhookUrl.trim() || undefined,
+          webhookSecret: webhookSecret.trim() || undefined,
+          notifyOnInbox,
+          notifyOnDelivery,
+          notifyOnFailure,
+        },
       });
       await onSaved(updated);
       onClose();
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleTestNotification = async () => {
+    setTestingNotify(true);
+    setNotifyTestMsg(null);
+    try {
+      const res = await api.testNotification({
+        macosEnabled,
+        webhookEnabled,
+        webhookUrl: webhookUrl.trim() || undefined,
+        webhookSecret: webhookSecret.trim() || undefined,
+        notifyOnInbox,
+        notifyOnDelivery,
+        notifyOnFailure,
+      });
+      if (res.results.length === 0) {
+        setNotifyTestMsg({ ok: false, text: "Enable macOS or Webhook channel first." });
+      } else {
+        setNotifyTestMsg({
+          ok: res.ok,
+          text: res.results.map((r) => `${r.channel}: ${r.detail ?? (r.ok ? "ok" : "failed")}`).join(" | "),
+        });
+      }
+    } catch (err) {
+      setNotifyTestMsg({ ok: false, text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setTestingNotify(false);
     }
   };
 
@@ -579,6 +636,124 @@ export function SetupWizardModal({
                 <span>{testResult.message}</span>
               </div>
             )}
+          </section>
+
+          {/* Panel C: Attention Push Notifications */}
+          <section className="space-y-3 pt-2 border-t border-zinc-800/80">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <div className="flex items-center gap-2 font-semibold text-zinc-200">
+                  <Bell className="w-4 h-4 text-amber-400" />
+                  {t("setup.notificationsTitle")}
+                </div>
+                <p className="text-[11px] text-zinc-400 mt-0.5">{t("setup.notificationsDesc")}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleTestNotification()}
+                disabled={testingNotify}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-amber-500/40 bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 text-[11px] disabled:opacity-50 shrink-0"
+              >
+                <Send className="w-3 h-3" />
+                {testingNotify ? t("setup.testingNotification") : t("setup.testNotificationBtn")}
+              </button>
+            </div>
+
+            <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 space-y-3">
+              <div className="flex flex-wrap gap-4">
+                <label className="inline-flex items-center gap-2 cursor-pointer text-zinc-200">
+                  <input
+                    type="checkbox"
+                    checked={macosEnabled}
+                    onChange={(e) => setMacosEnabled(e.target.checked)}
+                    className="rounded border-zinc-700 bg-zinc-950 text-indigo-500"
+                  />
+                  {t("setup.macosNotifyLabel")}
+                </label>
+                <label className="inline-flex items-center gap-2 cursor-pointer text-zinc-200">
+                  <input
+                    type="checkbox"
+                    checked={webhookEnabled}
+                    onChange={(e) => setWebhookEnabled(e.target.checked)}
+                    className="rounded border-zinc-700 bg-zinc-950 text-indigo-500"
+                  />
+                  {t("setup.webhookNotifyLabel")}
+                </label>
+              </div>
+
+              {webhookEnabled && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-zinc-400 mb-1">{t("setup.webhookUrl")}</label>
+                    <input
+                      value={webhookUrl}
+                      onChange={(e) => setWebhookUrl(e.target.value)}
+                      placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-zinc-400 mb-1">
+                      {t("setup.webhookSecret")}
+                      {setupStatus.config.notifications?.hasWebhookSecret && (
+                        <span className="ml-2 text-[10px] text-emerald-400">
+                          ({t("setup.webhookSecretSavedHint")})
+                        </span>
+                      )}
+                    </label>
+                    <input
+                      type="password"
+                      value={webhookSecret}
+                      onChange={(e) => setWebhookSecret(e.target.value)}
+                      placeholder="Optional HMAC secret"
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
+                    />
+                  </div>
+                </div>
+              )}
+
+              <div className="flex flex-wrap gap-4 pt-1 text-[11px] text-zinc-300">
+                <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={notifyOnInbox}
+                    onChange={(e) => setNotifyOnInbox(e.target.checked)}
+                    className="rounded border-zinc-700 bg-zinc-950 text-indigo-500"
+                  />
+                  {t("setup.notifyOnInbox")}
+                </label>
+                <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={notifyOnDelivery}
+                    onChange={(e) => setNotifyOnDelivery(e.target.checked)}
+                    className="rounded border-zinc-700 bg-zinc-950 text-indigo-500"
+                  />
+                  {t("setup.notifyOnDelivery")}
+                </label>
+                <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={notifyOnFailure}
+                    onChange={(e) => setNotifyOnFailure(e.target.checked)}
+                    className="rounded border-zinc-700 bg-zinc-950 text-indigo-500"
+                  />
+                  {t("setup.notifyOnFailure")}
+                </label>
+              </div>
+
+              {notifyTestMsg && (
+                <div
+                  className={`p-2.5 rounded-lg border text-[11px] ${
+                    notifyTestMsg.ok
+                      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                      : "border-rose-500/30 bg-rose-500/10 text-rose-300"
+                  }`}
+                >
+                  {notifyTestMsg.text}
+                </div>
+              )}
+            </div>
           </section>
         </div>
 

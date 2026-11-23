@@ -11,9 +11,12 @@ import type {
   OutboxEntry,
   OutboxStatus,
   PipelineTemplateId,
+  PlaybookEntry,
   ReasoningEffort,
   RepoConfig,
+  RepoContractFile,
   RepoMetricsSummary,
+  RevertResult,
   SpillArtifact,
   StageKind,
   StageRun,
@@ -38,6 +41,8 @@ export interface ControlPlaneLLM {
     activeTickets: Ticket[];
     relatedMemory: MemorySearchHit[];
     repoStructure?: string;
+    playbookRules?: string;
+    conventions?: string;
   }): Promise<TriageProposal>;
   diagnoseWatchdog(input: {
     ticket: Ticket;
@@ -52,7 +57,17 @@ export interface ControlPlaneLLM {
     description: string;
     defaultTemplate: PipelineTemplateId;
     repoStructure?: string;
+    playbookRules?: string;
+    conventions?: string;
   }): Promise<EpicDecompositionPlan>;
+  distillPlaybookLesson?(input: {
+    repo: RepoConfig;
+    ticket: Ticket;
+    failureKind: "verification" | "review";
+    failureSummary: string;
+    fixSummary: string;
+    changedFiles: string[];
+  }): Promise<{ rule: string; scopePaths: string[] } | null>;
 }
 
 export interface WorkerDriver {
@@ -87,7 +102,20 @@ export interface WorkspaceProvider {
     worktreePath?: string;
     commitMessage: string;
     deleteBranch?: boolean;
-  }): Promise<{ commitSha: string; branchCleaned: boolean }>;
+    noFf?: boolean;
+  }): Promise<{ commitSha: string; beforeSha?: string; isMergeCommit?: boolean; branchCleaned: boolean }>;
+  revertMergedCommit(input: {
+    rootRepoPath: string;
+    baseBranch: string;
+    commitSha: string;
+  }): Promise<RevertResult>;
+  loadRepoContract?(
+    rootRepoPath: string,
+  ): Promise<{ contract: RepoContractFile; rawHash: string; filePath: string } | null>;
+  writeRepoContract?(
+    rootRepoPath: string,
+    contract: RepoContractFile,
+  ): Promise<{ filePath: string; rawHash: string }>;
   revertPaths(worktreePath: string, paths: string[]): Promise<void>;
   listWorktreeDirs(): Promise<string[]>;
   cleanupWorkspace(worktreePath: string, rootRepoPath?: string): Promise<void>;
@@ -150,6 +178,12 @@ export interface StateStore {
   }): Promise<void>;
   searchMemory(query: string, limit?: number, repoId?: string): Promise<MemorySearchHit[]>;
   recallChain(ticketId: string): Promise<ChainOfRecall | null>;
+
+  // Playbook
+  savePlaybookEntry(entry: PlaybookEntry): Promise<void>;
+  getPlaybookEntry(id: string): Promise<PlaybookEntry | null>;
+  listPlaybookEntries(repoId: string, options?: { onlyEnabled?: boolean }): Promise<PlaybookEntry[]>;
+  deletePlaybookEntry(id: string): Promise<boolean>;
 
   // System Settings
   getSystemSetting<T>(key: string): Promise<T | null>;

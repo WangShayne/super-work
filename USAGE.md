@@ -61,7 +61,7 @@ bun run setup -- --auto
 3. **Metrics & Budget**: Live daily budget progress, delivery rate, cumulative cost, and per-engine latency & pass-rate metrics.
 4. **Deep Dive Drawer & `@super-work/cli`** (`bun run cli` / `super-work`):
    - `super-work up [-d]` — Start daemon in foreground or background.
-   - `super-work status`, `dispatch <title> -d <desc> [--wait]`, `epic <title> --preview-only`, `inbox list|approve <id> [--expand-mandate]`, `logs <ticketId> [-f]` — Control tasks directly from your terminal (pass `--auto-start` if the daemon is offline).
+   - `super-work status`, `dispatch <title> -d <desc> [--wait]`, `epic <title> [--preview-only|--wait]`, `inbox list|approve <id> [--expand-mandate]`, `logs <ticketId> [-f]`, `watch [--repo <id>|--ticket <id>]`, `revert <ticketId>`, `playbook [list|add|toggle|delete|sync --export]` — Control tasks, Playbook rules, live SSE streams, and safe merge reverts from the terminal (supports `--token` / `SUPER_WORK_TOKEN` and `--auto-start`).
 
 ### 3. Pipeline Templates
 
@@ -85,17 +85,17 @@ bun run setup -- --auto
 2. Self-comments containing `[super-work]` are automatically ignored. When an open PR receives external review feedback or CI failure, `auto` mode reactivates the original branch to fix, verify, incrementally `git push`, and comment back (capped at 3 rounds), while `observe` mode creates a `PR FOLLOW-UP` Inbox item.
 3. Review the proposed Ticket + Mandate in **Attention Inbox** and click **Approve & Continue** to spin up its isolated `git worktree`.
 
-### 3. Inspecting Live Streams, Injecting Thread Follow-Ups & Using Chain of Recall
+### 3. Inspecting Diff Studio, Injecting File Feedback & Using Chain of Recall
 1. Open **Deep Dive Drawer** on any ticket:
    - **Execution Stream**: Inspect stage costs, summaries, and live SSE events.
-   - **Diff & Mandate**: Review colorized unified `git diff` against the base branch.
-   - **Chain of Recall**: Trace `Trigger → Thread → Inline Notes → Spill Artifacts`, click **Read Spill** to load full JSONL transcripts or diff patches on demand, or search past tickets via SQLite FTS5.
+   - **Diff & Mandate**: Browse the **File-Tree Diff Studio** with per-file `+`/`-` stats, collapsible hunks, **structured review findings (`blocker`/`major`/`nit`)**, and inline **Rework This File** buttons that inject targeted feedback (`[File: <path>] ...`) straight to the Worker.
+   - **Chain of Recall**: Trace `Trigger → Thread → Inline Notes → Spill Artifacts` (including JSON `review_report` and `test_log` artifacts), click **Read Spill** on demand, or search past tickets via SQLite FTS5.
 2. **Thread Subscription Follow-Up**: Send follow-up instructions via the bottom **Inject** bar; messages route straight into the subscribed Ticket's `inlineMemory.threadUpdates`.
 
-### 4. Deterministic Verification, Quotas, Daily Budget Caps & Local Merge
-- Configure **Max Concurrent Workers**, **Daily Budget Cap USD**, and **Deterministic Verification Gate Commands** (e.g. `bun run typecheck, bun test`) in **Repository Preferences**. When daily spend reaches the cap, running stages finish cleanly while queued dispatches pause and push a `BUDGET CAP` Inbox card (`+$5 Today & Resume`).
-- If a worker hits repeated identical errors, `A -> B -> A` diff oscillation, or a silence timeout, `TwoTierWatchdog` attempts automatic self-healing (`INJECT_HINT` or `SWITCH_ENGINE`) before escalating to **Attention Inbox**.
-- In `strict` mode, `outbox_pending` offers both **Approve & Continue** (PR) and **Approve & Merge Locally** in the Inbox; for already-delivered branches, click **Merge Locally to Base** inside **Deep Dive Drawer** to merge into the base branch and clean up the temporary branch.
+### 4. Repo Contract (`super-work.json`), Playbook, Notifications & Safe Revert
+- In **Repository Preferences**, switch across **Runtime & Budget**, **Contract (`super-work.json`)** (edit `verificationCommands`, `setupCommands`, `forbiddenPaths`, `conventions`, or **Sync / Export `super-work.json`**), and **Playbook Memory** (add, pin, toggle, or delete rules). Human Inbox notes and closed-loop post-failure recoveries automatically distill new active Playbook rules.
+- In **Env & LLM Setup**, configure **Attention Push Notifications** (macOS desktop notifications + Feishu/Lark/Slack/Discord/signed JSON Webhooks for Inbox items, final deliveries, and failures) and click **Send Test Notification**.
+- For tasks delivered via `local_merge` (`--no-ff`), click **1-Click Safe Revert** in the drawer header (or run `super-work revert <ticketId>`) to execute a non-destructive `git revert -m 1` without rewriting history.
 
 ---
 

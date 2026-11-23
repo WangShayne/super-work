@@ -7,6 +7,7 @@ import type {
   MemorySearchHit,
   OutboxEntry,
   OutboxStatus,
+  PlaybookEntry,
   RepoConfig,
   RepoMetricsSummary,
   SpillArtifact,
@@ -213,6 +214,21 @@ export class SqliteStateStore implements StateStore {
         body
       );
 
+      CREATE TABLE IF NOT EXISTS playbook_entries (
+        id TEXT PRIMARY KEY,
+        repo_id TEXT NOT NULL,
+        rule TEXT NOT NULL,
+        scope_paths_json TEXT NOT NULL DEFAULT '["**"]',
+        source TEXT NOT NULL,
+        source_ticket_id TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        pinned INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_playbook_repo
+        ON playbook_entries(repo_id, enabled, pinned, updated_at DESC);
+
       CREATE TABLE IF NOT EXISTS system_settings (
         key TEXT PRIMARY KEY,
         value_json TEXT NOT NULL,
@@ -248,6 +264,21 @@ export class SqliteStateStore implements StateStore {
     }
     if (!existingRepoCols.has("daily_budget_override_date")) {
       this.db.run("ALTER TABLE repos ADD COLUMN daily_budget_override_date TEXT;");
+    }
+    if (!existingRepoCols.has("setup_commands_json")) {
+      this.db.run("ALTER TABLE repos ADD COLUMN setup_commands_json TEXT NOT NULL DEFAULT '[]';");
+    }
+    if (!existingRepoCols.has("forbidden_paths_json")) {
+      this.db.run("ALTER TABLE repos ADD COLUMN forbidden_paths_json TEXT NOT NULL DEFAULT '[]';");
+    }
+    if (!existingRepoCols.has("conventions")) {
+      this.db.run("ALTER TABLE repos ADD COLUMN conventions TEXT;");
+    }
+    if (!existingRepoCols.has("contract_synced_hash")) {
+      this.db.run("ALTER TABLE repos ADD COLUMN contract_synced_hash TEXT;");
+    }
+    if (!existingRepoCols.has("contract_synced_at")) {
+      this.db.run("ALTER TABLE repos ADD COLUMN contract_synced_at TEXT;");
     }
 
     const cols = this.db
@@ -292,6 +323,15 @@ export class SqliteStateStore implements StateStore {
     if (!existingCols.has("pending_violation_paths_json")) {
       this.db.run("ALTER TABLE tickets ADD COLUMN pending_violation_paths_json TEXT;");
     }
+    if (!existingCols.has("merged_commit_sha")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN merged_commit_sha TEXT;");
+    }
+    if (!existingCols.has("reverted_at")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN reverted_at TEXT;");
+    }
+    if (!existingCols.has("revert_commit_sha")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN revert_commit_sha TEXT;");
+    }
   }
 
   // --- Repos ---
@@ -301,10 +341,12 @@ export class SqliteStateStore implements StateStore {
         `INSERT INTO repos (
           id, name, root_path, base_branch, mode, github_repo, default_template,
           preferred_implement_engine, preferred_review_engine, auto_cleanup_worktree,
-          verification_commands_json, default_delivery_channel,
+          verification_commands_json, setup_commands_json, forbidden_paths_json,
+          conventions, contract_synced_hash, contract_synced_at,
+          default_delivery_channel,
           max_concurrent_workers, daily_budget_usd, daily_budget_override_usd, daily_budget_override_date,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           root_path = excluded.root_path,
@@ -316,6 +358,11 @@ export class SqliteStateStore implements StateStore {
           preferred_review_engine = excluded.preferred_review_engine,
           auto_cleanup_worktree = excluded.auto_cleanup_worktree,
           verification_commands_json = excluded.verification_commands_json,
+          setup_commands_json = excluded.setup_commands_json,
+          forbidden_paths_json = excluded.forbidden_paths_json,
+          conventions = excluded.conventions,
+          contract_synced_hash = excluded.contract_synced_hash,
+          contract_synced_at = excluded.contract_synced_at,
           default_delivery_channel = excluded.default_delivery_channel,
           max_concurrent_workers = excluded.max_concurrent_workers,
           daily_budget_usd = excluded.daily_budget_usd,
@@ -335,6 +382,11 @@ export class SqliteStateStore implements StateStore {
         repo.preferredReviewEngine,
         repo.autoCleanupWorktree === false ? 0 : 1,
         JSON.stringify(repo.verificationCommands ?? []),
+        JSON.stringify(repo.setupCommands ?? []),
+        JSON.stringify(repo.forbiddenPaths ?? []),
+        repo.conventions ?? null,
+        repo.contractSyncedHash ?? null,
+        repo.contractSyncedAt ?? null,
         repo.defaultDeliveryChannel ?? "auto_pr_or_branch",
         repo.maxConcurrentWorkers ?? null,
         repo.dailyBudgetUsd ?? null,
@@ -440,10 +492,11 @@ export class SqliteStateStore implements StateStore {
           current_stage, stage_retries, mandate_json, depends_on_json,
           parent_ticket_id, is_epic, subtask_key,
           epic_delivery_mode, pr_number, pr_url, pr_auto_followup_count, pending_violation_paths_json,
+          merged_commit_sha, reverted_at, revert_commit_sha,
           worktree_path, branch_name, worktree_cleaned_at,
           native_sessions_json, preferred_engine, active_engine, model_override, effort_override,
           inline_memory_json, cost_usd, priority, error_message, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           status = excluded.status,
           template = excluded.template,
@@ -459,6 +512,9 @@ export class SqliteStateStore implements StateStore {
           pr_url = excluded.pr_url,
           pr_auto_followup_count = excluded.pr_auto_followup_count,
           pending_violation_paths_json = excluded.pending_violation_paths_json,
+          merged_commit_sha = excluded.merged_commit_sha,
+          reverted_at = excluded.reverted_at,
+          revert_commit_sha = excluded.revert_commit_sha,
           worktree_path = excluded.worktree_path,
           branch_name = excluded.branch_name,
           worktree_cleaned_at = excluded.worktree_cleaned_at,
@@ -494,6 +550,9 @@ export class SqliteStateStore implements StateStore {
         ticket.prUrl ?? null,
         ticket.prAutoFollowupCount ?? 0,
         ticket.pendingViolationPaths ? JSON.stringify(ticket.pendingViolationPaths) : null,
+        ticket.mergedCommitSha ?? null,
+        ticket.revertedAt ?? null,
+        ticket.revertCommitSha ?? null,
         ticket.worktreePath ?? null,
         ticket.branchName ?? null,
         ticket.worktreeCleanedAt ?? null,
@@ -1051,6 +1110,60 @@ export class SqliteStateStore implements StateStore {
     };
   }
 
+  // --- Playbook ---
+  async savePlaybookEntry(entry: PlaybookEntry): Promise<void> {
+    this.db
+      .query(
+        `INSERT INTO playbook_entries (
+          id, repo_id, rule, scope_paths_json, source, source_ticket_id,
+          enabled, pinned, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          rule = excluded.rule,
+          scope_paths_json = excluded.scope_paths_json,
+          source = excluded.source,
+          source_ticket_id = excluded.source_ticket_id,
+          enabled = excluded.enabled,
+          pinned = excluded.pinned,
+          updated_at = excluded.updated_at`,
+      )
+      .run(
+        entry.id,
+        entry.repoId,
+        entry.rule,
+        JSON.stringify(entry.scopePaths ?? ["**"]),
+        entry.source,
+        entry.sourceTicketId ?? null,
+        entry.enabled ? 1 : 0,
+        entry.pinned ? 1 : 0,
+        entry.createdAt,
+        entry.updatedAt,
+      );
+  }
+
+  async getPlaybookEntry(id: string): Promise<PlaybookEntry | null> {
+    const row = this.db
+      .query("SELECT * FROM playbook_entries WHERE id = ?")
+      .get(id) as Record<string, unknown> | null;
+    return row ? mapPlaybookRow(row) : null;
+  }
+
+  async listPlaybookEntries(
+    repoId: string,
+    options?: { onlyEnabled?: boolean },
+  ): Promise<PlaybookEntry[]> {
+    const sql = options?.onlyEnabled
+      ? "SELECT * FROM playbook_entries WHERE repo_id = ? AND enabled = 1 ORDER BY pinned DESC, updated_at DESC"
+      : "SELECT * FROM playbook_entries WHERE repo_id = ? ORDER BY pinned DESC, updated_at DESC";
+    const rows = this.db.query(sql).all(repoId) as Record<string, unknown>[];
+    return rows.map(mapPlaybookRow);
+  }
+
+  async deletePlaybookEntry(id: string): Promise<boolean> {
+    const res = this.db.query("DELETE FROM playbook_entries WHERE id = ?").run(id);
+    return Number(res.changes ?? 0) > 0;
+  }
+
   // --- System Settings ---
   async getSystemSetting<T>(key: string): Promise<T | null> {
     const row = this.db
@@ -1095,6 +1208,15 @@ function mapRepoRow(r: Record<string, unknown>): RepoConfig {
     verificationCommands: r.verification_commands_json
       ? (JSON.parse(String(r.verification_commands_json)) as string[])
       : [],
+    setupCommands: r.setup_commands_json
+      ? (JSON.parse(String(r.setup_commands_json)) as string[])
+      : [],
+    forbiddenPaths: r.forbidden_paths_json
+      ? (JSON.parse(String(r.forbidden_paths_json)) as string[])
+      : [],
+    conventions: r.conventions ? String(r.conventions) : undefined,
+    contractSyncedHash: r.contract_synced_hash ? String(r.contract_synced_hash) : undefined,
+    contractSyncedAt: r.contract_synced_at ? String(r.contract_synced_at) : undefined,
     defaultDeliveryChannel: (r.default_delivery_channel
       ? String(r.default_delivery_channel)
       : "auto_pr_or_branch") as RepoConfig["defaultDeliveryChannel"],
@@ -1174,6 +1296,9 @@ function mapTicketRow(r: Record<string, unknown>): Ticket {
     pendingViolationPaths: r.pending_violation_paths_json
       ? (JSON.parse(String(r.pending_violation_paths_json)) as string[])
       : undefined,
+    mergedCommitSha: r.merged_commit_sha ? String(r.merged_commit_sha) : undefined,
+    revertedAt: r.reverted_at ? String(r.reverted_at) : undefined,
+    revertCommitSha: r.revert_commit_sha ? String(r.revert_commit_sha) : undefined,
     worktreePath: r.worktree_path ? String(r.worktree_path) : undefined,
     branchName: r.branch_name ? String(r.branch_name) : undefined,
     worktreeCleanedAt: r.worktree_cleaned_at ? String(r.worktree_cleaned_at) : undefined,
@@ -1253,6 +1378,21 @@ function mapOutboxRow(r: Record<string, unknown>): OutboxEntry {
     nextAttemptAt: String(r.next_attempt_at),
     lastError: r.last_error ? String(r.last_error) : undefined,
     resultPayload: r.result_payload_json ? JSON.parse(String(r.result_payload_json)) : undefined,
+    createdAt: String(r.created_at),
+    updatedAt: String(r.updated_at),
+  };
+}
+
+function mapPlaybookRow(r: Record<string, unknown>): PlaybookEntry {
+  return {
+    id: String(r.id),
+    repoId: String(r.repo_id),
+    rule: String(r.rule),
+    scopePaths: r.scope_paths_json ? (JSON.parse(String(r.scope_paths_json)) as string[]) : ["**"],
+    source: r.source as PlaybookEntry["source"],
+    sourceTicketId: r.source_ticket_id ? String(r.source_ticket_id) : undefined,
+    enabled: Boolean(r.enabled),
+    pinned: Boolean(r.pinned),
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
   };

@@ -11,10 +11,11 @@
 ## 核心能力
 
 - **Router + 隔离 Worker 双层架构**：
-  - **控制面（`EventIntakeRouter` & `MasterAssessor`）**：统一接收入站触发器（`web`、`github_issue`、`github_pr`、`github_ci`、`cli`），注入目标仓库真实目录结构（`RepoStructureScanner`）防止盲猜路径，支持 `off` / `observe` / `auto` 模式、**Epic 统一集成分支（`super-work/epic/<id>`）+ 全局终验与单 PR 原子交付**（可选切换逐子任务独立交付）、**PR 评审与 CI 失败同分支自动返修（最多 3 轮并过滤 `[super-work]` 自身评论）**，以及守护进程重启无损断点自愈（`recoverInterruptedRuns`）。
-  - **执行面（`WorkerDriver` & `GitWorktreeProvider`）**：在独立的 `git worktree` 分支中调度成熟 Coding Agent（`ClaudeCodeDriver`、`CodexDriver`、`OpenCodeDriver` 以及用于全自动验证的 `MockWorkerDriver`）。同引擎续跑优先复用原生 `--resume` / `exec resume` / `--session` 会话缓存，跨引擎接力通过结构化 `Inline` 摘要无缝衔接，并支持交付/取消后自动回收 Worktree 与一键 GC。
-- **确定性质量门禁（Verification Harness）**：可在仓库偏好设置中绑定校验命令（如 `bun run typecheck`、`bun test`）；`implement` 与 `rebase` 结束后由内核强制运行并将完整日志落盘为 `test_log` Spill 产物，失败自动带日志打回自愈。
-- **双通道 `Transactional Outbox`**：支持 **「推送远端建 PR / 原分支增量更新 PR」** 与 **「本地一键合入主干（自动 Merge 并清理任务分支）」**，通过 `Diff` Spill 兜底确保合入删分支后依然可在看板回看历史 Diff。
+  - **控制面（`EventIntakeRouter` & `MasterAssessor`）**：统一接收入站触发器（`web`、`github_issue`、`github_pr`、`github_ci`、`cli`），注入目标仓库真实目录结构（`RepoStructureScanner`）、仓库工程契约（`super-work.json`）与**自进化经验库 Playbook**（按路径匹配注入 Top 8 / `<= 1200` 字符），支持 `off` / `observe` / `auto` 模式、**Epic 统一集成分支（`super-work/epic/<id>`）+ 全局终验与单 PR 原子交付**、**PR 评审与 CI 失败同分支自动返修**，以及守护进程重启无损断点自愈。
+  - **执行面（`WorkerDriver` & `GitWorktreeProvider`）**：在独立的 `git worktree` 分支中调度成熟 Coding Agent（`ClaudeCodeDriver`、`CodexDriver`、`OpenCodeDriver`、`MockWorkerDriver`），新建工作树支持 **Worktree 预热命令（`setupCommands`）**，支持**结构化对抗式交叉盲审（`blocker`/`major`/`nit` 分级检查单）**、原生会话续跑与自动/一键 Worktree GC。
+- **工程契约（`super-work.json`）与闭环自进化 Playbook**：仓库根目录 `super-work.json` 承载团队共享的验证门禁、工作树预热命令、禁止路径、架构约定与共享规则，与本地 SQLite 个人运行态配置分层解耦；门禁/审查闭环修复后及 Inbox 人类批注会自动沉淀为避坑经验条目。
+- **双通道 `Transactional Outbox` 与安全一键回滚**：支持 **PR 推送/增量更新** 与 **本地 `--no-ff` 原子合入主干**，并在 Web 与 CLI 提供 **安全反向提交回滚（`git revert -m 1`）**。
+- **高信噪比注意力主动触达**：仅在新增 Inbox 阻塞待办、最终交付完成或异常失败时触发 **macOS 原生桌面通知** 与 **自适应 Webhook**（自动适配飞书/Lark、Slack、Discord 与带 HMAC 签名的通用 JSON）。
 - **分级不可变 `Mandate` 护栏、并发配额与每日预算柔性熔断**：
   - 派单前通过 `mandateScopesOverlap` 检测活跃任务的授权路径重合度；支持单仓 `maxConcurrentWorkers` 与 `dailyBudgetUsd` 每日花费上限（触顶后跑完进行中 Stage 并暂停排队推送 `budget_cap` 审批卡）。
   - 事后基于 `git diff` 校验改动路径：触及 `.env*`、`*.pem`、`*.key` 等禁区立即回滚禁止扩权；仅超出 `allowedPaths` 的普通文件**保留在 Worktree 挂起**，支持收件箱 **「一键扩权并继续」**（免重烧 Token 直接验证流转）。
@@ -22,7 +23,7 @@
   1. **Attention Inbox（决策收件箱）**：聚合 `observe_proposal`、`plan_approval`、`watchdog_escalation`、`mandate_violation`、`merge_conflict`、`outbox_signoff`、`budget_cap`、`pr_followup` 审批项。
   2. **Mission Board（态势泳道看板）**：五列实时并发泳道，展示引擎徽章、PR 关联、授权作用域、依赖阻塞锁与预算进度条。
   3. **Metrics & Budget（效能与预算面板）**：追踪今日预算消耗、交付成功率、总花费与按引擎统计的平均耗时/通过率。
-  4. **Deep Dive Drawer & `@super-work/cli`**：支持面板下钻流式轨迹、Diff、`Chain of Recall` 与 Thread 追问；终端可通过 `bun run cli` / `super-work` 执行 `up -d`、`status`、`dispatch --wait`、`epic`、`inbox`、`logs -f`。
+  4. **Deep Dive Drawer（文件树 Diff 台）& `@super-work/cli`**：支持面板下钻流式轨迹、**按文件折叠高亮 Diff 审查台 + 内联审查清单 + 针对单个文件直接注入返修**、**一键安全回滚**、`Chain of Recall` 与 Thread 追问；终端可通过 `bun run cli` / `super-work` 执行 `up -d`、`status`、`dispatch --wait`、`epic --wait`、`inbox`、`logs -f`、`watch`、`revert`、`playbook`。
 
 ---
 
@@ -91,6 +92,7 @@ bun run dev:web      # 监听 5173 端口的 Vite 开发服务器（自动代理
 | `SUPER_WORK_LLM_API_KEY` / `_BASE_URL` / `_MODEL` | 自定义 OpenAI 兼容控制面接口密钥、地址与模型名称。 |
 | `SUPER_WORK_ENABLE_CLI_LLM=1` | 在无 API Key 时允许控制面降级调用无工具模式的本地 `claude -p --tools ""`。 |
 | `SUPER_WORK_DATA_DIR` | 运行时 `super-work.db`、Spill 产物与 `worktrees/` 存储目录（默认 `./.super-work`）。 |
+| `SUPER_WORK_TOKEN` | 可选 Bearer / URL Query 鉴权令牌；配置后保护所有 `/api/*` REST 与 SSE 接口以便远程访问。 |
 | `PORT` | 守护进程 HTTP/SSE 监听端口（默认 `4318`）。 |
 
 ---
@@ -98,16 +100,17 @@ bun run dev:web      # 监听 5173 端口的 Vite 开发服务器（自动代理
 ## REST 与 SSE 接口概览
 
 - `GET /api/health` — 服务健康状态、当前控制面 LLM 提供者及可用 Worker 引擎列表（`claude`、`codex`、`opencode`、`mock`）
-- `GET /api/repos`、`POST /api/repos`、`PATCH /api/repos/:id` — 注册仓库、配置偏好设置（模板、引擎、验证命令、单仓并发/日预算上限）及切换 `off` / `observe` / `auto` 模式
+- `GET /api/repos`、`POST /api/repos`、`PATCH /api/repos/:id`、`POST /api/repos/:id/contract/sync`、`POST /api/repos/:id/contract/export` — 注册仓库、配置预热命令与配额、双向同步/导出 `super-work.json` 契约
+- `GET /api/repos/:id/playbook`、`POST /api/repos/:id/playbook`、`PATCH /api/playbook/:entryId`、`DELETE /api/playbook/:entryId` — 管理仓库级自进化经验库（Playbook）
 - `GET /api/metrics?repoId=...` — 获取今日预算消耗、交付成功率与各引擎效能耗时统计
 - `POST /api/triggers` — 接入外部或模拟事件触发器（`github_issue`、`github_pr`、`github_ci`、`cli`）
-- `GET /api/tickets`、`POST /api/tickets`、`GET /api/tickets/:id`、`POST /api/tickets/:id/message`、`POST /api/tickets/:id/cancel`、`POST /api/tickets/:id/cleanup-worktree`、`POST /api/tickets/:id/deliver` — 直接派单、查看 Worktree / 分支 / Spill Diff、Thread 追问、本地合入或 PR 交付
+- `GET /api/tickets`、`POST /api/tickets`、`GET /api/tickets/:id`、`POST /api/tickets/:id/message`、`POST /api/tickets/:id/cancel`、`POST /api/tickets/:id/cleanup-worktree`、`POST /api/tickets/:id/deliver`、`POST /api/tickets/:id/revert` — 派单、3 层 Diff 查看、Thread 追问、本地合入/PR 交付与一键安全 `git revert`
 - `POST /api/epics/preview`、`POST /api/epics` — 预览并派发复杂需求 Epic 子任务 DAG 拓扑
 - `GET /api/worktrees`、`POST /api/worktrees/gc` — 查看 Worktree 运行池与一键回收终态/孤儿工作树目录
 - `GET /api/inbox`、`POST /api/inbox/:id/resolve` — 审批或驳回 Attention Inbox 待决项
 - `GET /api/tickets/:id/recall`、`GET /api/memory/search?q=...`、`GET /api/artifacts/:id` — 获取 `Chain of Recall` 全链路、FTS5 记忆检索与按需读取 Spill 产物
 - `GET /api/outbox` — 查询 `Transactional Outbox` 外发队列状态
-- `GET /api/setup/status`、`POST /api/setup/scan`、`POST /api/setup/test-llm`、`POST /api/setup/configure` — 本机 CLI 环境扫描、大模型连通性测试与控制面动态配置
-- `GET /api/events` — 推送实时 `KernelEvent` 的 Server-Sent Events（SSE）事件流
+- `GET /api/setup/status`、`POST /api/setup/scan`、`POST /api/setup/test-llm`、`POST /api/setup/configure`、`POST /api/notifications/test` — CLI 扫描、控制面大模型及 macOS / Webhook 主动通知配置与测试
+- `GET /api/events?repoId=...&ticketId=...` — 实时 Server-Sent Events（SSE）事件流（支持按仓库或含 Epic 子任务的 Ticket 精准过滤）
 
 完整操作说明与工作流实战指南见 [USAGE.zh-CN.md](./USAGE.zh-CN.md)（英文版 [USAGE.md](./USAGE.md)）；架构设计与核心契约见 [ARCHITECTURE.zh-CN.md](./ARCHITECTURE.zh-CN.md)（英文版 [ARCHITECTURE.md](./ARCHITECTURE.md)）。

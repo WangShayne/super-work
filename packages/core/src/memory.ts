@@ -3,12 +3,19 @@ import type {
   ChainOfRecall,
   InlineStageNote,
   MemorySearchHit,
+  ReviewFinding,
   SpillArtifact,
   StageKind,
   StageRun,
   Ticket,
   WorkerStreamEvent,
 } from "./types.ts";
+
+export interface WorkerPromptOptions {
+  verificationCommands?: string[];
+  repoConventions?: string;
+  playbookContext?: string;
+}
 
 export class MemoryManager {
   constructor(
@@ -20,8 +27,12 @@ export class MemoryManager {
     ticket: Ticket,
     stage: StageKind,
     relatedMemory: MemorySearchHit[],
-    verificationCommands?: string[],
+    optionsOrCommands?: string[] | WorkerPromptOptions,
   ): string {
+    const opts: WorkerPromptOptions = Array.isArray(optionsOrCommands)
+      ? { verificationCommands: optionsOrCommands }
+      : (optionsOrCommands ?? {});
+    const verificationCommands = opts.verificationCommands;
     const sections: string[] = [];
 
     sections.push(`# Super-Work Task Context`);
@@ -49,6 +60,14 @@ export class MemoryManager {
       sections.push(
         `- Deterministic verification gate: ${verificationCommands.join(" && ")} (executed automatically by super-work after implement and rebase)`,
       );
+    }
+
+    if (opts.repoConventions?.trim()) {
+      sections.push(`\n## Repository Engineering Conventions\n${opts.repoConventions.trim()}`);
+    }
+
+    if (opts.playbookContext?.trim()) {
+      sections.push(`\n## Repository Playbook (Learned Rules & Guardrails)\n${opts.playbookContext.trim()}`);
     }
 
     if (ticket.inlineMemory.planSummary) {
@@ -106,6 +125,7 @@ export class MemoryManager {
     summary: string;
     verificationPassed: boolean;
     reviewApproved?: boolean;
+    reviewFindings?: ReviewFinding[];
     extraArtifacts?: SpillArtifact[];
   }): Promise<{ note: InlineStageNote; artifacts: SpillArtifact[] }> {
     const artifacts: SpillArtifact[] = [...(input.extraArtifacts ?? [])];
@@ -147,6 +167,7 @@ export class MemoryManager {
       changedFiles: input.changedFiles,
       verificationPassed: input.verificationPassed,
       reviewApproved: input.reviewApproved,
+      reviewFindings: input.reviewFindings && input.reviewFindings.length > 0 ? input.reviewFindings : undefined,
       spillArtifactIds: artifacts.map((a) => a.id),
       createdAt: new Date().toISOString(),
     };
@@ -205,8 +226,13 @@ function stageInstructionFor(stage: StageKind): string {
       ].join("\n");
     case "review":
       return [
-        "Perform an independent code review of the current worktree diff against the goal, acceptance criteria, and Mandate.",
-        "Check for correctness bugs, missing edge cases, or out-of-scope modifications.",
+        "Perform an independent adversarial code review of the current worktree diff against the goal, acceptance criteria, Repository Conventions, Playbook, and Mandate.",
+        "Check for correctness bugs, security leaks, missing edge cases, regression risks, or out-of-scope modifications.",
+        "Classify each finding with severity: 'blocker' (must fix before ship), 'major' (bug/missing requirement/test gap), or 'nit' (minor non-blocking style/cleanup suggestion).",
+        "Output a fenced JSON block with the structured findings followed by a final verdict line:",
+        "```json",
+        '{"verdict":"approved|changes_requested","findings":[{"severity":"blocker|major|nit","file":"path/to/file.ts","line":10,"message":"...","suggestion":"..."}]}',
+        "```",
         "End your final summary with `VERDICT: APPROVED` or `VERDICT: REJECTED - <reason>`.",
       ].join("\n");
     case "rebase":

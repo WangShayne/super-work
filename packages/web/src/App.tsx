@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BarChart3, Inbox, Kanban } from "lucide-react";
-import { api } from "./api.ts";
+import { api, getAuthToken } from "./api.ts";
 import { DeepDiveDrawer } from "./components/DeepDiveDrawer.tsx";
 import { HeaderBar } from "./components/HeaderBar.tsx";
 import {
@@ -83,7 +83,9 @@ export function App() {
 
   // Subscribe to real-time Kernel SSE bus
   useEffect(() => {
-    const es = new EventSource("/api/events");
+    const token = getAuthToken();
+    const sseUrl = token ? `/api/events?token=${encodeURIComponent(token)}` : "/api/events";
+    const es = new EventSource(sseUrl);
 
     es.onopen = () => setSseConnected(true);
     es.onerror = () => setSseConnected(false);
@@ -107,6 +109,8 @@ export function App() {
     };
 
     const eventNames = [
+      "repo_updated",
+      "playbook_updated",
       "ticket_created",
       "ticket_updated",
       "stage_started",
@@ -353,6 +357,7 @@ export function App() {
         repo={activeRepo ?? null}
         availableEngines={health?.availableEngines ?? ["mock"]}
         onClose={() => setRepoSettingsOpen(false)}
+        onRefresh={() => void refreshAll(selectedRepoId || undefined)}
         onSubmit={async (repoId, patch) => {
           await api.patchRepo(repoId, patch);
           await refreshAll(repoId);

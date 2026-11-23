@@ -8,6 +8,7 @@ export { SuperWorkHttpClient, DaemonNotReachableError } from "./client.ts";
 
 export interface CliRunOptions {
   baseUrl?: string;
+  token?: string;
   stdout?: (line: string) => void;
   stderr?: (line: string) => void;
   waitTimeoutMs?: number;
@@ -37,6 +38,9 @@ function parseCliArgs(argv: string[]): ParsedArgs {
     "budget-add",
     "status",
     "url",
+    "token",
+    "ticket",
+    "timeout-ms",
   ]);
 
   for (let i = 0; i < argv.length; i++) {
@@ -86,8 +90,12 @@ function resolveServerEntryPath(): string {
   return resolve(here, "../../server/src/index.ts");
 }
 
-async function waitForHealth(baseUrl: string, timeoutMs = 10_000): Promise<boolean> {
-  const client = new SuperWorkHttpClient(baseUrl);
+async function waitForHealth(
+  baseUrl: string,
+  timeoutMs = 10_000,
+  token?: string,
+): Promise<boolean> {
+  const client = new SuperWorkHttpClient(baseUrl, token);
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -101,7 +109,10 @@ async function waitForHealth(baseUrl: string, timeoutMs = 10_000): Promise<boole
   return false;
 }
 
-async function spawnDetachedDaemon(baseUrl: string, options?: { port?: string; dataDir?: string }): Promise<number | undefined> {
+async function spawnDetachedDaemon(
+  baseUrl: string,
+  options?: { port?: string; dataDir?: string; token?: string },
+): Promise<number | undefined> {
   const parsedUrl = new URL(baseUrl);
   const port = options?.port ?? (parsedUrl.port || "4318");
   const serverEntry = resolveServerEntryPath();
@@ -110,12 +121,13 @@ async function spawnDetachedDaemon(baseUrl: string, options?: { port?: string; d
       ...process.env,
       PORT: String(port),
       ...(options?.dataDir ? { SUPER_WORK_DATA_DIR: options.dataDir } : {}),
+      ...(options?.token ? { SUPER_WORK_TOKEN: options.token } : {}),
     },
     detached: true,
     stdio: ["ignore", "ignore", "ignore"],
   });
   proc.unref?.();
-  const ready = await waitForHealth(baseUrl, 10_000);
+  const ready = await waitForHealth(baseUrl, 10_000, options?.token);
   if (!ready) {
     throw new Error(`Timed out waiting for daemon health at ${baseUrl}`);
   }
@@ -127,13 +139,14 @@ async function withAutoStart<T>(
   autoStart: boolean,
   fn: () => Promise<T>,
   stdout: (line: string) => void,
+  token?: string,
 ): Promise<T> {
   try {
     return await fn();
   } catch (err) {
     if (err instanceof DaemonNotReachableError && autoStart) {
       stdout(`Daemon offline at ${baseUrl}; starting background daemon...`);
-      await spawnDetachedDaemon(baseUrl);
+      await spawnDetachedDaemon(baseUrl, { token });
       return fn();
     }
     throw err;
@@ -153,8 +166,22 @@ function isFinalForWait(status: Ticket["status"]): boolean {
   return status === "delivered" || status === "failed" || status === "cancelled" || status === "needs_human";
 }
 
-function formatEventLine(ev: ParsedSseEvent): string {
+function extractEventTicketId(data: Record<string, unknown>): string | undefined {
+  return (
+    (data.ticketId as string | undefined) ??
+    ((data.ticket as { id?: string } | undefined)?.id) ??
+    ((data.item as { ticketId?: string } | undefined)?.ticketId) ??
+    ((data.entry as { ticketId?: string } | undefined)?.ticketId) ??
+    ((data.signal as { ticketId?: string } | undefined)?.ticketId)
+  );
+}
+
+function formatEventLine(ev: ParsedSseEvent, watchedTicketId?: string): string {
   const data = ev.data;
+  const evTicketId = extractEventTicketId(data);
+  const childPrefix =
+    watchedTicketId && evTicketId && evTicketId !== watchedTicketId ? `[${evTicketId}] ` : "";
+
   if (ev.event === "worker_event") {
     const engine = String(data.engine ?? "worker");
     const inner = (data.event ?? {}) as Record<string, unknown>;
@@ -165,21 +192,59 @@ function formatEventLine(ev: ParsedSseEvent): string {
       (inner.summary as string | undefined) ??
       (inner.message as string | undefined) ??
       "";
-    return `[${engine}:${type}] ${detail}`.trim();
+    return `${childPrefix}[${engine}:${type}] ${detail}`.trim();
   }
-  if (ev.event === "ticket_updated") {
-    const t = data.ticket as { status?: string; currentStage?: string } | undefined;
-    return `[ticket] status=${t?.status ?? "?"} stage=${t?.currentStage ?? "?"}`;
+  if (ev.event === "ticket_updated" || ev.event === "ticket_created") {
+    const t = data.ticket as { id?: string; status?: string; currentStage?: string; title?: string } | undefined;
+    return `${childPrefix}[${ev.event}] status=${t?.status ?? "?"} stage=${t?.currentStage ?? "?"}`;
   }
   if (ev.event === "stage_started" || ev.event === "stage_completed") {
     const run = data.stageRun as { stage?: string; engine?: string; status?: string; summary?: string } | undefined;
-    return `[${ev.event}] ${run?.stage ?? "?"} (${run?.engine ?? "?"}) status=${run?.status ?? "?"}${run?.summary ? `: ${run.summary.slice(0, 120)}` : ""}`;
+    return `${childPrefix}[${ev.event}] ${run?.stage ?? "?"} (${run?.engine ?? "?"}) status=${run?.status ?? "?"}${run?.summary ? `: ${run.summary.slice(0, 120)}` : ""}`;
   }
   if (ev.event === "verification_completed") {
     const res = data.result as { ok?: boolean; summary?: string } | undefined;
-    return `[verification] ${res?.ok ? "PASS" : "FAIL"}: ${res?.summary ?? ""}`;
+    return `${childPrefix}[verification] ${res?.ok ? "PASS" : "FAIL"}: ${res?.summary ?? ""}`;
   }
-  return `[${ev.event}] ${JSON.stringify(data).slice(0, 140)}`;
+  if (ev.event === "playbook_updated") {
+    const entry = data.entry as { id?: string; source?: string; rule?: string } | undefined;
+    return entry
+      ? `[playbook_updated] (${entry.source}) ${entry.rule ?? entry.id}`
+      : `[playbook_updated] deleted=${String(data.deletedId ?? "")}`;
+  }
+  return `${childPrefix}[${ev.event}] ${JSON.stringify(data).slice(0, 140)}`;
+}
+
+function formatTranscriptLines(rawJsonl: string, limit = 40): string[] {
+  const lines = rawJsonl
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const out: string[] = [];
+  for (const line of lines.slice(-limit)) {
+    try {
+      const ev = JSON.parse(line) as Record<string, unknown>;
+      const type = String(ev.type ?? "event");
+      if (type === "thought") {
+        out.push(`    [thought] ${String(ev.text ?? "").slice(0, 120)}`);
+      } else if (type === "tool_use") {
+        out.push(`    [tool_use] ${String(ev.toolName ?? "tool")}(${String(ev.inputSummary ?? "").slice(0, 80)})`);
+      } else if (type === "tool_result") {
+        out.push(
+          `    [tool_result] ${String(ev.toolName ?? "tool")} ${ev.isError ? "ERR" : "ok"}: ${String(ev.outputSummary ?? "").slice(0, 90)}`,
+        );
+      } else if (type === "text") {
+        out.push(`    [text] ${String(ev.text ?? "").slice(0, 140)}`);
+      } else if (type === "completed") {
+        out.push(`    [completed] ${String(ev.summary ?? "").slice(0, 140)}`);
+      } else if (type === "error") {
+        out.push(`    [error] ${String(ev.message ?? "").slice(0, 140)}`);
+      }
+    } catch {
+      // Ignore malformed transcript line
+    }
+  }
+  return out;
 }
 
 async function waitForTicketCompletion(
@@ -198,20 +263,22 @@ async function waitForTicketCompletion(
   }
 
   const ssePromise = client
-    .streamEvents((ev) => {
-      const evTicketId =
-        (ev.data.ticketId as string | undefined) ??
-        ((ev.data.ticket as { id?: string } | undefined)?.id);
-      if (evTicketId !== ticketId) return;
-      stdout(formatEventLine(ev));
-      if (ev.event === "ticket_updated") {
-        const updated = ev.data.ticket as Ticket | undefined;
-        if (updated && isFinalForWait(updated.status)) {
-          latestTicket = updated;
-          ac.abort("terminal");
+    .streamEvents(
+      (ev) => {
+        if (ev.event === "ping" || ev.event === "connected") return;
+        const evTicketId = extractEventTicketId(ev.data);
+        stdout(formatEventLine(ev, ticketId));
+        if (ev.event === "ticket_updated" && evTicketId === ticketId) {
+          const updated = ev.data.ticket as Ticket | undefined;
+          if (updated && isFinalForWait(updated.status)) {
+            latestTicket = updated;
+            ac.abort("terminal");
+          }
         }
-      }
-    }, ac.signal)
+      },
+      ac.signal,
+      { ticketId, reconnect: true, reconnectDelayMs: 500 },
+    )
     .catch(() => {});
 
   const pollTimer = setInterval(() => {
@@ -236,7 +303,7 @@ async function waitForTicketCompletion(
 }
 
 function printHelp(stdout: (line: string) => void): void {
-  stdout(`super-work v0.4.0 CLI
+  stdout(`super-work v0.5.0 CLI
 
 Usage:
   super-work up [-d|--detach] [--port 4318] [--data-dir path]
@@ -247,10 +314,14 @@ Usage:
   super-work epic <title> [-d|--desc <text>] [--repo <id>] [--template fast|standard|strict]
                   [--engine ...] [--preview-only] [--per-subtask] [--wait] [--auto-start] [--json]
   super-work inbox [list | approve <id> [--expand-mandate] [--local-merge] [--budget-add <usd>] [-m <note>] | reject <id> [-m <note>]]
-  super-work logs <ticketId> [-f|--follow] [--auto-start]
+  super-work logs <ticketId> [-f|--follow] [--auto-start] [--json]
+  super-work watch [--repo <id>] [--ticket <id>] [--timeout-ms <ms>] [--auto-start] [--json]
+  super-work revert <ticketId> [--auto-start] [--json]
+  super-work playbook [list | add <rule> [--paths <csv>] [--pin] | toggle <entryId> | delete <entryId> | sync [--export]] [--repo <id>] [--auto-start] [--json]
 
-Env:
-  SUPER_WORK_URL   Daemon base URL (default: http://localhost:4318)`);
+Env / Flags:
+  SUPER_WORK_URL     Daemon base URL (default: http://localhost:4318) or --url
+  SUPER_WORK_TOKEN   Optional Bearer token for remote access or --token`);
 }
 
 export async function runCli(argv: string[], options?: CliRunOptions): Promise<number> {
@@ -270,9 +341,13 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
     getStringFlag(flags, "url") ??
     process.env.SUPER_WORK_URL ??
     "http://localhost:4318";
+  const token =
+    options?.token ??
+    getStringFlag(flags, "token") ??
+    (process.env.SUPER_WORK_TOKEN?.trim() || undefined);
   const autoStart = Boolean(flags["auto-start"]);
   const asJson = Boolean(flags.json);
-  const client = new SuperWorkHttpClient(baseUrl);
+  const client = new SuperWorkHttpClient(baseUrl, token);
 
   try {
     if (cmd === "up") {
@@ -284,7 +359,7 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
       const detach = Boolean(flags.d || flags.detach);
 
       if (detach) {
-        const pid = await spawnDetachedDaemon(targetUrl, { port, dataDir });
+        const pid = await spawnDetachedDaemon(targetUrl, { port, dataDir, token });
         stdout(`Daemon running at ${targetUrl} (pid=${pid ?? "detached"})`);
         return 0;
       }
@@ -294,6 +369,7 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
           ...process.env,
           PORT: String(port),
           ...(dataDir ? { SUPER_WORK_DATA_DIR: dataDir } : {}),
+          ...(token ? { SUPER_WORK_TOKEN: token } : {}),
         },
         stdout: "inherit",
         stderr: "inherit",
@@ -577,6 +653,16 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
         stdout(
           `  - ${run.stage} (${run.engine}) [${run.status}] $${run.costUsd.toFixed(4)}${run.summary ? ` :: ${run.summary.split("\n")[0]}` : ""}`,
         );
+        if (run.spillTranscriptId) {
+          try {
+            const { content } = await client.getArtifact(run.spillTranscriptId);
+            for (const line of formatTranscriptLines(content)) {
+              stdout(line);
+            }
+          } catch {
+            // Non-fatal if transcript artifact was removed
+          }
+        }
       }
       if (flags.f || flags.follow) {
         if (isFinalForWait(detail.ticket.status)) {
@@ -585,6 +671,199 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
         await waitForTicketCompletion(client, ticketId, stdout, options?.waitTimeoutMs);
       }
       return 0;
+    }
+
+    if (cmd === "watch") {
+      const watchRepo = getStringFlag(flags, "repo");
+      const watchTicket = getStringFlag(flags, "ticket");
+      const timeoutStr = getStringFlag(flags, "timeout-ms");
+      const timeoutMs = timeoutStr ? Number(timeoutStr) : options?.waitTimeoutMs;
+      const ac = new AbortController();
+      const onSig = () => ac.abort("signal");
+      process.on("SIGINT", onSig);
+      process.on("SIGTERM", onSig);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      if (timeoutMs && Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        timer = setTimeout(() => ac.abort("timeout"), timeoutMs);
+      }
+
+      try {
+        await withAutoStart(baseUrl, autoStart, () => client.getHealth(), stdout);
+        if (!asJson) {
+          stdout(
+            `Watching live SSE stream (${baseUrl})${watchRepo ? ` repo=${watchRepo}` : ""}${watchTicket ? ` ticket=${watchTicket}` : ""}...`,
+          );
+        }
+        await client.streamEvents(
+          (ev) => {
+            if (ev.event === "ping") return;
+            if (asJson) {
+              stdout(JSON.stringify(ev));
+            } else {
+              stdout(formatEventLine(ev, watchTicket));
+            }
+          },
+          ac.signal,
+          { repoId: watchRepo, ticketId: watchTicket, reconnect: true, reconnectDelayMs: 800 },
+        );
+      } finally {
+        if (timer) clearTimeout(timer);
+        process.off("SIGINT", onSig);
+        process.off("SIGTERM", onSig);
+      }
+      return 0;
+    }
+
+    if (cmd === "revert") {
+      const ticketId = positionals[1];
+      if (!ticketId) {
+        stderr("Error: ticketId is required. Usage: super-work revert <ticketId>");
+        return 1;
+      }
+      const res = await withAutoStart(
+        baseUrl,
+        autoStart,
+        () => client.revertTicket(ticketId),
+        stdout,
+      );
+      stdout(
+        asJson
+          ? JSON.stringify(res, null, 2)
+          : `Reverted ticket ${res.ticket.id} cleanly on base branch (revert commit: ${res.revertCommitSha})`,
+      );
+      return 0;
+    }
+
+    if (cmd === "playbook") {
+      const subCmd = positionals[1] ?? "list";
+      if (subCmd === "list") {
+        const { entries } = await withAutoStart(
+          baseUrl,
+          autoStart,
+          async () => {
+            const repoId = await resolveTargetRepoId(client, getStringFlag(flags, "repo"));
+            return client.listPlaybook(repoId);
+          },
+          stdout,
+        );
+        if (asJson) {
+          stdout(JSON.stringify({ entries }, null, 2));
+          return 0;
+        }
+        if (entries.length === 0) {
+          stdout("Playbook is empty.");
+          return 0;
+        }
+        for (const e of entries) {
+          stdout(
+            `[${e.id}] (${e.source}${e.pinned ? " | PIN" : ""}${e.enabled ? "" : " | DISABLED"}) [${e.scopePaths.join(",")}] ${e.rule}`,
+          );
+        }
+        return 0;
+      }
+
+      if (subCmd === "add") {
+        const rule = positionals[2];
+        if (!rule) {
+          stderr('Error: rule text is required. Usage: super-work playbook add "<rule>" [--paths <csv>] [--pin]');
+          return 1;
+        }
+        const pathsRaw = getStringFlag(flags, "paths");
+        const scopePaths = pathsRaw
+          ? pathsRaw
+              .split(",")
+              .map((p) => p.trim())
+              .filter(Boolean)
+          : undefined;
+        const { entry } = await withAutoStart(
+          baseUrl,
+          autoStart,
+          async () => {
+            const repoId = await resolveTargetRepoId(client, getStringFlag(flags, "repo"));
+            return client.addPlaybook(repoId, {
+              rule,
+              scopePaths,
+              pinned: Boolean(flags.pin || flags.pinned),
+              enabled: true,
+            });
+          },
+          stdout,
+        );
+        stdout(
+          asJson
+            ? JSON.stringify({ entry }, null, 2)
+            : `Added playbook rule ${entry.id}: [${entry.scopePaths.join(",")}] ${entry.rule}`,
+        );
+        return 0;
+      }
+
+      if (subCmd === "toggle") {
+        const entryId = positionals[2];
+        if (!entryId) {
+          stderr("Error: entryId is required. Usage: super-work playbook toggle <entryId>");
+          return 1;
+        }
+        const { entry } = await withAutoStart(
+          baseUrl,
+          autoStart,
+          async () => {
+            const repoId = await resolveTargetRepoId(client, getStringFlag(flags, "repo"));
+            const { entries } = await client.listPlaybook(repoId);
+            const target = entries.find((e) => e.id === entryId);
+            if (!target) {
+              throw new Error(`Playbook entry not found in repo ${repoId}: ${entryId}`);
+            }
+            return client.patchPlaybook(entryId, { enabled: !target.enabled });
+          },
+          stdout,
+        );
+        stdout(
+          asJson
+            ? JSON.stringify({ entry }, null, 2)
+            : `Playbook ${entry.id} is now ${entry.enabled ? "ENABLED" : "DISABLED"}`,
+        );
+        return 0;
+      }
+
+      if (subCmd === "delete") {
+        const entryId = positionals[2];
+        if (!entryId) {
+          stderr("Error: entryId is required. Usage: super-work playbook delete <entryId>");
+          return 1;
+        }
+        const res = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.deletePlaybook(entryId),
+          stdout,
+        );
+        stdout(asJson ? JSON.stringify(res, null, 2) : `Deleted playbook entry ${entryId}`);
+        return 0;
+      }
+
+      if (subCmd === "sync") {
+        const doExport = Boolean(flags.export);
+        const res = await withAutoStart(
+          baseUrl,
+          autoStart,
+          async () => {
+            const repoId = await resolveTargetRepoId(client, getStringFlag(flags, "repo"));
+            return doExport ? client.exportContract(repoId) : client.syncContract(repoId);
+          },
+          stdout,
+        );
+        stdout(
+          asJson
+            ? JSON.stringify(res, null, 2)
+            : doExport && "filePath" in res
+              ? `Exported super-work.json contract to ${res.filePath}`
+              : `Synced super-work.json contract for repo ${res.repo.id}`,
+        );
+        return 0;
+      }
+
+      stderr(`Unknown playbook subcommand: ${subCmd}`);
+      return 1;
     }
 
     stderr(`Unknown command: ${cmd}`);
