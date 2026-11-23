@@ -61,29 +61,42 @@ export function matchesPathScope(filePath: string, patterns: string[]): boolean 
   return false;
 }
 
+export interface MandateValidationResult {
+  ok: boolean;
+  violations: string[];
+  forbiddenViolations: string[];
+  scopeViolations: string[];
+}
+
 export function validateChangedFilesAgainstMandate(
   changedFiles: string[],
   mandate: Mandate,
-): { ok: boolean; violations: string[] } {
+): MandateValidationResult {
   const forbidden = Array.from(new Set([...DEFAULT_FORBIDDEN_PATHS, ...mandate.forbiddenPaths]));
   const allowed = mandate.allowedPaths.length > 0 ? mandate.allowedPaths : ["**"];
   const violations: string[] = [];
+  const forbiddenViolations: string[] = [];
+  const scopeViolations: string[] = [];
 
   for (const file of changedFiles) {
     const rel = normalizeRelPath(file);
     if (!rel) continue;
     if (matchesPathScope(rel, forbidden)) {
       violations.push(rel);
+      forbiddenViolations.push(rel);
       continue;
     }
     if (!matchesPathScope(rel, allowed)) {
       violations.push(rel);
+      scopeViolations.push(rel);
     }
   }
 
   return {
     ok: violations.length === 0,
     violations,
+    forbiddenViolations,
+    scopeViolations,
   };
 }
 

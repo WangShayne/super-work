@@ -4,6 +4,7 @@ export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 export type PipelineTemplateId = "fast" | "standard" | "strict";
 export type StageKind = "plan" | "implement" | "review" | "rebase";
 export type DeliveryChannel = "auto_pr_or_branch" | "local_merge" | "github_pr";
+export type EpicDeliveryMode = "unified" | "per_subtask";
 
 export interface EpicSubtaskSpec {
   key: string;
@@ -56,6 +57,10 @@ export interface RepoConfig {
   autoCleanupWorktree?: boolean;
   verificationCommands?: string[];
   defaultDeliveryChannel?: DeliveryChannel;
+  maxConcurrentWorkers?: number;
+  dailyBudgetUsd?: number;
+  dailyBudgetOverrideUsd?: number;
+  dailyBudgetOverrideDate?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -107,6 +112,11 @@ export interface Ticket {
   parentTicketId?: string;
   isEpic?: boolean;
   subtaskKey?: string;
+  epicDeliveryMode?: EpicDeliveryMode;
+  prNumber?: number;
+  prUrl?: string;
+  prAutoFollowupCount?: number;
+  pendingViolationPaths?: string[];
   worktreePath?: string;
   branchName?: string;
   worktreeCleanedAt?: string;
@@ -155,7 +165,9 @@ export interface InboxItem {
     | "watchdog_escalation"
     | "mandate_violation"
     | "merge_conflict"
-    | "outbox_signoff";
+    | "outbox_signoff"
+    | "budget_cap"
+    | "pr_followup";
   status: "pending" | "approved" | "rejected";
   title: string;
   summary: string;
@@ -330,4 +342,33 @@ export interface LlmConnectionTestResult {
   providerName: string;
   latencyMs: number;
   message: string;
+}
+
+export interface EngineMetricRow {
+  engine: WorkerEngineId;
+  runs: number;
+  completedRuns: number;
+  failedRuns: number;
+  totalCostUsd: number;
+  avgDurationMs: number;
+}
+
+export interface RepoMetricsSummary {
+  repoId?: string;
+  todayDate: string;
+  todayCostUsd: number;
+  dailyBudgetUsd?: number;
+  effectiveDailyBudgetUsd?: number;
+  budgetExceeded: boolean;
+  totalCostUsd: number;
+  ticketCounts: {
+    total: number;
+    active: number;
+    delivered: number;
+    failed: number;
+    cancelled: number;
+    needsHuman: number;
+  };
+  deliveryRate: number;
+  byEngine: EngineMetricRow[];
 }

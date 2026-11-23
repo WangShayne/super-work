@@ -11,21 +11,18 @@ An asynchronous autonomous development workflow orchestration kernel and local d
 ## Key Capabilities
 
 - **Router + Isolated Worker Architecture**:
-  - **Control Plane (`EventIntakeRouter` & `MasterAssessor`)**: Triages incoming triggers (`web`, `github_issue`, `github_pr`, `github_ci`, `cli`), enforces `off` / `observe` / `auto` modes, decomposes complex requirements into **Epic Sub-Ticket DAGs** with automated upstream branch integration, and routes follow-up comments on active `Thread`s directly to the subscribed `Ticket`.
+  - **Control Plane (`EventIntakeRouter` & `MasterAssessor`)**: Triages incoming triggers (`web`, `github_issue`, `github_pr`, `github_ci`, `cli`), injects real repository structure (`RepoStructureScanner`) to prevent guessed path scopes, enforces `off` / `observe` / `auto` modes, orchestrates **Epic Staging Branches (`super-work/epic/<id>`) + Final Verification Gate & single atomic PR/merge** (with per-subtask toggle), supports **same-branch GitHub PR review & failing CI auto-followup loops** (capped at 3 rounds, ignoring `[super-work]` bot comments), and performs **lossless crash/restart recovery (`recoverInterruptedRuns`)**.
   - **Execution Plane (`WorkerDriver` & `GitWorktreeProvider`)**: Schedules external coding agents (`ClaudeCodeDriver`, `CodexDriver`, `OpenCodeDriver`, plus `MockWorkerDriver`) inside isolated `git worktree` branches with native session resume, automatic or one-click worktree GC, and clean cross-engine handover.
-- **Deterministic Verification Harness**: Configure mandatory shell checks per repository (e.g. `bun run typecheck`, `bun test`) executed by the kernel after `implement` and `rebase`; outputs persist as `test_log` Spill artifacts and failures automatically feed back to retry or escalate.
-- **Dual-Channel `Transactional Outbox`**: Supports both remote **GitHub PR creation** and **one-click Local Merge (`local_merge`)** into the base branch with branch cleanup, backed by Spill `diff` fallback retention.
-- **Stage Pipeline Templates**: Built-in `fast` (`implement` → `rebase`), `standard` (`plan` → `implement` → `review` → `rebase`), and `strict` (with mandatory `plan_approval` and `outbox_signoff` human gates) workflows.
-- **Immutable `Mandate` Guardrails & Scope Serialization**:
-  - Pre-dispatch overlap detection (`mandateScopesOverlap`) serializes tickets touching overlapping paths via `dependsOn`, while disjoint scopes execute in parallel.
-  - Pre-turn CLI permission mapping forbids direct `git push` / `gh pr create`; post-turn `git diff` validation automatically reverts out-of-scope or secret modifications (`.env*`, `*.pem`, `*.key`) and escalates to the Attention Inbox.
-- **`Inline & Spill` Memory + `Chain of Recall`**: Keeps active prompts lean with structured `InlineMemory` while offloading raw JSONL transcripts and unified patches to `FsArtifactStore` (`Spill`), indexed with `bun:sqlite` FTS5 for on-demand cross-ticket recall.
-- **Two-Tier `Watchdog`**: Zero-cost L1 probes detect silence timeouts, repeated identical tool errors, `A -> B -> A` diff oscillation, and budget burn; L2 semantic diagnosis chooses `CONTINUE`, `INJECT_HINT`, `SWITCH_ENGINE`, or `ESCALATE_HUMAN`.
-- **`Transactional Outbox`**: Idempotent SQLite WAL-backed delivery queue for rebasing, pushing branches, creating GitHub PRs via `gh`, or recording local branch readiness.
-- **Three-Tier Local Web Command Center**:
-  1. **Attention Inbox**: High-signal approval queue for `observe_proposal`, `plan_approval`, `watchdog_escalation`, `mandate_violation`, `merge_conflict`, and `outbox_signoff`.
-  2. **Mission Board**: Five-column live swimlane board with engine badges, scope chips, dependency locks, and budget meters.
-  3. **Deep Dive Drawer**: Real-time SSE worker event stream, colorized worktree `git diff`, `Chain of Recall` + FTS5 search, `Outbox` ledger, and live Thread follow-up injection.
+- **Deterministic Verification Harness**: Configure mandatory shell checks per repository (e.g. `bun run typecheck`, `bun test`) executed by the kernel after `implement` and `rebase` (plus unified Epic final gate); outputs persist as `test_log` Spill artifacts and failures automatically feed back to retry or escalate.
+- **Dual-Channel `Transactional Outbox`**: Supports remote **GitHub PR creation / incremental PR updates**, PR comment replies, and **one-click Local Merge (`local_merge`)** into the base branch with branch cleanup backed by Spill `diff` retention.
+- **Graded `Mandate` Guardrails, Concurrency Quotas & Daily Budget Fuse**:
+  - Pre-dispatch overlap detection (`mandateScopesOverlap`) serializes overlapping scopes, while per-repo `maxConcurrentWorkers` and `dailyBudgetUsd` caps pause new queued dispatches after finishing in-flight stages and create a `budget_cap` Inbox card.
+  - Post-turn `git diff` validation immediately reverts forbidden paths (`.env*`, `*.pem`, `*.key`), while preserving out-of-scope edits (`scopeViolations`) in the worktree so the Inbox can **Expand Mandate & Continue** without re-burning worker tokens.
+- **Command Center + First-Class `super-work` CLI**:
+  1. **Attention Inbox**: High-signal approval queue for `observe_proposal`, `plan_approval`, `watchdog_escalation`, `mandate_violation`, `merge_conflict`, `outbox_signoff`, `budget_cap`, and `pr_followup`.
+  2. **Mission Board**: Five-column live swimlane board with engine badges, PR chips, scope chips, dependency locks, and budget meters.
+  3. **Metrics & Budget View**: Tracks daily spend progress, delivery success rate, cumulative cost, and per-engine latency/pass-rate telemetry.
+  4. **Deep Dive Drawer & `@super-work/cli`**: Inspect SSE streams, colorized `git diff`, `Chain of Recall`, and Thread follow-ups in the browser, or drive everything from the terminal (`super-work up -d`, `status`, `dispatch --wait`, `epic`, `inbox`, `logs -f`).
 
 ---
 
@@ -36,6 +33,7 @@ super-work/
 ├── packages/
 │   ├── core/       # @super-work/core    — Zero-UI orchestration kernel, Mandate, Memory, Watchdog, Outbox, Ports
 │   ├── drivers/    # @super-work/drivers — bun:sqlite + FTS5, FsArtifactStore, GitWorktreeProvider, LLM & CLI drivers
+│   ├── cli/        # @super-work/cli     — First-class CLI client (up/status/dispatch/epic/inbox/logs)
 │   ├── server/     # @super-work/server  — Hono HTTP/SSE API daemon & static web bundle server
 │   └── web/        # @super-work/web     — React + Vite + Tailwind v4 local command center
 └── scripts/dev.ts  # Concurrent dev launcher for server + web
@@ -100,7 +98,8 @@ When no API key is configured, the control plane automatically uses the built-in
 ## REST & SSE API Summary
 
 - `GET /api/health` — Daemon health, active control-plane LLM provider, available worker engines (`claude`, `codex`, `opencode`, `mock`), and worktree pool counts
-- `GET /api/repos`, `POST /api/repos`, `PATCH /api/repos/:id` — Register repos, configure per-repo preferences (template, engines, worktree cleanup), and switch `off` / `observe` / `auto` mode
+- `GET /api/repos`, `POST /api/repos`, `PATCH /api/repos/:id` — Register repos, configure per-repo preferences (template, engines, verification commands, concurrency/budget caps, worktree cleanup), and switch `off` / `observe` / `auto` mode
+- `GET /api/metrics?repoId=...` — Query today's budget spend, delivery rate, and per-engine latency/cost telemetry
 - `POST /api/triggers` — Ingest external or simulated triggers (`github_issue`, `github_pr`, `github_ci`, `cli`)
 - `GET /api/tickets`, `POST /api/tickets`, `GET /api/tickets/:id`, `POST /api/tickets/:id/message`, `POST /api/tickets/:id/cancel`, `POST /api/tickets/:id/cleanup-worktree`, `POST /api/tickets/:id/deliver` — Direct task dispatch, 3-tier Diff inspection (worktree / branch / Spill), Thread Subscription follow-ups, and dual-channel delivery
 - `POST /api/epics/preview`, `POST /api/epics` — Preview and dispatch Epic sub-task dependency DAGs

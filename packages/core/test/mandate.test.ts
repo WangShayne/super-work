@@ -15,7 +15,7 @@ describe("Mandate scope & guardrail enforcement", () => {
     expect(matchesPathScope("src/auth2/login.ts", ["src/auth"])).toBe(false);
   });
 
-  it("blocks forbidden secrets and out-of-scope files", () => {
+  it("blocks forbidden secrets and distinguishes forbiddenViolations vs scopeViolations", () => {
     const mandate = createDefaultMandate({ allowedPaths: ["packages/core/**"] });
     const res = validateChangedFilesAgainstMandate(
       ["packages/core/src/kernel.ts", ".env.local", "packages/web/src/App.tsx", "certs/dev.key"],
@@ -23,6 +23,8 @@ describe("Mandate scope & guardrail enforcement", () => {
     );
     expect(res.ok).toBe(false);
     expect(res.violations).toEqual([".env.local", "packages/web/src/App.tsx", "certs/dev.key"]);
+    expect(res.forbiddenViolations).toEqual([".env.local", "certs/dev.key"]);
+    expect(res.scopeViolations).toEqual(["packages/web/src/App.tsx"]);
   });
 
   it("passes when all files stay inside allowedPaths and outside forbiddenPaths", () => {

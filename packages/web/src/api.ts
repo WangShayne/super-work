@@ -4,6 +4,7 @@ import type {
   DeliveryChannel,
   EngineModelProfile,
   EpicDecompositionPlan,
+  EpicDeliveryMode,
   EpicSubtaskSpec,
   HealthResponse,
   InboxItem,
@@ -17,6 +18,7 @@ import type {
   PublicSetupStatus,
   ReasoningEffort,
   RepoConfig,
+  RepoMetricsSummary,
   SpillArtifact,
   Ticket,
   TicketDetailResponse,
@@ -57,11 +59,22 @@ export const api = {
     defaultDeliveryChannel?: DeliveryChannel;
   }) => request<{ repo: RepoConfig }>("/api/repos", { method: "POST", body: JSON.stringify(payload) }),
 
-  patchRepo: (id: string, patch: Partial<RepoConfig>) =>
+  patchRepo: (
+    id: string,
+    patch: Omit<Partial<RepoConfig>, "maxConcurrentWorkers" | "dailyBudgetUsd"> & {
+      maxConcurrentWorkers?: number | null;
+      dailyBudgetUsd?: number | null;
+    },
+  ) =>
     request<{ repo: RepoConfig }>(`/api/repos/${id}`, {
       method: "PATCH",
       body: JSON.stringify(patch),
     }),
+
+  getMetrics: (repoId?: string) =>
+    request<{ metrics: RepoMetricsSummary }>(
+      repoId ? `/api/metrics?repoId=${encodeURIComponent(repoId)}` : "/api/metrics",
+    ),
 
   listTickets: (repoId?: string) =>
     request<{ tickets: Ticket[] }>(repoId ? `/api/tickets?repoId=${encodeURIComponent(repoId)}` : "/api/tickets"),
@@ -117,6 +130,7 @@ export const api = {
     title: string;
     description: string;
     template?: PipelineTemplateId;
+    epicDeliveryMode?: EpicDeliveryMode;
     preferredEngine?: WorkerEngineId;
     modelOverride?: string;
     effortOverride?: ReasoningEffort;
@@ -160,10 +174,20 @@ export const api = {
     decision: "approved" | "rejected",
     note?: string,
     deliveryAction?: "local_merge" | "push_and_create_pr",
+    options?: {
+      expandMandate?: boolean;
+      budgetIncreaseUsd?: number;
+    },
   ) =>
     request<{ item: InboxItem; ticket: Ticket }>(`/api/inbox/${id}/resolve`, {
       method: "POST",
-      body: JSON.stringify({ decision, note, deliveryAction }),
+      body: JSON.stringify({
+        decision,
+        note,
+        deliveryAction,
+        expandMandate: options?.expandMandate,
+        budgetIncreaseUsd: options?.budgetIncreaseUsd,
+      }),
     }),
 
   getRecall: (ticketId: string) => request<{ chain: ChainOfRecall }>(`/api/tickets/${ticketId}/recall`),

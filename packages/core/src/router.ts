@@ -34,7 +34,18 @@ export class EventIntakeRouter {
     private readonly stateStore: StateStore,
     private readonly llm: ControlPlaneLLM,
     private readonly emit: (event: KernelEvent) => void,
+    private readonly repoStructureProvider?: (rootPath: string) => Promise<string>,
   ) {}
+
+  private async resolveRepoStructure(repo: RepoConfig): Promise<string | undefined> {
+    if (!this.repoStructureProvider) return undefined;
+    try {
+      const summary = await this.repoStructureProvider(repo.rootPath);
+      return summary || undefined;
+    } catch {
+      return undefined;
+    }
+  }
 
   async ingestTrigger(input: IngestTriggerInput): Promise<IngestResult> {
     const repo = await this.stateStore.getRepo(input.repoId);
@@ -81,7 +92,38 @@ export class EventIntakeRouter {
       return { action: "ignored_off", trigger, thread };
     }
 
-    // Thread Subscription: route follow-up events directly to the subscribed active ticket
+    if (input.rawText.includes("[super-work]")) {
+      return { action: "ignored_triage", trigger, thread, reason: "Ignored [super-work] bot message" };
+    }
+
+    // Bind unsubscribed github_pr / github_ci threads automatically by branch or PR number
+    if (!thread.subscribedTicketId && (input.source === "github_pr" || input.source === "github_ci")) {
+      const branchFromPayload =
+        typeof input.payload?.branch === "string" ? input.payload.branch : undefined;
+      const prNumFromPayload =
+        typeof input.payload?.prNumber === "number" ? input.payload.prNumber : undefined;
+      if (branchFromPayload || prNumFromPayload) {
+        const repoTickets = await this.stateStore.listTickets({ repoId: repo.id });
+        const matched = [...repoTickets]
+          .reverse()
+          .find(
+            (t) =>
+              t.status !== "cancelled" &&
+              ((branchFromPayload && t.branchName === branchFromPayload) ||
+                (prNumFromPayload && t.prNumber === prNumFromPayload)),
+          );
+        if (matched) {
+          thread = {
+            ...thread,
+            subscribedTicketId: matched.id,
+            updatedAt: ts,
+          };
+          await this.stateStore.upsertThread(thread);
+        }
+      }
+    }
+
+    // Thread Subscription: route follow-up events directly to the subscribed active or PR-linked ticket
     if (thread.subscribedTicketId) {
       const existingTicket = await this.stateStore.getTicket(thread.subscribedTicketId);
       if (existingTicket && !isTerminalTicketStatus(existingTicket.status)) {
@@ -91,6 +133,8 @@ export class EventIntakeRouter {
             existingTicket.status === "needs_human"
               ? "queued"
               : existingTicket.status,
+          prAutoFollowupCount:
+            input.source === "web" ? 0 : existingTicket.prAutoFollowupCount,
           inlineMemory: {
             ...existingTicket.inlineMemory,
             threadUpdates: [
@@ -125,6 +169,158 @@ export class EventIntakeRouter {
         this.emit({ type: "ticket_updated", ticket: updatedTicket, timestamp: ts });
         return { action: "routed_to_ticket", trigger, thread, ticket: updatedTicket };
       }
+
+      const canFollowupDeliveredPr =
+        existingTicket &&
+        existingTicket.status === "delivered" &&
+        (input.source === "github_pr" ||
+          input.source === "github_ci" ||
+          (input.source === "web" && Boolean(existingTicket.prNumber)));
+
+      if (canFollowupDeliveredPr) {
+        const threadUpdates = [
+          ...existingTicket.inlineMemory.threadUpdates,
+          {
+            triggerId: trigger.id,
+            message: trigger.rawText,
+            createdAt: ts,
+          },
+        ];
+
+        await this.stateStore.indexMemoryDocument({
+          entityType: "thread_update",
+          entityId: trigger.id,
+          ticketId: existingTicket.id,
+          repoId: repo.id,
+          title: trigger.title,
+          body: trigger.rawText,
+        });
+
+        if (input.source === "web") {
+          const reopened: Ticket = {
+            ...existingTicket,
+            status: "queued",
+            currentStage: "implement",
+            stageRetries: 0,
+            prAutoFollowupCount: 0,
+            errorMessage: undefined,
+            inlineMemory: {
+              ...existingTicket.inlineMemory,
+              threadUpdates,
+              activeHint: trigger.rawText,
+            },
+            updatedAt: ts,
+          };
+          await this.stateStore.saveTicket(reopened);
+          this.emit({
+            type: "thread_routed",
+            ticketId: reopened.id,
+            triggerId: trigger.id,
+            message: trigger.rawText,
+            timestamp: ts,
+          });
+          this.emit({ type: "ticket_updated", ticket: reopened, timestamp: ts });
+          return { action: "routed_to_ticket", trigger, thread, ticket: reopened };
+        }
+
+        const currentRounds = existingTicket.prAutoFollowupCount ?? 0;
+        if (currentRounds >= 3) {
+          const cappedTicket: Ticket = {
+            ...existingTicket,
+            status: "needs_human",
+            errorMessage: "Reached max automatic PR follow-up rounds (3)",
+            inlineMemory: {
+              ...existingTicket.inlineMemory,
+              threadUpdates,
+            },
+            updatedAt: ts,
+          };
+          await this.stateStore.saveTicket(cappedTicket);
+          this.emit({ type: "ticket_updated", ticket: cappedTicket, timestamp: ts });
+
+          const inboxItem: InboxItem = {
+            id: newId("inb"),
+            repoId: repo.id,
+            ticketId: cappedTicket.id,
+            kind: "watchdog_escalation",
+            status: "pending",
+            title: `Max PR follow-up rounds reached (3): ${cappedTicket.title}`,
+            summary: `PR #${cappedTicket.prNumber ?? "?"} received new feedback after 3 automated follow-up rounds:\n${trigger.rawText}`,
+            contextPayload: {
+              triggerId: trigger.id,
+              source: trigger.source,
+              prNumber: cappedTicket.prNumber,
+              branchName: cappedTicket.branchName,
+            },
+            createdAt: ts,
+          };
+          await this.stateStore.saveInboxItem(inboxItem);
+          this.emit({ type: "inbox_created", item: inboxItem, timestamp: ts });
+          return { action: "routed_to_ticket", trigger, thread, ticket: cappedTicket };
+        }
+
+        if (repo.mode === "observe") {
+          const pausedTicket: Ticket = {
+            ...existingTicket,
+            status: "needs_human",
+            errorMessage: `PR follow-up review/CI triggered: ${trigger.title}`,
+            inlineMemory: {
+              ...existingTicket.inlineMemory,
+              threadUpdates,
+              activeHint: trigger.rawText,
+            },
+            updatedAt: ts,
+          };
+          await this.stateStore.saveTicket(pausedTicket);
+          this.emit({ type: "ticket_updated", ticket: pausedTicket, timestamp: ts });
+
+          const inboxItem: InboxItem = {
+            id: newId("inb"),
+            repoId: repo.id,
+            ticketId: pausedTicket.id,
+            kind: "pr_followup",
+            status: "pending",
+            title: `PR Follow-up Needed: ${pausedTicket.title}`,
+            summary: trigger.rawText,
+            contextPayload: {
+              triggerId: trigger.id,
+              source: trigger.source,
+              prNumber: pausedTicket.prNumber,
+              branchName: pausedTicket.branchName,
+            },
+            createdAt: ts,
+          };
+          await this.stateStore.saveInboxItem(inboxItem);
+          this.emit({ type: "inbox_created", item: inboxItem, timestamp: ts });
+          return { action: "proposed", trigger, thread, ticket: pausedTicket, inboxItem };
+        }
+
+        // auto mode: reactivate the same branch/PR for lightweight fixup -> verify -> push + comment_pr
+        const reactivated: Ticket = {
+          ...existingTicket,
+          status: "queued",
+          currentStage: "implement",
+          stageRetries: 0,
+          prAutoFollowupCount: currentRounds + 1,
+          errorMessage: undefined,
+          inlineMemory: {
+            ...existingTicket.inlineMemory,
+            threadUpdates,
+            activeHint: `Address GitHub PR feedback / CI failure on existing branch ${existingTicket.branchName ?? ""}:\n${trigger.rawText}`,
+          },
+          updatedAt: ts,
+        };
+        await this.stateStore.saveTicket(reactivated);
+        this.emit({
+          type: "thread_routed",
+          ticketId: reactivated.id,
+          triggerId: trigger.id,
+          message: trigger.rawText,
+          timestamp: ts,
+        });
+        this.emit({ type: "ticket_updated", ticket: reactivated, timestamp: ts });
+        return { action: "routed_to_ticket", trigger, thread, ticket: reactivated };
+      }
     }
 
     // New thread / unsubscribed event -> MasterAssessor triage via ControlPlaneLLM
@@ -135,11 +331,13 @@ export class EventIntakeRouter {
       repo.id,
     );
 
+    const repoStructure = await this.resolveRepoStructure(repo);
     const proposal = await this.llm.triageTrigger({
       repo,
       trigger,
       activeTickets,
       relatedMemory,
+      repoStructure,
     });
 
     if (!proposal.shouldCreateTicket) {
@@ -327,12 +525,14 @@ export class EventIntakeRouter {
       throw new Error(`Repository not found: ${input.repoId}`);
     }
     const defaultTemplate = input.template ?? repo.defaultTemplate;
+    const repoStructure = await this.resolveRepoStructure(repo);
     if (this.llm.planEpicDecomposition) {
       const plan = await this.llm.planEpicDecomposition({
         repo,
         title: input.title,
         description: input.description,
         defaultTemplate,
+        repoStructure,
       });
       return {
         ...plan,
@@ -344,6 +544,7 @@ export class EventIntakeRouter {
       title: input.title,
       description: input.description,
       defaultTemplate,
+      repoStructure,
     });
   }
 
@@ -354,6 +555,7 @@ export class EventIntakeRouter {
     }
 
     const defaultTemplate = input.template ?? repo.defaultTemplate;
+    const deliveryMode = input.epicDeliveryMode ?? "unified";
     const plan =
       input.subtasks && input.subtasks.length > 0
         ? {
@@ -369,14 +571,15 @@ export class EventIntakeRouter {
           });
 
     const ts = nowIso();
-    const threadKey = `epic:${newId("epc")}`;
+    const epicId = newId("epc");
+    const threadKey = `epic:${epicId}`;
     const trigger: Trigger = {
       id: newId("trg"),
       repoId: repo.id,
       source: "web",
       threadKey,
       title: input.title,
-      payload: { epic: true },
+      payload: { epic: true, epicDeliveryMode: deliveryMode },
       rawText: input.description,
       createdAt: ts,
     };
@@ -387,13 +590,12 @@ export class EventIntakeRouter {
       id: newId("thr"),
       repoId: repo.id,
       threadKey,
-      metadata: { source: "web", epic: true },
+      metadata: { source: "web", epic: true, epicDeliveryMode: deliveryMode },
       createdAt: ts,
       updatedAt: ts,
     };
     await this.stateStore.upsertThread(epicThread);
 
-    const epicId = newId("epc");
     const epic: Ticket = {
       id: epicId,
       repoId: repo.id,
@@ -411,6 +613,8 @@ export class EventIntakeRouter {
       }),
       dependsOn: [],
       isEpic: true,
+      epicDeliveryMode: deliveryMode,
+      branchName: deliveryMode === "unified" ? `super-work/epic/${epicId}` : undefined,
       nativeSessions: {},
       preferredEngine: input.preferredEngine,
       inlineMemory: {

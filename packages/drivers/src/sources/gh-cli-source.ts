@@ -15,8 +15,15 @@ interface GhCommandResult {
   stderr: string;
 }
 
-async function runGh(args: string[], cwd?: string): Promise<GhCommandResult> {
-  const proc = Bun.spawn(["gh", ...args], {
+function isGhAvailable(ghBin: string): boolean {
+  if (ghBin.includes("/")) {
+    return existsSync(ghBin);
+  }
+  return Boolean(Bun.which(ghBin));
+}
+
+async function runGh(args: string[], cwd?: string, ghBin = "gh"): Promise<GhCommandResult> {
+  const proc = Bun.spawn([ghBin, ...args], {
     cwd,
     stdout: "pipe",
     stderr: "pipe",
@@ -55,7 +62,7 @@ export class GhCliPollingSource {
   }
 
   async pollOnce(): Promise<number> {
-    if (this.isPolling || !Bun.which(this.ghBin)) return 0;
+    if (this.isPolling || !isGhAvailable(this.ghBin)) return 0;
     this.isPolling = true;
     let ingestedCount = 0;
 
@@ -64,7 +71,7 @@ export class GhCliPollingSource {
       const configured = repos.filter((r) => Boolean(r.githubRepo) && r.mode !== "off");
       if (configured.length === 0) return 0;
 
-      const auth = await runGh(["auth", "status"]);
+      const auth = await runGh(["auth", "status"], undefined, this.ghBin);
       if (auth.exitCode !== 0) {
         return 0;
       }
@@ -85,18 +92,22 @@ export class GhCliPollingSource {
     let count = 0;
 
     // 1. Poll open issues + comments
-    const issuesRes = await runGh([
-      "issue",
-      "list",
-      "--repo",
-      ghRepo,
-      "--state",
-      "open",
-      "--limit",
-      "20",
-      "--json",
-      "number,title,body,updatedAt,comments",
-    ]);
+    const issuesRes = await runGh(
+      [
+        "issue",
+        "list",
+        "--repo",
+        ghRepo,
+        "--state",
+        "open",
+        "--limit",
+        "20",
+        "--json",
+        "number,title,body,updatedAt,comments",
+      ],
+      undefined,
+      this.ghBin,
+    );
 
     if (issuesRes.exitCode === 0 && issuesRes.stdout.trim()) {
       const issues = JSON.parse(issuesRes.stdout) as Array<{
@@ -120,6 +131,7 @@ export class GhCliPollingSource {
         if (res.action !== "duplicate") count += 1;
 
         for (const comment of issue.comments ?? []) {
+          if (comment.body.includes("[super-work]")) continue;
           const cid = comment.id ?? comment.createdAt;
           const cRes = await this.kernel.ingestTrigger({
             repoId: repo.id,
@@ -140,18 +152,22 @@ export class GhCliPollingSource {
     }
 
     // 2. Poll open PRs for review feedback / failing CI checks
-    const prsRes = await runGh([
-      "pr",
-      "list",
-      "--repo",
-      ghRepo,
-      "--state",
-      "open",
-      "--limit",
-      "20",
-      "--json",
-      "number,title,headRefName,reviewDecision,statusCheckRollup,comments",
-    ]);
+    const prsRes = await runGh(
+      [
+        "pr",
+        "list",
+        "--repo",
+        ghRepo,
+        "--state",
+        "open",
+        "--limit",
+        "20",
+        "--json",
+        "number,title,headRefName,reviewDecision,statusCheckRollup,comments,reviews",
+      ],
+      undefined,
+      this.ghBin,
+    );
 
     if (prsRes.exitCode === 0 && prsRes.stdout.trim()) {
       const prs = JSON.parse(prsRes.stdout) as Array<{
@@ -161,6 +177,7 @@ export class GhCliPollingSource {
         reviewDecision?: string;
         statusCheckRollup?: Array<{ name?: string; conclusion?: string; state?: string }>;
         comments?: Array<{ id?: string; body: string; createdAt: string }>;
+        reviews?: Array<{ id?: string; body?: string; state?: string; submittedAt?: string }>;
       }>;
 
       for (const pr of prs) {
@@ -169,19 +186,80 @@ export class GhCliPollingSource {
         );
         if (failedChecks.length > 0) {
           const checkNames = failedChecks.map((c) => c.name ?? "check").join(",");
+          let runDatabaseId: string | number | undefined;
+          let failedLogTail = "";
+
+          const runsRes = await runGh(
+            [
+              "run",
+              "list",
+              "--repo",
+              ghRepo,
+              "--branch",
+              pr.headRefName,
+              "--status",
+              "failure",
+              "--limit",
+              "1",
+              "--json",
+              "databaseId",
+            ],
+            undefined,
+            this.ghBin,
+          );
+          if (runsRes.exitCode === 0 && runsRes.stdout.trim()) {
+            try {
+              const parsedRuns = JSON.parse(runsRes.stdout) as Array<{
+                databaseId?: number | string;
+              }>;
+              runDatabaseId = parsedRuns[0]?.databaseId;
+            } catch {
+              // Ignore non-JSON run list output
+            }
+          }
+
+          if (runDatabaseId !== undefined) {
+            const logRes = await runGh(
+              ["run", "view", String(runDatabaseId), "--repo", ghRepo, "--log-failed"],
+              undefined,
+              this.ghBin,
+            );
+            if (logRes.exitCode === 0 && logRes.stdout.trim()) {
+              failedLogTail = logRes.stdout.trim().slice(-1500);
+            }
+          }
+
+          const externalRef =
+            runDatabaseId !== undefined
+              ? `gh:${ghRepo}:pr:${pr.number}:ci_fail:${runDatabaseId}:${checkNames}`
+              : `gh:${ghRepo}:pr:${pr.number}:ci_fail:${checkNames}`;
+
+          const rawText = [
+            `Failing checks on branch ${pr.headRefName}: ${checkNames}`,
+            failedLogTail ? `\nFailed CI Log (tail):\n${failedLogTail}` : "",
+          ]
+            .filter(Boolean)
+            .join("\n");
+
           const ciRes = await this.kernel.ingestTrigger({
             repoId: repo.id,
             source: "github_ci",
-            externalRef: `gh:${ghRepo}:pr:${pr.number}:ci_fail:${checkNames}`,
+            externalRef,
             threadKey: `gh:${ghRepo}:pr:${pr.number}`,
             title: `CI failed on PR #${pr.number}: ${pr.title}`,
-            rawText: `Failing checks on branch ${pr.headRefName}: ${checkNames}`,
-            payload: { prNumber: pr.number, branch: pr.headRefName, failedChecks },
+            rawText,
+            payload: {
+              prNumber: pr.number,
+              branch: pr.headRefName,
+              failedChecks,
+              runDatabaseId,
+            },
           });
           if (ciRes.action !== "duplicate") count += 1;
         }
 
         for (const comment of pr.comments ?? []) {
+          if (comment.body.includes("[super-work]")) continue;
           const cid = comment.id ?? comment.createdAt;
           const pRes = await this.kernel.ingestTrigger({
             repoId: repo.id,
@@ -194,6 +272,24 @@ export class GhCliPollingSource {
           });
           if (pRes.action !== "duplicate") count += 1;
         }
+
+        for (const review of pr.reviews ?? []) {
+          const body = (review.body ?? "").trim();
+          if (body.includes("[super-work]")) continue;
+          const state = review.state ?? "";
+          if (!body && state !== "CHANGES_REQUESTED") continue;
+          const rid = review.id ?? review.submittedAt ?? state;
+          const rRes = await this.kernel.ingestTrigger({
+            repoId: repo.id,
+            source: "github_pr",
+            externalRef: `gh:${ghRepo}:pr:${pr.number}:review:${rid}`,
+            threadKey: `gh:${ghRepo}:pr:${pr.number}`,
+            title: `PR #${pr.number} review (${state || "comment"})`,
+            rawText: body || `Review requested changes on PR #${pr.number}`,
+            payload: { prNumber: pr.number, branch: pr.headRefName, state },
+          });
+          if (rRes.action !== "duplicate") count += 1;
+        }
       }
     }
 
@@ -202,7 +298,10 @@ export class GhCliPollingSource {
 }
 
 export class GhOutboxExecutor implements OutboxExecutor {
-  constructor(private readonly workspace?: WorkspaceProvider) {}
+  constructor(
+    private readonly workspace?: WorkspaceProvider,
+    private readonly ghBin = "gh",
+  ) {}
 
   async execute(
     entry: OutboxEntry,
@@ -238,12 +337,70 @@ export class GhOutboxExecutor implements OutboxExecutor {
     if (entry.action === "push_and_create_pr") {
       const gitCwd = worktreePath && existsSync(worktreePath) ? worktreePath : repo.rootPath;
       const forceGithubPr = Boolean(entry.payload.forceGithubPr);
-      if (repo.githubRepo && Bun.which("gh") && branchName) {
+      if (repo.githubRepo && isGhAvailable(this.ghBin) && branchName) {
         const remoteRes = await runGit(["remote", "get-url", "origin"], repo.rootPath);
         if (remoteRes.exitCode === 0 && remoteRes.stdout.trim()) {
           const pushRes = await runGit(["push", "-u", "origin", branchName], gitCwd);
           if (pushRes.exitCode !== 0) {
             throw new Error(`git push failed: ${pushRes.stderr.trim() || pushRes.stdout.trim()}`);
+          }
+
+          let existingPrNumber = ticket.prNumber;
+          let existingPrUrl = ticket.prUrl;
+          if (!existingPrNumber) {
+            const listRes = await runGh(
+              [
+                "pr",
+                "list",
+                "--repo",
+                repo.githubRepo,
+                "--head",
+                branchName,
+                "--state",
+                "open",
+                "--json",
+                "number,url",
+              ],
+              gitCwd,
+              this.ghBin,
+            );
+            if (listRes.exitCode === 0 && listRes.stdout.trim()) {
+              try {
+                const openPrs = JSON.parse(listRes.stdout) as Array<{
+                  number?: number;
+                  url?: string;
+                }>;
+                if (openPrs[0]?.number) {
+                  existingPrNumber = openPrs[0].number;
+                  existingPrUrl = openPrs[0].url;
+                }
+              } catch {
+                // Fall through to gh pr create
+              }
+            }
+          }
+
+          if (existingPrNumber) {
+            const updateBody = `[super-work] Updated branch \`${branchName}\`:\n\n${String(entry.payload.summary ?? ticket.description)}`;
+            await runGh(
+              [
+                "pr",
+                "comment",
+                String(existingPrNumber),
+                "--repo",
+                repo.githubRepo,
+                "--body",
+                updateBody,
+              ],
+              gitCwd,
+              this.ghBin,
+            );
+            return {
+              mode: "github_pr_updated",
+              branchName,
+              prNumber: existingPrNumber,
+              prUrl: existingPrUrl,
+            };
           }
 
           const prRes = await runGh(
@@ -262,14 +419,18 @@ export class GhOutboxExecutor implements OutboxExecutor {
               String(entry.payload.summary ?? ticket.description),
             ],
             gitCwd,
+            this.ghBin,
           );
           if (prRes.exitCode !== 0) {
             throw new Error(`gh pr create failed: ${prRes.stderr.trim() || prRes.stdout.trim()}`);
           }
+          const prUrl = prRes.stdout.trim();
+          const prNumber = Number(prUrl.match(/\/pull\/(\d+)/)?.[1]) || undefined;
           return {
             mode: "github_pr",
             branchName,
-            prUrl: prRes.stdout.trim(),
+            prUrl,
+            prNumber,
           };
         }
       }
@@ -301,17 +462,21 @@ export class GhOutboxExecutor implements OutboxExecutor {
     }
 
     if (entry.action === "comment_issue" || entry.action === "comment_pr") {
-      if (repo.githubRepo && Bun.which("gh") && entry.payload.number) {
+      if (repo.githubRepo && isGhAvailable(this.ghBin) && entry.payload.number) {
         const cmd = entry.action === "comment_issue" ? "issue" : "pr";
-        const res = await runGh([
-          cmd,
-          "comment",
-          String(entry.payload.number),
-          "--repo",
-          repo.githubRepo,
-          "--body",
-          String(entry.payload.body ?? ""),
-        ]);
+        const res = await runGh(
+          [
+            cmd,
+            "comment",
+            String(entry.payload.number),
+            "--repo",
+            repo.githubRepo,
+            "--body",
+            String(entry.payload.body ?? ""),
+          ],
+          undefined,
+          this.ghBin,
+        );
         if (res.exitCode !== 0) {
           throw new Error(`gh ${cmd} comment failed: ${res.stderr.trim()}`);
         }

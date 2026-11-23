@@ -145,20 +145,28 @@ export function DeepDiveDrawer({
   const childSubtasks = ticket?.isEpic
     ? allTickets.filter((c) => c.parentTicketId === ticket.id)
     : [];
+  const parentEpic = ticket?.parentTicketId
+    ? allTickets.find((p) => p.id === ticket.parentTicketId)
+    : undefined;
+  const isUnifiedSubtask = Boolean(
+    parentEpic?.isEpic && parentEpic.epicDeliveryMode !== "per_subtask",
+  );
   const hasMergedLocally = Boolean(
     detail?.outboxEntries.some((e) => e.action === "local_merge" && e.status === "sent"),
   );
   const hasPushedPr = Boolean(
-    detail?.outboxEntries.some(
-      (e) =>
-        e.action === "push_and_create_pr" &&
-        e.status === "sent" &&
-        (e.resultPayload as { mode?: string } | undefined)?.mode === "github_pr",
-    ),
+    ticket?.prNumber ||
+      detail?.outboxEntries.some(
+        (e) =>
+          e.action === "push_and_create_pr" &&
+          e.status === "sent" &&
+          (e.resultPayload as { mode?: string } | undefined)?.mode === "github_pr",
+      ),
   );
   const canDeliverActions = Boolean(
     ticket &&
-      !ticket.isEpic &&
+      (!ticket.isEpic || ticket.epicDeliveryMode !== "per_subtask") &&
+      !isUnifiedSubtask &&
       ticket.branchName &&
       (ticket.status === "delivered" || ticket.status === "outbox_pending") &&
       !hasMergedLocally,
@@ -201,6 +209,24 @@ export function DeepDiveDrawer({
                       <GitBranch className="w-3 h-3" />
                       {ticket.branchName}
                     </span>
+                  )}
+                  {ticket.prNumber && (
+                    ticket.prUrl ? (
+                      <a
+                        href={ticket.prUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded bg-cyan-500/15 border border-cyan-500/30 text-cyan-300 hover:bg-cyan-500/25"
+                      >
+                        <GitPullRequest className="w-2.5 h-2.5" />
+                        PR #{ticket.prNumber}
+                      </a>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded bg-cyan-500/15 border border-cyan-500/30 text-cyan-300">
+                        <GitPullRequest className="w-2.5 h-2.5" />
+                        PR #{ticket.prNumber}
+                      </span>
+                    )
                   )}
                   {ticket.parentTicketId && (
                     <button

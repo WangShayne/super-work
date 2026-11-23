@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Inbox, Kanban } from "lucide-react";
+import { BarChart3, Inbox, Kanban } from "lucide-react";
 import { api } from "./api.ts";
 import { DeepDiveDrawer } from "./components/DeepDiveDrawer.tsx";
 import { HeaderBar } from "./components/HeaderBar.tsx";
@@ -19,12 +19,14 @@ import type {
   OperatingMode,
   PublicSetupStatus,
   RepoConfig,
+  RepoMetricsSummary,
   Ticket,
 } from "./types.ts";
 import { BoardView } from "./views/BoardView.tsx";
 import { InboxView } from "./views/InboxView.tsx";
+import { MetricsView } from "./views/MetricsView.tsx";
 
-type MainTab = "inbox" | "board";
+type MainTab = "inbox" | "board" | "metrics";
 
 export function App() {
   const { t } = useI18n();
@@ -33,6 +35,7 @@ export function App() {
   const [selectedRepoId, setSelectedRepoId] = useState<string>("");
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [inboxItems, setInboxItems] = useState<InboxItem[]>([]);
+  const [metrics, setMetrics] = useState<RepoMetricsSummary | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [sseConnected, setSseConnected] = useState(false);
 
@@ -64,12 +67,14 @@ export function App() {
       setSelectedRepoId((prev) => prev || activeRepo);
     }
 
-    const [t, i] = await Promise.all([
+    const [t, i, m] = await Promise.all([
       api.listTickets(activeRepo || undefined),
       api.listInbox(activeRepo || undefined),
+      api.getMetrics(activeRepo || undefined),
     ]);
     setTickets(t.tickets);
     setInboxItems(i.items);
+    setMetrics(m.metrics);
   }, []);
 
   useEffect(() => {
@@ -198,8 +203,9 @@ export function App() {
     decision: "approved" | "rejected",
     note?: string,
     deliveryAction?: "local_merge" | "push_and_create_pr",
+    options?: { expandMandate?: boolean; budgetIncreaseUsd?: number },
   ) => {
-    await api.resolveInbox(id, decision, note, deliveryAction);
+    await api.resolveInbox(id, decision, note, deliveryAction, options);
     await refreshAll(selectedRepoId || undefined);
   };
 
@@ -255,6 +261,21 @@ export function App() {
             {tickets.length}
           </span>
         </button>
+
+        <button
+          onClick={() => setActiveTab("metrics")}
+          className={`inline-flex items-center gap-2 px-3 py-2.5 text-xs font-medium border-b-2 transition ${
+            activeTab === "metrics"
+              ? "border-indigo-500 text-zinc-100"
+              : "border-transparent text-zinc-500 hover:text-zinc-300"
+          }`}
+        >
+          <BarChart3 className="w-3.5 h-3.5" />
+          {t("nav.metrics")}
+          {metrics?.budgetExceeded && (
+            <span className="w-1.5 h-1.5 rounded-full bg-rose-400 animate-pulse" />
+          )}
+        </button>
       </nav>
 
       <main className="flex-1">
@@ -265,11 +286,13 @@ export function App() {
             onResolve={handleResolveInbox}
             onInspectTicket={(id) => setInspectedTicketId(id)}
           />
-        ) : (
+        ) : activeTab === "board" ? (
           <BoardView
             tickets={tickets}
             onSelectTicket={(id) => setInspectedTicketId(id)}
           />
+        ) : (
+          <MetricsView metrics={metrics} repo={activeRepo} />
         )}
       </main>
 

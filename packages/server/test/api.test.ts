@@ -312,7 +312,7 @@ describe("@super-work/server REST + SSE API", () => {
     };
     expect(plan.subtasks.length).toBeGreaterThanOrEqual(3);
 
-    // 2. Dispatch Epic DAG
+    // 2. Dispatch Epic DAG (opt-in per_subtask delivery for individual subtask delivery test)
     const createEpicRes = await app.request("/api/epics", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -320,6 +320,7 @@ describe("@super-work/server REST + SSE API", () => {
         repoId: "repo_v03",
         title: "Add plugin architecture",
         description: "1. packages/core define types\n2. packages/drivers add loader\n3. packages/web add panel",
+        epicDeliveryMode: "per_subtask",
         preferredEngine: "mock",
         subtasks: plan.subtasks,
       }),
@@ -354,6 +355,104 @@ describe("@super-work/server REST + SSE API", () => {
     const detailRes = await app.request(`/api/tickets/${targetSub.id}`);
     const detail = (await detailRes.json()) as { diff: string };
     expect(detail.diff.length).toBeGreaterThan(0);
+
+    await kernel.stop();
+    stateStore.close();
+  });
+
+  it("supports unified Epic staging delivery, repo quotas, /api/metrics, and expandMandate resolve", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sw-v04-api-"));
+    tempDirs.push(dir);
+    const repoDir = await createTempGitRepo(dir);
+
+    const stateStore = new SqliteStateStore(join(dir, "state.db"));
+    const artifactStore = new FsArtifactStore(join(dir, "artifacts"));
+    const workspace = new GitWorktreeProvider(join(dir, "worktrees"));
+    const llm = new HeuristicControlLLM();
+    const kernel = new SuperWorkKernel({
+      stateStore,
+      artifactStore,
+      workspace,
+      llm,
+      drivers: [new MockWorkerDriver({ engine: "mock", stepDelayMs: 1 })],
+      outboxExecutor: new GhOutboxExecutor(workspace),
+    });
+    const app = createServerApp({
+      kernel,
+      stateStore,
+      artifactStore,
+      llmProviderName: llm.providerName,
+    });
+
+    await app.request("/api/repos", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: "repo_v04",
+        name: "v04-demo",
+        rootPath: repoDir,
+        baseBranch: "main",
+        mode: "auto",
+        defaultTemplate: "fast",
+        preferredImplementEngine: "mock",
+        preferredReviewEngine: "mock",
+        defaultDeliveryChannel: "local_merge",
+        maxConcurrentWorkers: 2,
+        dailyBudgetUsd: 10,
+      }),
+    });
+
+    const createUnifiedRes = await app.request("/api/epics", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        repoId: "repo_v04",
+        title: "Unified Epic Feature",
+        description: "1. packages/a build core\n2. packages/b build ui",
+        preferredEngine: "mock",
+      }),
+    });
+    expect(createUnifiedRes.status).toBe(201);
+    const unifiedData = (await createUnifiedRes.json()) as {
+      epic: { id: string; epicDeliveryMode?: string; branchName?: string };
+      subtasks: Array<{ id: string }>;
+    };
+    expect(unifiedData.epic.epicDeliveryMode).toBe("unified");
+    expect(unifiedData.epic.branchName).toBe(`super-work/epic/${unifiedData.epic.id}`);
+
+    await kernel.runUntilIdle();
+
+    const epicAfter = await stateStore.getTicket(unifiedData.epic.id);
+    expect(epicAfter?.status).toBe("delivered");
+
+    // Parent Epic outbox delivered the whole Epic via local_merge into repoDir main
+    const epicOutbox = await stateStore.listOutboxEntries({ ticketId: unifiedData.epic.id });
+    expect(epicOutbox).toHaveLength(1);
+    expect(epicOutbox[0]!.action).toBe("local_merge");
+    expect(epicOutbox[0]!.status).toBe("sent");
+
+    // Metrics endpoint returns accurate summary
+    const metricsRes = await app.request("/api/metrics?repoId=repo_v04");
+    expect(metricsRes.status).toBe(200);
+    const { metrics } = (await metricsRes.json()) as {
+      metrics: { ticketCounts: { delivered: number }; deliveryRate: number; byEngine: unknown[] };
+    };
+    expect(metrics.ticketCounts.delivered).toBeGreaterThanOrEqual(2);
+    expect(metrics.deliveryRate).toBe(1);
+    expect(metrics.byEngine.length).toBeGreaterThanOrEqual(1);
+
+    // PATCH repo quotas can update and clear values cleanly
+    const patchRes = await app.request("/api/repos/repo_v04", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ maxConcurrentWorkers: null, dailyBudgetUsd: 25 }),
+    });
+    expect(patchRes.status).toBe(200);
+    const patched = (await patchRes.json()) as {
+      repo: { maxConcurrentWorkers?: number; dailyBudgetUsd?: number };
+    };
+    expect(patched.repo.maxConcurrentWorkers).toBeUndefined();
+    expect(patched.repo.dailyBudgetUsd).toBe(25);
 
     await kernel.stop();
     stateStore.close();

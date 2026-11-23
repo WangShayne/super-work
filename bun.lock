@@ -9,20 +9,30 @@
         "typescript": "^5.8.2",
       },
     },
+    "packages/cli": {
+      "name": "@super-work/cli",
+      "version": "0.4.0",
+      "bin": {
+        "super-work": "./src/index.ts",
+      },
+      "dependencies": {
+        "@super-work/core": "workspace:*",
+      },
+    },
     "packages/core": {
       "name": "@super-work/core",
-      "version": "0.1.0",
+      "version": "0.4.0",
     },
     "packages/drivers": {
       "name": "@super-work/drivers",
-      "version": "0.1.0",
+      "version": "0.4.0",
       "dependencies": {
         "@super-work/core": "workspace:*",
       },
     },
     "packages/server": {
       "name": "@super-work/server",
-      "version": "0.1.0",
+      "version": "0.4.0",
       "dependencies": {
         "@super-work/core": "workspace:*",
         "@super-work/drivers": "workspace:*",
@@ -31,7 +41,7 @@
     },
     "packages/web": {
       "name": "@super-work/web",
-      "version": "0.1.0",
+      "version": "0.4.0",
       "dependencies": {
         "lucide-react": "^0.475.0",
         "react": "^19.0.0",
@@ -201,6 +211,8 @@
     "@rollup/rollup-win32-x64-gnu": ["@rollup/rollup-win32-x64-gnu@4.68.8", "", { "os": "win32", "cpu": "x64" }, "sha512-63dWiHgvpWcienfdr465lT3SIn4u3535vbDfaLKhSn0F2KJ06bbcUsewDGJZUPZCbJ67qESrPDhb85UnWdb5ew=="],
 
     "@rollup/rollup-win32-x64-msvc": ["@rollup/rollup-win32-x64-msvc@4.68.8", "", { "os": "win32", "cpu": "x64" }, "sha512-/W1LBsMeQAdiCuH3Z2gkRspl3mlxL+butknhq4vXjmxO45vuT08BqhehxDoE4YS+m6s9lhpq6M9/PjTEAg8PYw=="],
+
+    "@super-work/cli": ["@super-work/cli@workspace:packages/cli"],
 
     "@super-work/core": ["@super-work/core@workspace:packages/core"],
 

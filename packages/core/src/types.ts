@@ -34,6 +34,8 @@ export type TriggerSource = "web" | "github_issue" | "github_pr" | "github_ci" |
 
 export type DeliveryChannel = "auto_pr_or_branch" | "local_merge" | "github_pr";
 
+export type EpicDeliveryMode = "unified" | "per_subtask";
+
 export interface VerificationCommandOutput {
   command: string;
   exitCode: number;
@@ -77,6 +79,10 @@ export interface RepoConfig {
   autoCleanupWorktree?: boolean;
   verificationCommands?: string[];
   defaultDeliveryChannel?: DeliveryChannel;
+  maxConcurrentWorkers?: number;
+  dailyBudgetUsd?: number;
+  dailyBudgetOverrideUsd?: number;
+  dailyBudgetOverrideDate?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -156,6 +162,11 @@ export interface Ticket {
   parentTicketId?: string;
   isEpic?: boolean;
   subtaskKey?: string;
+  epicDeliveryMode?: EpicDeliveryMode;
+  prNumber?: number;
+  prUrl?: string;
+  prAutoFollowupCount?: number;
+  pendingViolationPaths?: string[];
   worktreePath?: string;
   branchName?: string;
   worktreeCleanedAt?: string;
@@ -207,7 +218,9 @@ export type InboxItemKind =
   | "watchdog_escalation"
   | "mandate_violation"
   | "merge_conflict"
-  | "outbox_signoff";
+  | "outbox_signoff"
+  | "budget_cap"
+  | "pr_followup";
 
 export type InboxItemStatus = "pending" | "approved" | "rejected";
 
@@ -445,4 +458,33 @@ export interface PublicSetupStatus {
     maskedApiKey?: string;
   };
   scanReport: CliScanReport;
+}
+
+export interface EngineMetricRow {
+  engine: WorkerEngineId;
+  runs: number;
+  completedRuns: number;
+  failedRuns: number;
+  totalCostUsd: number;
+  avgDurationMs: number;
+}
+
+export interface RepoMetricsSummary {
+  repoId?: string;
+  todayDate: string;
+  todayCostUsd: number;
+  dailyBudgetUsd?: number;
+  effectiveDailyBudgetUsd?: number;
+  budgetExceeded: boolean;
+  totalCostUsd: number;
+  ticketCounts: {
+    total: number;
+    active: number;
+    delivered: number;
+    failed: number;
+    cancelled: number;
+    needsHuman: number;
+  };
+  deliveryRate: number;
+  byEngine: EngineMetricRow[];
 }

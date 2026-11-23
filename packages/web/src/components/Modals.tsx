@@ -5,6 +5,7 @@ import { formatTemplate, formatTicketStatus, useI18n } from "../i18n.tsx";
 import type {
   DeliveryChannel,
   EpicDecompositionPlan,
+  EpicDeliveryMode,
   EpicSubtaskSpec,
   ManagedWorktreeItem,
   OperatingMode,
@@ -37,6 +38,7 @@ interface DispatchModalProps {
     title: string;
     description: string;
     template: PipelineTemplateId;
+    epicDeliveryMode: EpicDeliveryMode;
     preferredEngine: WorkerEngineId;
     modelOverride?: string;
     effortOverride?: ReasoningEffort;
@@ -57,6 +59,7 @@ export function DispatchTaskModal({
 }: DispatchModalProps) {
   const { locale, t } = useI18n();
   const [dispatchMode, setDispatchMode] = useState<"single" | "epic">("single");
+  const [epicDeliveryMode, setEpicDeliveryMode] = useState<EpicDeliveryMode>("unified");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [template, setTemplate] = useState<PipelineTemplateId>(defaultTemplate);
@@ -72,6 +75,7 @@ export function DispatchTaskModal({
   useEffect(() => {
     if (open) {
       setDispatchMode("single");
+      setEpicDeliveryMode("unified");
       setTemplate(defaultTemplate);
       setEngine(defaultEngine);
       setModelOverride("");
@@ -141,6 +145,21 @@ export function DispatchTaskModal({
     });
   };
 
+  const toggleSubtaskDependency = (idx: number, depKey: string) => {
+    setEpicPlan((prev) => {
+      if (!prev) return prev;
+      const target = prev.subtasks[idx];
+      if (!target) return prev;
+      const exists = target.dependsOnKeys.includes(depKey);
+      const nextDeps = exists
+        ? target.dependsOnKeys.filter((k) => k !== depKey)
+        : [...target.dependsOnKeys, depKey];
+      const next = [...prev.subtasks];
+      next[idx] = { ...target, dependsOnKeys: nextDeps };
+      return { ...prev, subtasks: next };
+    });
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim() || !description.trim()) return;
@@ -152,6 +171,7 @@ export function DispatchTaskModal({
           title: title.trim(),
           description: description.trim(),
           template,
+          epicDeliveryMode,
           preferredEngine: engine,
           modelOverride: isCliEngine ? modelOverride.trim() || undefined : undefined,
           effortOverride: isCliEngine ? effortOverride || undefined : undefined,
@@ -342,6 +362,20 @@ export function DispatchTaskModal({
             </div>
           ) : (
             <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-3.5 space-y-3">
+              <div>
+                <label className="block text-zinc-400 mb-1">
+                  {t("modal.dispatch.epicDeliveryMode")}
+                </label>
+                <select
+                  value={epicDeliveryMode}
+                  onChange={(e) => setEpicDeliveryMode(e.target.value as EpicDeliveryMode)}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-zinc-100"
+                >
+                  <option value="unified">{t("modal.dispatch.epicDeliveryUnified")}</option>
+                  <option value="per_subtask">{t("modal.dispatch.epicDeliveryPerSubtask")}</option>
+                </select>
+              </div>
+
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="font-medium text-zinc-200 flex items-center gap-1.5">
                   <GitBranch className="w-3.5 h-3.5 text-indigo-400" />
@@ -375,65 +409,101 @@ export function DispatchTaskModal({
                   {t("modal.dispatch.epicEmptyHint")}
                 </p>
               ) : (
-                <div className="max-h-56 overflow-y-auto space-y-2 pr-1">
-                  {epicPlan.subtasks.map((sub, idx) => (
-                    <div
-                      key={`${sub.key}_${idx}`}
-                      className="rounded-lg border border-zinc-800 bg-zinc-950/90 p-2.5 space-y-2"
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-2 flex-1 min-w-0">
-                          <span className="px-1.5 py-0.5 rounded bg-indigo-500/15 border border-indigo-500/30 font-mono text-[10px] text-indigo-300 shrink-0">
-                            {sub.key}
-                          </span>
-                          <input
-                            value={sub.title}
-                            onChange={(e) => updateSubtask(idx, { title: e.target.value })}
-                            className="flex-1 bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-zinc-100 text-[11px]"
-                          />
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => removeSubtask(idx)}
-                          className="p-1 text-zinc-500 hover:text-rose-400"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 items-center">
-                        <input
-                          value={sub.allowedPaths.join(", ")}
-                          onChange={(e) =>
-                            updateSubtask(idx, {
-                              allowedPaths: e.target.value
-                                .split(",")
-                                .map((s) => s.trim())
-                                .filter(Boolean),
-                            })
-                          }
-                          placeholder="packages/core/**"
-                          className="bg-zinc-900 border border-zinc-800 rounded px-2 py-1 font-mono text-[10px] text-emerald-300"
-                        />
-                        <div className="text-[10px] font-mono text-zinc-400 flex items-center gap-1 flex-wrap">
-                          <span>{t("modal.dispatch.epicDependsOn")}</span>
-                          {sub.dependsOnKeys.length === 0 ? (
-                            <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
-                              {t("modal.dispatch.epicParallel")}
+                <div className="max-h-72 overflow-y-auto space-y-2.5 pr-1">
+                  {epicPlan.subtasks.map((sub, idx) => {
+                    const peerKeys = epicPlan.subtasks
+                      .filter((_, pIdx) => pIdx !== idx)
+                      .map((p) => p.key);
+                    return (
+                      <div
+                        key={`${sub.key}_${idx}`}
+                        className="rounded-lg border border-zinc-800 bg-zinc-950/90 p-2.5 space-y-2"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 flex-1 min-w-0">
+                            <span className="px-1.5 py-0.5 rounded bg-indigo-500/15 border border-indigo-500/30 font-mono text-[10px] text-indigo-300 shrink-0">
+                              {sub.key}
                             </span>
-                          ) : (
-                            sub.dependsOnKeys.map((dep) => (
-                              <span
-                                key={dep}
-                                className="px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20"
-                              >
-                                {dep}
+                            <input
+                              value={sub.title}
+                              onChange={(e) => updateSubtask(idx, { title: e.target.value })}
+                              className="flex-1 bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-zinc-100 text-[11px]"
+                            />
+                            <select
+                              value={sub.template}
+                              onChange={(e) =>
+                                updateSubtask(idx, {
+                                  template: e.target.value as PipelineTemplateId,
+                                })
+                              }
+                              className="bg-zinc-900 border border-zinc-800 rounded px-1.5 py-1 font-mono text-[10px] text-zinc-200 shrink-0"
+                            >
+                              <option value="fast">fast</option>
+                              <option value="standard">standard</option>
+                              <option value="strict">strict</option>
+                            </select>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => removeSubtask(idx)}
+                            className="p-1 text-zinc-500 hover:text-rose-400"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+
+                        <textarea
+                          rows={2}
+                          value={sub.description}
+                          onChange={(e) => updateSubtask(idx, { description: e.target.value })}
+                          placeholder={t("modal.dispatch.epicSubtaskDescPlaceholder")}
+                          className="w-full bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-zinc-300 text-[10px] focus:outline-none focus:border-indigo-500"
+                        />
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 items-center">
+                          <input
+                            value={sub.allowedPaths.join(", ")}
+                            onChange={(e) =>
+                              updateSubtask(idx, {
+                                allowedPaths: e.target.value
+                                  .split(",")
+                                  .map((s) => s.trim())
+                                  .filter(Boolean),
+                              })
+                            }
+                            placeholder="packages/core/**"
+                            className="bg-zinc-900 border border-zinc-800 rounded px-2 py-1 font-mono text-[10px] text-emerald-300"
+                          />
+                          <div className="text-[10px] font-mono text-zinc-400 flex items-center gap-1 flex-wrap">
+                            <span>{t("modal.dispatch.epicToggleDepHint")}</span>
+                            {peerKeys.length === 0 ? (
+                              <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
+                                {t("modal.dispatch.epicParallel")}
                               </span>
-                            ))
-                          )}
+                            ) : (
+                              peerKeys.map((peer) => {
+                                const active = sub.dependsOnKeys.includes(peer);
+                                return (
+                                  <button
+                                    key={peer}
+                                    type="button"
+                                    onClick={() => toggleSubtaskDependency(idx, peer)}
+                                    className={`px-1.5 py-0.5 rounded border transition ${
+                                      active
+                                        ? "bg-amber-500/20 text-amber-200 border-amber-500/40"
+                                        : "bg-zinc-900 text-zinc-500 border-zinc-800 hover:text-zinc-300"
+                                    }`}
+                                  >
+                                    {active ? `✓ ${peer}` : peer}
+                                  </button>
+                                );
+                              })
+                            )}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -724,7 +794,13 @@ interface RepoSettingsModalProps {
   repo: RepoConfig | null;
   availableEngines: WorkerEngineId[];
   onClose: () => void;
-  onSubmit: (repoId: string, patch: Partial<RepoConfig>) => Promise<void>;
+  onSubmit: (
+    repoId: string,
+    patch: Omit<Partial<RepoConfig>, "maxConcurrentWorkers" | "dailyBudgetUsd"> & {
+      maxConcurrentWorkers?: number | null;
+      dailyBudgetUsd?: number | null;
+    },
+  ) => Promise<void>;
 }
 
 export function RepoSettingsModal({
@@ -744,6 +820,8 @@ export function RepoSettingsModal({
   const [reviewEngine, setReviewEngine] = useState<WorkerEngineId>("codex");
   const [deliveryChannel, setDeliveryChannel] = useState<DeliveryChannel>("auto_pr_or_branch");
   const [verificationInput, setVerificationInput] = useState("");
+  const [maxConcurrentInput, setMaxConcurrentInput] = useState("");
+  const [dailyBudgetInput, setDailyBudgetInput] = useState("");
   const [autoCleanupWorktree, setAutoCleanupWorktree] = useState(true);
   const [submitting, setSubmitting] = useState(false);
 
@@ -758,6 +836,10 @@ export function RepoSettingsModal({
     setReviewEngine(repo.preferredReviewEngine);
     setDeliveryChannel(repo.defaultDeliveryChannel ?? "auto_pr_or_branch");
     setVerificationInput((repo.verificationCommands ?? []).join(", "));
+    setMaxConcurrentInput(
+      repo.maxConcurrentWorkers ? String(repo.maxConcurrentWorkers) : "",
+    );
+    setDailyBudgetInput(repo.dailyBudgetUsd ? String(repo.dailyBudgetUsd) : "");
     setAutoCleanupWorktree(repo.autoCleanupWorktree !== false);
   }, [open, repo]);
 
@@ -781,6 +863,8 @@ export function RepoSettingsModal({
         .split(/[\n,]+/)
         .map((s) => s.trim())
         .filter(Boolean);
+      const parsedMaxConcurrent = Number(maxConcurrentInput.trim());
+      const parsedDailyBudget = Number(dailyBudgetInput.trim());
       await onSubmit(repo.id, {
         name: name.trim(),
         baseBranch: baseBranch.trim() || "main",
@@ -791,6 +875,14 @@ export function RepoSettingsModal({
         preferredReviewEngine: reviewEngine,
         defaultDeliveryChannel: deliveryChannel,
         verificationCommands,
+        maxConcurrentWorkers:
+          maxConcurrentInput.trim() && Number.isFinite(parsedMaxConcurrent) && parsedMaxConcurrent > 0
+            ? Math.floor(parsedMaxConcurrent)
+            : null,
+        dailyBudgetUsd:
+          dailyBudgetInput.trim() && Number.isFinite(parsedDailyBudget) && parsedDailyBudget > 0
+            ? parsedDailyBudget
+            : null,
         autoCleanupWorktree,
       });
       onClose();
@@ -940,6 +1032,37 @@ export function RepoSettingsModal({
             <p className="text-[11px] text-zinc-500 mt-1">
               {t("modal.repoSettings.verificationHint")}
             </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-zinc-400 mb-1">
+                {t("modal.repoSettings.maxConcurrent")}
+              </label>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={maxConcurrentInput}
+                onChange={(e) => setMaxConcurrentInput(e.target.value)}
+                placeholder={t("modal.repoSettings.quotaPlaceholder")}
+                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
+              />
+            </div>
+            <div>
+              <label className="block text-zinc-400 mb-1">
+                {t("modal.repoSettings.dailyBudget")}
+              </label>
+              <input
+                type="number"
+                min="0.1"
+                step="0.5"
+                value={dailyBudgetInput}
+                onChange={(e) => setDailyBudgetInput(e.target.value)}
+                placeholder={t("modal.repoSettings.quotaPlaceholder")}
+                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
+              />
+            </div>
           </div>
 
           <label className="flex items-start gap-2.5 rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-3 cursor-pointer">

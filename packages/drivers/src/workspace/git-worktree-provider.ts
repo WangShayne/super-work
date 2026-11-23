@@ -8,6 +8,7 @@ import type {
   VerificationRunResult,
   WorkspaceProvider,
 } from "@super-work/core";
+import { scanRepoStructureSummary } from "./repo-structure-scanner.ts";
 
 export interface GitCommandResult {
   exitCode: number;
@@ -37,9 +38,35 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     this.worktreesDir = resolve(worktreesDir);
   }
 
+  async ensureBranch(rootRepoPath: string, branchName: string, startPoint: string): Promise<void> {
+    const check = await runGit(
+      ["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`],
+      rootRepoPath,
+    );
+    if (check.exitCode === 0) return;
+
+    const createRes = await runGit(["branch", branchName, startPoint], rootRepoPath);
+    if (createRes.exitCode !== 0) {
+      const recheck = await runGit(
+        ["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`],
+        rootRepoPath,
+      );
+      if (recheck.exitCode !== 0) {
+        throw new Error(
+          `git branch ${branchName} from ${startPoint} failed: ${createRes.stderr.trim() || createRes.stdout.trim()}`,
+        );
+      }
+    }
+  }
+
+  async getRepoStructureSummary(rootRepoPath: string): Promise<string> {
+    return scanRepoStructureSummary(rootRepoPath);
+  }
+
   async prepareWorkspace(
     ticket: Ticket,
     repo: RepoConfig,
+    options?: { startPoint?: string },
   ): Promise<{ worktreePath: string; branchName: string }> {
     const branchName = ticket.branchName ?? `super-work/${ticket.id}`;
     const worktreePath = ticket.worktreePath ?? join(this.worktreesDir, ticket.id);
@@ -63,12 +90,38 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     await mkdir(this.worktreesDir, { recursive: true });
     await runGit(["worktree", "prune"], repo.rootPath);
 
-    const addRes = await runGit(
-      ["worktree", "add", "-B", branchName, worktreePath, repo.baseBranch],
+    const localBranchRef = await runGit(
+      ["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`],
       repo.rootPath,
     );
+    let addRes: GitCommandResult;
+    if (localBranchRef.exitCode === 0) {
+      addRes = await runGit(["worktree", "add", worktreePath, branchName], repo.rootPath);
+    } else {
+      const remoteBranchRef = await runGit(
+        ["show-ref", "--verify", "--quiet", `refs/remotes/origin/${branchName}`],
+        repo.rootPath,
+      );
+      if (remoteBranchRef.exitCode === 0) {
+        addRes = await runGit(
+          ["worktree", "add", "-b", branchName, worktreePath, `origin/${branchName}`],
+          repo.rootPath,
+        );
+      } else {
+        const startPoint = options?.startPoint ?? repo.baseBranch;
+        addRes = await runGit(
+          ["worktree", "add", "-b", branchName, worktreePath, startPoint],
+          repo.rootPath,
+        );
+      }
+    }
+
     if (addRes.exitCode !== 0) {
       throw new Error(`git worktree add failed: ${addRes.stderr.trim() || addRes.stdout.trim()}`);
+    }
+
+    if (options?.startPoint && options.startPoint !== repo.baseBranch) {
+      await runGit(["update-ref", this.worktreeBaseRef(worktreePath), "HEAD"], worktreePath);
     }
 
     await this.linkRepoNodeModules(repo.rootPath, worktreePath);
@@ -455,9 +508,46 @@ export class GitWorktreeProvider implements WorkspaceProvider {
         input.rootRepoPath,
       );
       if (ffRes.exitCode !== 0) {
-        throw new Error(
-          `Repository HEAD is on '${currentBranch}' and '${input.branchName}' cannot fast-forward '${input.baseBranch}'. Checkout '${input.baseBranch}' first.`,
+        // Non-fast-forward merge into an un-checked-out target branch (e.g. Epic staging branch)
+        await mkdir(this.worktreesDir, { recursive: true });
+        const mergeWt = join(
+          this.worktreesDir,
+          `_merge_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         );
+        const wtAdd = await runGit(
+          ["worktree", "add", mergeWt, input.baseBranch],
+          input.rootRepoPath,
+        );
+        if (wtAdd.exitCode !== 0) {
+          throw new Error(
+            `Repository HEAD is on '${currentBranch}' and temporary merge worktree for '${input.baseBranch}' failed: ${wtAdd.stderr.trim() || wtAdd.stdout.trim()}`,
+          );
+        }
+        try {
+          const userCheck = await runGit(["config", "user.name"], mergeWt);
+          const mergeArgs = userCheck.stdout.trim()
+            ? ["merge", "--no-ff", "-m", input.commitMessage, input.branchName]
+            : [
+                "-c",
+                "user.name=super-work",
+                "-c",
+                "user.email=super-work@local",
+                "merge",
+                "--no-ff",
+                "-m",
+                input.commitMessage,
+                input.branchName,
+              ];
+          const wtMerge = await runGit(mergeArgs, mergeWt);
+          if (wtMerge.exitCode !== 0) {
+            await runGit(["merge", "--abort"], mergeWt);
+            throw new Error(
+              `git merge into '${input.baseBranch}' failed: ${wtMerge.stderr.trim() || wtMerge.stdout.trim()}`,
+            );
+          }
+        } finally {
+          await this.cleanupWorkspace(mergeWt, input.rootRepoPath);
+        }
       }
     }
 

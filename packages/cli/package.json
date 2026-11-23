@@ -1,0 +1,16 @@
+{
+  "name": "@super-work/cli",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "super-work": "./src/index.ts"
+  },
+  "dependencies": {
+    "@super-work/core": "workspace:*"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  }
+}

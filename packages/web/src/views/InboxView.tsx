@@ -3,11 +3,14 @@ import {
   AlertTriangle,
   Check,
   CheckCircle2,
+  DollarSign,
   Eye,
   FileCode2,
   GitMerge,
+  GitPullRequest,
   Send,
   ShieldAlert,
+  ShieldPlus,
   X,
 } from "lucide-react";
 import { formatInboxKind, formatInboxStatus, useI18n } from "../i18n.tsx";
@@ -21,6 +24,7 @@ interface InboxViewProps {
     decision: "approved" | "rejected",
     note?: string,
     deliveryAction?: "local_merge" | "push_and_create_pr",
+    options?: { expandMandate?: boolean; budgetIncreaseUsd?: number },
   ) => Promise<void>;
   onInspectTicket: (ticketId: string) => void;
 }
@@ -50,6 +54,14 @@ const KIND_STYLE: Record<InboxItem["kind"], { color: string; icon: typeof Eye }>
     color: "bg-indigo-500/15 text-indigo-300 border-indigo-500/30",
     icon: Eye,
   },
+  budget_cap: {
+    color: "bg-yellow-500/15 text-yellow-300 border-yellow-500/30",
+    icon: DollarSign,
+  },
+  pr_followup: {
+    color: "bg-cyan-500/15 text-cyan-300 border-cyan-500/30",
+    icon: GitPullRequest,
+  },
 };
 
 export function InboxView({ items, ticketsById, onResolve, onInspectTicket }: InboxViewProps) {
@@ -64,10 +76,11 @@ export function InboxView({ items, ticketsById, onResolve, onInspectTicket }: In
     id: string,
     decision: "approved" | "rejected",
     deliveryAction?: "local_merge" | "push_and_create_pr",
+    options?: { expandMandate?: boolean; budgetIncreaseUsd?: number },
   ) => {
     setBusyId(id);
     try {
-      await onResolve(id, decision, notes[id]?.trim() || undefined, deliveryAction);
+      await onResolve(id, decision, notes[id]?.trim() || undefined, deliveryAction, options);
     } finally {
       setBusyId(null);
     }
@@ -139,6 +152,22 @@ export function InboxView({ items, ticketsById, onResolve, onInspectTicket }: In
                   {item.summary}
                 </p>
 
+                {item.kind === "mandate_violation" && item.contextPayload.canExpandMandate === true && (
+                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200 flex flex-wrap items-center gap-2">
+                    <ShieldPlus className="w-3.5 h-3.5 shrink-0" />
+                    <span>{t("inbox.pendingViolationNotice")}:</span>
+                    {Array.isArray(item.contextPayload.scopeViolations) &&
+                      (item.contextPayload.scopeViolations as string[]).map((p) => (
+                        <code
+                          key={p}
+                          className="px-1.5 py-0.5 rounded bg-zinc-950/70 border border-amber-500/30 font-mono text-[10px]"
+                        >
+                          {p}
+                        </code>
+                      ))}
+                  </div>
+                )}
+
                 <div className="flex flex-wrap items-center gap-2.5">
                   <input
                     type="text"
@@ -165,14 +194,39 @@ export function InboxView({ items, ticketsById, onResolve, onInspectTicket }: In
                       {t("inbox.approveLocalMerge")}
                     </button>
                   )}
-                  <button
-                    disabled={isBusy}
-                    onClick={() => handleAction(item.id, "approved")}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium disabled:opacity-50 transition"
-                  >
-                    <Check className="w-3.5 h-3.5" />
-                    {t("inbox.approve")}
-                  </button>
+                  {item.kind === "mandate_violation" && item.contextPayload.canExpandMandate === true && (
+                    <button
+                      disabled={isBusy}
+                      onClick={() =>
+                        handleAction(item.id, "approved", undefined, { expandMandate: true })
+                      }
+                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-medium disabled:opacity-50 transition"
+                    >
+                      <ShieldPlus className="w-3.5 h-3.5" />
+                      {t("inbox.expandMandate")}
+                    </button>
+                  )}
+                  {item.kind === "budget_cap" ? (
+                    <button
+                      disabled={isBusy}
+                      onClick={() =>
+                        handleAction(item.id, "approved", undefined, { budgetIncreaseUsd: 5 })
+                      }
+                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium disabled:opacity-50 transition"
+                    >
+                      <DollarSign className="w-3.5 h-3.5" />
+                      {t("inbox.approveBudgetBoost")}
+                    </button>
+                  ) : (
+                    <button
+                      disabled={isBusy}
+                      onClick={() => handleAction(item.id, "approved")}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium disabled:opacity-50 transition"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                      {t("inbox.approve")}
+                    </button>
+                  )}
                 </div>
               </div>
             );

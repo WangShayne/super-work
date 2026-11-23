@@ -1,9 +1,15 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createDefaultMandate, getFirstStage, newId, nowIso, type Ticket } from "@super-work/core";
-import { FsArtifactStore, SqliteStateStore, tokenizeFtsQuery } from "../src/index.ts";
+import {
+  FsArtifactStore,
+  SqliteStateStore,
+  clearRepoStructureCache,
+  scanRepoStructureSummary,
+  tokenizeFtsQuery,
+} from "../src/index.ts";
 
 describe("SqliteStateStore & FsArtifactStore", () => {
   const tempDirs: string[] = [];
@@ -147,6 +153,72 @@ describe("SqliteStateStore & FsArtifactStore", () => {
     const claimed2 = await store.claimNextOutboxEntries(5, new Date(Date.now() + 1000).toISOString());
     expect(claimed2.length).toBe(0);
 
+    // Requeue interrupted processing outbox rows cleanly
+    const requeued = await store.requeueInterruptedOutboxEntries(new Date().toISOString());
+    expect(requeued).toBe(1);
+
+    // StageRun daily spend + Metrics summary (umbrella epics excluded from totalCostUsd double-counting)
+    const todayPrefix = nowIso().slice(0, 10);
+    await store.saveStageRun({
+      id: newId("run"),
+      ticketId: ticket.id,
+      stage: "implement",
+      engine: "claude",
+      status: "completed",
+      costUsd: 0.42,
+      startedAt: `${todayPrefix}T01:00:00.000Z`,
+      completedAt: `${todayPrefix}T01:00:05.000Z`,
+      summary: "Done",
+    });
+    await store.saveTicket({ ...ticket, costUsd: 0.42, status: "delivered", updatedAt: nowIso() });
+    await store.saveTicket({
+      ...ticket,
+      id: newId("epc"),
+      isEpic: true,
+      costUsd: 0.42,
+      status: "delivered",
+      updatedAt: nowIso(),
+    });
+
+    const dailySpend = await store.getDailyRepoSpendUsd(repo.id, todayPrefix);
+    expect(dailySpend).toBeCloseTo(0.42, 4);
+
+    const metrics = await store.getMetricsSummary(repo.id, todayPrefix);
+    expect(metrics.totalCostUsd).toBeCloseTo(0.42, 4);
+    expect(metrics.todayCostUsd).toBeCloseTo(0.42, 4);
+    expect(metrics.ticketCounts.delivered).toBe(1);
+    expect(metrics.deliveryRate).toBe(1);
+    expect(metrics.byEngine).toHaveLength(1);
+    expect(metrics.byEngine[0]!.engine).toBe("claude");
+    expect(metrics.byEngine[0]!.avgDurationMs).toBeCloseTo(5000, 0);
+
     store.close();
+  });
+
+  it("scans repository workspace structure cleanly while ignoring node_modules and .git", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sw-scan-struct-"));
+    tempDirs.push(dir);
+    clearRepoStructureCache();
+
+    await writeFile(
+      join(dir, "package.json"),
+      JSON.stringify({ name: "my-monorepo", workspaces: ["packages/*"] }),
+      "utf8",
+    );
+    await mkdir(join(dir, ".git"), { recursive: true });
+    await mkdir(join(dir, "node_modules/secret-pkg"), { recursive: true });
+    await mkdir(join(dir, "packages/alpha/src"), { recursive: true });
+    await writeFile(
+      join(dir, "packages/alpha/package.json"),
+      JSON.stringify({ name: "@demo/alpha" }),
+      "utf8",
+    );
+    await writeFile(join(dir, "packages/alpha/src/index.ts"), "export {};\n", "utf8");
+
+    const summary = await scanRepoStructureSummary(dir);
+    expect(summary).toContain("my-monorepo");
+    expect(summary).toContain("packages/alpha (@demo/alpha)");
+    expect(summary).not.toContain("secret-pkg");
+    expect(summary).not.toContain(".git");
   });
 });

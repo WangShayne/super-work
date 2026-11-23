@@ -55,10 +55,13 @@ bun run setup -- --auto
   - `AUTO`: Dispatches qualifying triggers straight to worker execution, interrupting only on policy gates or Watchdog escalations.
 - **Live Status Pills**: Displays `Live Sync`, `Control Brain`, `Agent Roles`, `Anti-Stall Watchdog`, `PR Delivery Queue`, and **`Worktrees` (click to inspect active/reclaimable directories and run one-click GC)**, alongside **Env & LLM** and the `中文 / EN` language switch.
 
-### 2. Three-Tier Navigation
-1. **Attention Inbox**: High-signal queue aggregating `OBSERVE PROPOSAL`, `PLAN APPROVAL`, `MANDATE VIOLATION`, `WATCHDOG ESCALATION`, `MERGE CONFLICT`, and `PR SIGNOFF`.
-2. **Mission Board**: Five-column real-time swimlane view (`Triage & Proposed` → `Queued & Planning` → `Implementing` → `Review & Outbox` → `Needs Human / Done`).
-3. **Deep Dive Drawer**: Click any ticket card or **Inspect Deep Dive →** to access `Execution Stream`, `Diff & Mandate`, `Chain of Recall`, `Outbox`, and the live Thread follow-up bar.
+### 2. Command Center Views & `@super-work/cli`
+1. **Attention Inbox**: High-signal queue aggregating `OBSERVE PROPOSAL`, `PLAN APPROVAL`, `MANDATE VIOLATION` (out-of-scope edits remain preserved for one-click **Expand Mandate & Continue**), `WATCHDOG ESCALATION`, `MERGE CONFLICT`, `PR SIGNOFF`, `BUDGET CAP`, and `PR FOLLOW-UP`.
+2. **Mission Board**: Five-column real-time swimlane view with PR links and Epic staging progress.
+3. **Metrics & Budget**: Live daily budget progress, delivery rate, cumulative cost, and per-engine latency & pass-rate metrics.
+4. **Deep Dive Drawer & `@super-work/cli`** (`bun run cli` / `super-work`):
+   - `super-work up [-d]` — Start daemon in foreground or background.
+   - `super-work status`, `dispatch <title> -d <desc> [--wait]`, `epic <title> --preview-only`, `inbox list|approve <id> [--expand-mandate]`, `logs <ticketId> [-f]` — Control tasks directly from your terminal (pass `--auto-start` if the daemon is offline).
 
 ### 3. Pipeline Templates
 
@@ -75,11 +78,11 @@ bun run setup -- --auto
 ### 1. Dispatching a Task or Decomposing an Epic DAG
 1. Click **Dispatch Task** in the header:
    - **Single Ticket**: Enter title, goal/verification notes, pipeline template, preferred engine (+ optional per-task model/effort overrides), and narrow **Mandate Allowed Paths** (out-of-scope edits or `.env*` / `*.pem` / `*.key` touches are automatically reverted and escalated).
-   - **Decompose Epic (DAG)**: Switch to the Epic tab, describe a multi-module requirement, click **Preview Epic DAG** to inspect/edit subtask scopes and dependencies, and dispatch parallelizable subtasks (downstream subtasks automatically merge upstream dependency branches).
+   - **Decompose Epic (DAG)**: Switch to the Epic tab, keep **Unified Staging Branch (`super-work/epic/<id>`)** or switch to per-subtask delivery, describe a multi-module requirement, and click **Preview Epic DAG** to inline-edit subtask templates, descriptions, allowed paths, and dependency toggles. Completed subtasks merge into the Epic staging branch, run a final Epic verification gate (with 1 auto-fixup round if needed), and open one consolidated PR or atomic merge.
 
-### 2. Testing `OBSERVE` vs `AUTO` with GitHub Polling or Simulated Events
-1. With the repository in **`OBSERVE`** mode, click **Simulate Event** (or configure `githubRepo` so `GhCliPollingSource` polls open Issues, PR comments, and failing CI checks).
-2. Include `scope:src/auth/**` in the body if you want to hint the target path scope.
+### 2. Testing `OBSERVE` vs `AUTO` with GitHub Polling & PR Follow-up Loops
+1. With the repository in **`OBSERVE`** mode, click **Simulate Event** (or configure `githubRepo` so `GhCliPollingSource` polls open Issues, PR comments/reviews, and failing CI logs via `gh run view --log-failed`).
+2. Self-comments containing `[super-work]` are automatically ignored. When an open PR receives external review feedback or CI failure, `auto` mode reactivates the original branch to fix, verify, incrementally `git push`, and comment back (capped at 3 rounds), while `observe` mode creates a `PR FOLLOW-UP` Inbox item.
 3. Review the proposed Ticket + Mandate in **Attention Inbox** and click **Approve & Continue** to spin up its isolated `git worktree`.
 
 ### 3. Inspecting Live Streams, Injecting Thread Follow-Ups & Using Chain of Recall
@@ -89,8 +92,8 @@ bun run setup -- --auto
    - **Chain of Recall**: Trace `Trigger → Thread → Inline Notes → Spill Artifacts`, click **Read Spill** to load full JSONL transcripts or diff patches on demand, or search past tickets via SQLite FTS5.
 2. **Thread Subscription Follow-Up**: Send follow-up instructions via the bottom **Inject** bar; messages route straight into the subscribed Ticket's `inlineMemory.threadUpdates`.
 
-### 4. Deterministic Verification, Watchdog Escalations & Local Merge / PR Sign-off
-- Configure **Deterministic Verification Gate Commands** (e.g. `bun run typecheck, bun test`) in **Repository Preferences** so every `implement` and `rebase` stage runs real shell checks with full `Verification Log` Spill artifacts and automatic retry feedback on failure.
+### 4. Deterministic Verification, Quotas, Daily Budget Caps & Local Merge
+- Configure **Max Concurrent Workers**, **Daily Budget Cap USD**, and **Deterministic Verification Gate Commands** (e.g. `bun run typecheck, bun test`) in **Repository Preferences**. When daily spend reaches the cap, running stages finish cleanly while queued dispatches pause and push a `BUDGET CAP` Inbox card (`+$5 Today & Resume`).
 - If a worker hits repeated identical errors, `A -> B -> A` diff oscillation, or a silence timeout, `TwoTierWatchdog` attempts automatic self-healing (`INJECT_HINT` or `SWITCH_ENGINE`) before escalating to **Attention Inbox**.
 - In `strict` mode, `outbox_pending` offers both **Approve & Continue** (PR) and **Approve & Merge Locally** in the Inbox; for already-delivered branches, click **Merge Locally to Base** inside **Deep Dive Drawer** to merge into the base branch and clean up the temporary branch.
 

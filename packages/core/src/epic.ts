@@ -140,6 +140,7 @@ export function normalizeEpicDecompositionPlan(
     title: string;
     description: string;
     defaultTemplate: PipelineTemplateId;
+    repoStructure?: string;
   },
 ): EpicDecompositionPlan {
   const subtasks =
@@ -161,7 +162,7 @@ function extractScopedPaths(text: string): string[] {
   if (explicit.length > 0) return Array.from(new Set(explicit));
 
   const pkgMatches = Array.from(
-    text.matchAll(/\b((?:packages|apps|src)\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.*-]+)?)/g),
+    text.matchAll(/\b((?:packages|apps|src|services)\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.*-]+)?)/g),
   ).map((m) => {
     const p = m[1]!.replace(/\/+$/, "");
     if (p.includes("*") || /\.[a-z0-9]+$/i.test(p)) return p;
@@ -170,12 +171,38 @@ function extractScopedPaths(text: string): string[] {
   return Array.from(new Set(pkgMatches));
 }
 
+function extractKnownModulesFromRepoStructure(repoStructure?: string): string[] {
+  if (!repoStructure) return [];
+  const matches = Array.from(
+    repoStructure.matchAll(/^\s*-\s+([a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)?)/gm),
+  ).map((m) => m[1]!.replace(/\/+$/, ""));
+  return Array.from(new Set(matches));
+}
+
+function inferPathsFromRepoStructure(text: string, knownModules: string[]): string[] {
+  if (knownModules.length === 0) return [];
+  const lower = text.toLowerCase();
+  const matched: string[] = [];
+  for (const mod of knownModules) {
+    const leaf = mod.split("/").pop() ?? mod;
+    if (
+      lower.includes(mod.toLowerCase()) ||
+      (leaf.length >= 3 && new RegExp(`\\b${leaf.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(lower))
+    ) {
+      matched.push(`${mod}/**`);
+    }
+  }
+  return Array.from(new Set(matched));
+}
+
 export function heuristicDecomposeEpic(input: {
   repo: RepoConfig;
   title: string;
   description: string;
   defaultTemplate: PipelineTemplateId;
+  repoStructure?: string;
 }): EpicDecompositionPlan {
+  const knownModules = extractKnownModulesFromRepoStructure(input.repoStructure);
   const rawLines = input.description.split(/\r?\n/);
   const listItems = rawLines
     .map((l) => l.match(/^\s*(?:\d+[.)]|[-*])\s+(.+)$/)?.[1]?.trim())
@@ -195,7 +222,9 @@ export function heuristicDecomposeEpic(input: {
     const steps = inlineItems.slice(0, 5);
     const hasCoreFirst = /core|contract|schema|type|契约|核心|接口/i.test(steps[0]!);
     const specs: EpicSubtaskSpec[] = steps.map((stepText, idx) => {
-      const paths = extractScopedPaths(stepText);
+      const explicitPaths = extractScopedPaths(stepText);
+      const paths =
+        explicitPaths.length > 0 ? explicitPaths : inferPathsFromRepoStructure(stepText, knownModules);
       const isIntegration =
         idx === steps.length - 1 &&
         /test|verify|integration|联调|测试|验收/i.test(stepText) &&
@@ -226,7 +255,11 @@ export function heuristicDecomposeEpic(input: {
   }
 
   // Module-based decomposition if distinct package/source paths are mentioned
-  const detectedPaths = extractScopedPaths(`${input.title}\n${input.description}`);
+  const detectedExplicit = extractScopedPaths(`${input.title}\n${input.description}`);
+  const detectedPaths =
+    detectedExplicit.length >= 2
+      ? detectedExplicit
+      : inferPathsFromRepoStructure(`${input.title}\n${input.description}`, knownModules);
   if (detectedPaths.length >= 2) {
     const coreIdx = detectedPaths.findIndex((p) => p.startsWith("packages/core"));
     const specs: EpicSubtaskSpec[] = detectedPaths.slice(0, 5).map((pathGlob, idx) => {
@@ -260,7 +293,40 @@ export function heuristicDecomposeEpic(input: {
     };
   }
 
-  // Default 3-stage vertical slice DAG
+  // Default vertical slice DAG (tailored to discovered repo structure if available)
+  if (knownModules.length > 0) {
+    const hasPackages = knownModules.some((m) => m.startsWith("packages/"));
+    if (!hasPackages && knownModules.includes("src")) {
+      const srcSpecs: EpicSubtaskSpec[] = [
+        {
+          key: "core",
+          title: `[Contracts & Model] ${input.title}`,
+          description: `${input.description}\n\nDefine data types and module interfaces.`,
+          template: input.defaultTemplate,
+          allowedPaths: ["src/**"],
+          dependsOnKeys: [],
+          acceptanceCriteria: ["Types and contracts compile cleanly"],
+        },
+        {
+          key: "verify",
+          title: `[Tests & Docs] ${input.title}`,
+          description: `${input.description}\n\nAdd automated tests and update documentation.`,
+          template: input.defaultTemplate,
+          allowedPaths: knownModules.some((m) => m === "test" || m === "tests")
+            ? ["test*/**", "*.md"]
+            : ["**"],
+          dependsOnKeys: ["core"],
+          acceptanceCriteria: ["Tests and docs pass verification"],
+        },
+      ];
+      return {
+        epicTitle: input.title,
+        summary: `Structure-aware 2-stage Epic DAG (${knownModules.slice(0, 5).join(", ")}).`,
+        subtasks: sanitizeEpicSubtasks(srcSpecs, input.defaultTemplate),
+      };
+    }
+  }
+
   const defaultSpecs: EpicSubtaskSpec[] = [
     {
       key: "contracts",

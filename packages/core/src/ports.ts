@@ -2,6 +2,7 @@ import type {
   ArtifactKind,
   ChainOfRecall,
   EpicDecompositionPlan,
+  EpicDeliveryMode,
   EpicSubtaskSpec,
   InboxItem,
   InboxItemStatus,
@@ -12,6 +13,7 @@ import type {
   PipelineTemplateId,
   ReasoningEffort,
   RepoConfig,
+  RepoMetricsSummary,
   SpillArtifact,
   StageKind,
   StageRun,
@@ -35,6 +37,7 @@ export interface ControlPlaneLLM {
     trigger: Trigger;
     activeTickets: Ticket[];
     relatedMemory: MemorySearchHit[];
+    repoStructure?: string;
   }): Promise<TriageProposal>;
   diagnoseWatchdog(input: {
     ticket: Ticket;
@@ -48,6 +51,7 @@ export interface ControlPlaneLLM {
     title: string;
     description: string;
     defaultTemplate: PipelineTemplateId;
+    repoStructure?: string;
   }): Promise<EpicDecompositionPlan>;
 }
 
@@ -58,11 +62,17 @@ export interface WorkerDriver {
 }
 
 export interface WorkspaceProvider {
-  prepareWorkspace(ticket: Ticket, repo: RepoConfig): Promise<{ worktreePath: string; branchName: string }>;
+  ensureBranch(rootRepoPath: string, branchName: string, startPoint: string): Promise<void>;
+  prepareWorkspace(
+    ticket: Ticket,
+    repo: RepoConfig,
+    options?: { startPoint?: string },
+  ): Promise<{ worktreePath: string; branchName: string }>;
   integrateDependencyBranches(worktreePath: string, branchNames: string[]): Promise<void>;
   getChangedFiles(worktreePath: string, baseBranch: string): Promise<string[]>;
   getDiff(worktreePath: string, baseBranch: string): Promise<string>;
   getBranchDiff(rootRepoPath: string, baseBranch: string, branchName: string): Promise<string>;
+  getRepoStructureSummary?(rootRepoPath: string): Promise<string>;
   runVerificationCommands(
     worktreePath: string,
     commands: string[],
@@ -123,6 +133,11 @@ export interface StateStore {
   listOutboxEntries(filter?: { repoId?: string; ticketId?: string; status?: OutboxStatus }): Promise<OutboxEntry[]>;
   updateOutboxEntry(entry: OutboxEntry): Promise<void>;
   claimNextOutboxEntries(limit: number, nowIso: string): Promise<OutboxEntry[]>;
+  requeueInterruptedOutboxEntries(nowIso: string): Promise<number>;
+
+  // Daily Budget & Metrics
+  getDailyRepoSpendUsd(repoId: string, utcDatePrefix: string): Promise<number>;
+  getMetricsSummary(repoId?: string, utcDatePrefix?: string): Promise<RepoMetricsSummary>;
 
   // Memory & Chain of Recall
   indexMemoryDocument(doc: {
@@ -178,6 +193,7 @@ export interface CreateEpicInput {
   title: string;
   description: string;
   template?: PipelineTemplateId;
+  epicDeliveryMode?: EpicDeliveryMode;
   preferredEngine?: WorkerEngineId;
   modelOverride?: string;
   effortOverride?: ReasoningEffort;

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
@@ -7,11 +7,16 @@ import {
   type OutboxExecutor,
   type RepoConfig,
   SuperWorkKernel,
+  type Ticket,
   type WorkerDriver,
+  createDefaultMandate,
+  getFirstStage,
+  newId,
   nowIso,
 } from "@super-work/core";
 import {
   FsArtifactStore,
+  GhCliPollingSource,
   GhOutboxExecutor,
   GitWorktreeProvider,
   type MockScenarioKind,
@@ -778,6 +783,625 @@ describe("SuperWorkKernel E2E on real Git worktrees", () => {
       { stage: "implement", isResume: true, nativeSessionId: "sess_impl_plan" },
       { stage: "review", isResume: false, nativeSessionId: undefined },
     ]);
+
+    store.close();
+  });
+
+  it("recovers interrupted tickets and processing outbox rows without losing worktree edits or session", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sw-recover-"));
+    tempDirs.push(dir);
+    const repoDir = await createTempGitRepo(dir);
+    const store = new SqliteStateStore(join(dir, "state.db"));
+    const artifacts = new FsArtifactStore(join(dir, "artifacts"));
+    const workspace = new GitWorktreeProvider(join(dir, "worktrees"));
+
+    let seenPartialFile = false;
+    let seenResumeId: string | undefined;
+    const resumeDriver: WorkerDriver = {
+      engine: "claude",
+      async isAvailable() {
+        return true;
+      },
+      async *runTurn(input) {
+        const ts = nowIso();
+        seenResumeId = input.nativeSessionId;
+        seenPartialFile = await Bun.file(join(input.worktreePath, "src/partial.ts")).exists();
+        yield { type: "completed", summary: "Recovered and finished", costUsd: 0.02, timestamp: ts };
+      },
+    };
+
+    const kernel = new SuperWorkKernel({
+      stateStore: store,
+      artifactStore: artifacts,
+      workspace,
+      llm: makeTestLlm(),
+      drivers: [resumeDriver],
+      outboxExecutor: new GhOutboxExecutor(workspace),
+    });
+
+    const ts = nowIso();
+    const repo: RepoConfig = {
+      id: "repo_rec",
+      name: "rec-demo",
+      rootPath: repoDir,
+      baseBranch: "main",
+      mode: "auto",
+      defaultTemplate: "fast",
+      preferredImplementEngine: "claude",
+      preferredReviewEngine: "claude",
+      defaultDeliveryChannel: "local_merge",
+      createdAt: ts,
+      updatedAt: ts,
+    };
+    await store.upsertRepo(repo);
+
+    // Prepare interrupted ticket with partial worktree progress & running StageRun
+    await store.upsertThread({
+      id: "thr_rec",
+      repoId: repo.id,
+      threadKey: "rec:1",
+      subscribedTicketId: "tkt_rec_1",
+      metadata: {},
+      createdAt: ts,
+      updatedAt: ts,
+    });
+    const baseTicket: Ticket = {
+      id: "tkt_rec_1",
+      repoId: repo.id,
+      threadId: "thr_rec",
+      sourceTriggerId: "trg_rec",
+      title: "Interrupted work",
+      description: "Resume seamlessly",
+      status: "implementing",
+      template: "fast",
+      currentStage: "implement",
+      stageRetries: 0,
+      mandate: createDefaultMandate({ allowedPaths: ["src/**"] }),
+      dependsOn: [],
+      nativeSessions: { claude: "sess_crash_1" },
+      preferredEngine: "claude",
+      inlineMemory: {
+        goal: "Resume seamlessly",
+        acceptanceCriteria: [],
+        stageNotes: [],
+        threadUpdates: [],
+      },
+      costUsd: 0,
+      priority: 1,
+      createdAt: ts,
+      updatedAt: ts,
+    };
+    const ws = await workspace.prepareWorkspace(baseTicket, repo);
+    await mkdir(join(ws.worktreePath, "src"), { recursive: true });
+    await writeFile(join(ws.worktreePath, "src/partial.ts"), "export const partial = true;\n", "utf8");
+    await store.saveTicket({ ...baseTicket, worktreePath: ws.worktreePath, branchName: ws.branchName });
+    await store.saveStageRun({
+      id: "run_orphan_1",
+      ticketId: baseTicket.id,
+      stage: "implement",
+      engine: "claude",
+      status: "running",
+      costUsd: 0,
+      startedAt: ts,
+    });
+    await store.enqueueOutbox({
+      id: "obx_stuck_1",
+      repoId: repo.id,
+      ticketId: baseTicket.id,
+      action: "comment_pr",
+      idempotencyKey: "stuck_1",
+      payload: { body: "orphan" },
+      status: "processing",
+      attempts: 0,
+      nextAttemptAt: ts,
+      createdAt: ts,
+      updatedAt: ts,
+    });
+
+    const recovery = await kernel.recoverInterruptedRuns();
+    expect(recovery.recoveredTickets).toBe(1);
+    expect(recovery.requeuedOutbox).toBe(1);
+
+    const recoveredTicket = await store.getTicket(baseTicket.id);
+    expect(recoveredTicket?.status).toBe("queued");
+    expect(recoveredTicket?.stageRetries).toBe(0);
+    expect(recoveredTicket?.nativeSessions.claude).toBe("sess_crash_1");
+    expect((await store.getStageRun("run_orphan_1"))?.status).toBe("aborted");
+    expect((await store.getOutboxEntry("obx_stuck_1"))?.status).toBe("pending");
+
+    await kernel.runUntilIdle();
+    expect(seenPartialFile).toBe(true);
+    expect(seenResumeId).toBe("sess_crash_1");
+    expect((await store.getTicket(baseTicket.id))?.status).toBe("delivered");
+    expect(await Bun.file(join(repoDir, "src/partial.ts")).exists()).toBe(true);
+
+    store.close();
+  });
+
+  it("preserves out-of-scope edits on mandate_violation, supports zero-reburn expandMandate, and reverts on reject", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sw-mandate-expand-"));
+    tempDirs.push(dir);
+    const repoDir = await createTempGitRepo(dir);
+    const store = new SqliteStateStore(join(dir, "state.db"));
+    const artifacts = new FsArtifactStore(join(dir, "artifacts"));
+    const workspace = new GitWorktreeProvider(join(dir, "worktrees"));
+
+    let turnCount = 0;
+    const scopeCrossingDriver: WorkerDriver = {
+      engine: "claude",
+      async isAvailable() {
+        return true;
+      },
+      async *runTurn(input) {
+        turnCount += 1;
+        await mkdir(join(input.worktreePath, "src"), { recursive: true });
+        await mkdir(join(input.worktreePath, "docs"), { recursive: true });
+        await writeFile(
+          join(input.worktreePath, `src/${input.ticketId}.ts`),
+          "export const code = 1;\n",
+          "utf8",
+        );
+        await writeFile(
+          join(input.worktreePath, `docs/${input.ticketId}.md`),
+          `# Guide for ${input.ticketId}\n`,
+          "utf8",
+        );
+        yield { type: "completed", summary: "Edited src + docs", costUsd: 0.01, timestamp: nowIso() };
+      },
+    };
+
+    const kernel = new SuperWorkKernel({
+      stateStore: store,
+      artifactStore: artifacts,
+      workspace,
+      llm: makeTestLlm(),
+      drivers: [scopeCrossingDriver],
+      outboxExecutor: new GhOutboxExecutor(workspace),
+    });
+
+    const ts = nowIso();
+    await store.upsertRepo({
+      id: "repo_exp",
+      name: "exp-demo",
+      rootPath: repoDir,
+      baseBranch: "main",
+      mode: "auto",
+      defaultTemplate: "fast",
+      preferredImplementEngine: "claude",
+      preferredReviewEngine: "claude",
+      defaultDeliveryChannel: "local_merge",
+      createdAt: ts,
+      updatedAt: ts,
+    });
+
+    // Case 1: Approve with expandMandate -> delivers without a second Worker turn
+    const tExpand = await kernel.createDirectTicket({
+      repoId: "repo_exp",
+      title: "Feature + doc",
+      description: "Write src/code.ts and docs/guide.md",
+      template: "fast",
+      allowedPaths: ["src/**"],
+      preferredEngine: "claude",
+    });
+    await kernel.runUntilIdle();
+    expect(turnCount).toBe(1);
+
+    const paused = await store.getTicket(tExpand.id);
+    expect(paused?.status).toBe("needs_human");
+    expect(paused?.pendingViolationPaths).toEqual([`docs/${tExpand.id}.md`]);
+    expect(await Bun.file(join(paused!.worktreePath!, `docs/${tExpand.id}.md`)).exists()).toBe(true);
+
+    const inbox = await store.listInboxItems({ ticketId: tExpand.id, status: "pending" });
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0]!.contextPayload.canExpandMandate).toBe(true);
+
+    await kernel.resolveInboxItem(inbox[0]!.id, "approved", "Allow docs", {
+      expandMandate: true,
+    });
+    await kernel.runUntilIdle();
+
+    expect(turnCount).toBe(1); // Zero extra worker turns consumed!
+    expect((await store.getTicket(tExpand.id))?.status).toBe("delivered");
+    expect(await Bun.file(join(repoDir, `docs/${tExpand.id}.md`)).exists()).toBe(true);
+
+    // Case 2: Reject pending violation -> reverts out-of-scope file and cancels
+    const tReject = await kernel.createDirectTicket({
+      repoId: "repo_exp",
+      title: "Reject doc change",
+      description: "Will reject out-of-scope edit",
+      template: "fast",
+      allowedPaths: ["src/**"],
+      preferredEngine: "claude",
+    });
+    await kernel.runUntilIdle();
+    const rejPaused = await store.getTicket(tReject.id);
+    expect(rejPaused?.status).toBe("needs_human");
+    const rejInbox = await store.listInboxItems({ ticketId: tReject.id, status: "pending" });
+    await kernel.resolveInboxItem(rejInbox[0]!.id, "rejected", "Do not modify docs");
+    expect(await Bun.file(join(rejPaused!.worktreePath!, `docs/${tReject.id}.md`)).exists()).toBe(false);
+    expect((await store.getTicket(tReject.id))?.status).toBe("cancelled");
+
+    store.close();
+  });
+
+  it("executes unified Epic final gate with 1-round integration fixup and atomic local_merge", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sw-epic-unified-"));
+    tempDirs.push(dir);
+    const repoDir = await createTempGitRepo(dir);
+    const store = new SqliteStateStore(join(dir, "state.db"));
+    const artifacts = new FsArtifactStore(join(dir, "artifacts"));
+    const workspace = new GitWorktreeProvider(join(dir, "worktrees"));
+
+    let fixupCalled = 0;
+    const unifiedDriver: WorkerDriver = {
+      engine: "claude",
+      async isAvailable() {
+        return true;
+      },
+      async *runTurn(input) {
+        if (input.ticketId.startsWith("epc_")) {
+          fixupCalled += 1;
+          await writeFile(join(input.worktreePath, "integrated.ok"), "fixed-integration\n", "utf8");
+          yield { type: "completed", summary: "Fixed Epic integration", costUsd: 0.04, timestamp: nowIso() };
+          return;
+        }
+        const header = input.prompt.split("\n").find((l) => l.startsWith("Ticket:")) ?? input.prompt;
+        if (header.includes("[ModA]")) {
+          await mkdir(join(input.worktreePath, "packages/a"), { recursive: true });
+          await writeFile(join(input.worktreePath, "packages/a/a.ts"), "export const a = 1;\n", "utf8");
+        } else {
+          await mkdir(join(input.worktreePath, "packages/b"), { recursive: true });
+          await writeFile(join(input.worktreePath, "packages/b/b.ts"), "export const b = 2;\n", "utf8");
+        }
+        yield { type: "completed", summary: "Subtask done", costUsd: 0.02, timestamp: nowIso() };
+      },
+    };
+
+    const kernel = new SuperWorkKernel({
+      stateStore: store,
+      artifactStore: artifacts,
+      workspace,
+      llm: makeTestLlm(),
+      drivers: [unifiedDriver],
+      outboxExecutor: new GhOutboxExecutor(workspace),
+    });
+
+    const ts = nowIso();
+    // Fails ONLY once both packages/a/a.ts and packages/b/b.ts exist on staging without integrated.ok
+    await store.upsertRepo({
+      id: "repo_uni",
+      name: "uni-demo",
+      rootPath: repoDir,
+      baseBranch: "main",
+      mode: "auto",
+      defaultTemplate: "fast",
+      preferredImplementEngine: "claude",
+      preferredReviewEngine: "claude",
+      defaultDeliveryChannel: "local_merge",
+      verificationCommands: [
+        "node -e \"const fs=require('fs'); if(fs.existsSync('packages/a/a.ts') && fs.existsSync('packages/b/b.ts') && !fs.existsSync('integrated.ok')) process.exit(1);\"",
+      ],
+      createdAt: ts,
+      updatedAt: ts,
+    });
+
+    const { epic, subtasks } = await kernel.createEpic({
+      repoId: "repo_uni",
+      title: "Unified Staging Epic",
+      description: "Parallel modules requiring cross-module integration marker",
+      template: "fast",
+      epicDeliveryMode: "unified",
+      preferredEngine: "claude",
+      subtasks: [
+        {
+          key: "mod_a",
+          title: "[ModA] Build module A",
+          description: "Build packages/a",
+          template: "fast",
+          allowedPaths: ["packages/a/**"],
+          dependsOnKeys: [],
+          acceptanceCriteria: ["A ready"],
+        },
+        {
+          key: "mod_b",
+          title: "[ModB] Build module B",
+          description: "Build packages/b",
+          template: "fast",
+          allowedPaths: ["packages/b/**"],
+          dependsOnKeys: [],
+          acceptanceCriteria: ["B ready"],
+        },
+      ],
+    });
+
+    await kernel.runUntilIdle();
+
+    expect(fixupCalled).toBe(1);
+    for (const sub of subtasks) {
+      expect((await store.getTicket(sub.id))?.status).toBe("delivered");
+      // Individual subtasks merged into Epic staging, not separate Outbox PRs
+      expect(await store.listOutboxEntries({ ticketId: sub.id })).toHaveLength(0);
+    }
+
+    const finalEpic = await store.getTicket(epic.id);
+    expect(finalEpic?.status).toBe("delivered");
+    const epicOutbox = await store.listOutboxEntries({ ticketId: epic.id });
+    expect(epicOutbox).toHaveLength(1);
+    expect(epicOutbox[0]!.action).toBe("local_merge");
+    expect(epicOutbox[0]!.status).toBe("sent");
+
+    // Verify all files + integration fixup landed atomically in main
+    expect(await Bun.file(join(repoDir, "packages/a/a.ts")).exists()).toBe(true);
+    expect(await Bun.file(join(repoDir, "packages/b/b.ts")).exists()).toBe(true);
+    expect(await Bun.file(join(repoDir, "integrated.ok")).exists()).toBe(true);
+
+    store.close();
+  });
+
+  it("enforces dailyBudgetUsd soft-boundary fuse and resumes after budget_cap Inbox approval", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sw-budget-cap-"));
+    tempDirs.push(dir);
+    const repoDir = await createTempGitRepo(dir);
+    const store = new SqliteStateStore(join(dir, "state.db"));
+    const artifacts = new FsArtifactStore(join(dir, "artifacts"));
+    const workspace = new GitWorktreeProvider(join(dir, "worktrees"));
+
+    const costDriver: WorkerDriver = {
+      engine: "claude",
+      async isAvailable() {
+        return true;
+      },
+      async *runTurn(input) {
+        await mkdir(join(input.worktreePath, "src"), { recursive: true });
+        await writeFile(join(input.worktreePath, `src/${input.ticketId}.ts`), "export const ok = 1;\n", "utf8");
+        yield { type: "completed", summary: "Done", costUsd: 0.08, timestamp: nowIso() };
+      },
+    };
+
+    const kernel = new SuperWorkKernel({
+      stateStore: store,
+      artifactStore: artifacts,
+      workspace,
+      llm: makeTestLlm(),
+      drivers: [costDriver],
+      outboxExecutor: new GhOutboxExecutor(workspace),
+    });
+
+    const ts = nowIso();
+    await store.upsertRepo({
+      id: "repo_cap",
+      name: "cap-demo",
+      rootPath: repoDir,
+      baseBranch: "main",
+      mode: "auto",
+      defaultTemplate: "fast",
+      preferredImplementEngine: "claude",
+      preferredReviewEngine: "claude",
+      maxConcurrentWorkers: 1,
+      dailyBudgetUsd: 0.05,
+      createdAt: ts,
+      updatedAt: ts,
+    });
+
+    const t1 = await kernel.createDirectTicket({
+      repoId: "repo_cap",
+      title: "First task",
+      description: "Runs under cap before spend exceeds",
+      template: "fast",
+      allowedPaths: ["src/**"],
+      preferredEngine: "claude",
+    });
+    const t2 = await kernel.createDirectTicket({
+      repoId: "repo_cap",
+      title: "Second task",
+      description: "Paused by daily budget cap",
+      template: "fast",
+      allowedPaths: ["src/**"],
+      preferredEngine: "claude",
+    });
+
+    await kernel.runUntilIdle();
+
+    expect((await store.getTicket(t1.id))?.status).toBe("delivered");
+    expect((await store.getTicket(t2.id))?.status).toBe("queued");
+
+    const capInbox = await store.listInboxItems({ repoId: "repo_cap", status: "pending" });
+    expect(capInbox).toHaveLength(1);
+    expect(capInbox[0]!.kind).toBe("budget_cap");
+
+    await kernel.resolveInboxItem(capInbox[0]!.id, "approved", "Increase daily cap", {
+      budgetIncreaseUsd: 5,
+    });
+    await kernel.runUntilIdle();
+    expect((await store.getTicket(t2.id))?.status).toBe("delivered");
+
+    store.close();
+  });
+
+  it("handles full GitHub PR follow-up loop, bot-comment filtering, CI log ingestion, and 3-round cap", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sw-gh-pr-loop-"));
+    tempDirs.push(dir);
+    const bareDir = join(dir, "remote.git");
+    await runGit(["init", "--bare", bareDir], dir);
+    const repoDir = await createTempGitRepo(dir);
+    await runGit(["remote", "add", "origin", bareDir], repoDir);
+    await runGit(["push", "-u", "origin", "main"], repoDir);
+
+    const ghLogPath = join(dir, "gh-calls.log");
+    const ghStatePath = join(dir, "gh-state.json");
+    await writeFile(
+      ghStatePath,
+      JSON.stringify({ prCreated: false, comments: [], failedChecks: [], branch: "" }),
+      "utf8",
+    );
+
+    const mockGhPath = join(dir, "mock-gh.ts");
+    await writeFile(
+      mockGhPath,
+      `#!/usr/bin/env bun
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(ghLogPath)}, JSON.stringify(args) + "\\n");
+const state = JSON.parse(readFileSync(${JSON.stringify(ghStatePath)}, "utf8"));
+if (args[0] === "auth" && args[1] === "status") process.exit(0);
+if (args[0] === "issue" && args[1] === "list") { console.log("[]"); process.exit(0); }
+if (args[0] === "pr" && args[1] === "create") {
+  const headIdx = args.indexOf("--head");
+  state.prCreated = true;
+  state.branch = headIdx >= 0 ? args[headIdx + 1] : state.branch;
+  writeFileSync(${JSON.stringify(ghStatePath)}, JSON.stringify(state));
+  console.log("https://github.com/acme/demo/pull/42");
+  process.exit(0);
+}
+if (args[0] === "pr" && args[1] === "list") {
+  if (!state.prCreated) { console.log("[]"); process.exit(0); }
+  console.log(JSON.stringify([{
+    number: 42,
+    url: "https://github.com/acme/demo/pull/42",
+    title: "PR Loop Feature",
+    headRefName: state.branch,
+    statusCheckRollup: state.failedChecks,
+    comments: state.comments,
+    reviews: []
+  }]));
+  process.exit(0);
+}
+if (args[0] === "pr" && args[1] === "comment") {
+  console.log("https://github.com/acme/demo/pull/42#issuecomment-bot");
+  process.exit(0);
+}
+if (args[0] === "run" && args[1] === "list") {
+  console.log(JSON.stringify([{ databaseId: 9901 }]));
+  process.exit(0);
+}
+if (args[0] === "run" && args[1] === "view") {
+  console.log("FAIL test/pr.test.ts: expected export v2");
+  process.exit(0);
+}
+process.exit(0);
+`,
+      "utf8",
+    );
+    await chmod(mockGhPath, 0o755);
+
+    const store = new SqliteStateStore(join(dir, "state.db"));
+    const artifacts = new FsArtifactStore(join(dir, "artifacts"));
+    const workspace = new GitWorktreeProvider(join(dir, "worktrees"));
+
+    let rounds = 0;
+    const prDriver: WorkerDriver = {
+      engine: "claude",
+      async isAvailable() {
+        return true;
+      },
+      async *runTurn(input) {
+        rounds += 1;
+        await mkdir(join(input.worktreePath, "src"), { recursive: true });
+        await writeFile(
+          join(input.worktreePath, "src/feature.ts"),
+          `export const rev = ${rounds};\n`,
+          "utf8",
+        );
+        yield { type: "completed", summary: `Commit round ${rounds}`, costUsd: 0.01, timestamp: nowIso() };
+      },
+    };
+
+    const kernel = new SuperWorkKernel({
+      stateStore: store,
+      artifactStore: artifacts,
+      workspace,
+      llm: makeTestLlm(),
+      drivers: [prDriver],
+      outboxExecutor: new GhOutboxExecutor(workspace, mockGhPath),
+    });
+
+    const ts = nowIso();
+    await store.upsertRepo({
+      id: "repo_pr",
+      name: "pr-demo",
+      rootPath: repoDir,
+      baseBranch: "main",
+      githubRepo: "acme/demo",
+      mode: "auto",
+      defaultTemplate: "standard",
+      preferredImplementEngine: "claude",
+      preferredReviewEngine: "claude",
+      autoCleanupWorktree: true,
+      createdAt: ts,
+      updatedAt: ts,
+    });
+
+    const ticket = await kernel.createDirectTicket({
+      repoId: "repo_pr",
+      title: "PR Loop Feature",
+      description: "Implement initial PR",
+      template: "fast",
+      allowedPaths: ["src/**"],
+      preferredEngine: "claude",
+    });
+
+    await kernel.runUntilIdle();
+
+    const afterPr = await store.getTicket(ticket.id);
+    expect(afterPr?.status).toBe("delivered");
+    expect(afterPr?.prNumber).toBe(42);
+    expect(afterPr?.prUrl).toBe("https://github.com/acme/demo/pull/42");
+    expect(afterPr?.worktreePath).toBeUndefined(); // cleaned after initial delivery
+
+    const poller = new GhCliPollingSource(kernel, 60_000, mockGhPath);
+
+    // Phase 2: Poller sees bot [super-work] comment (ignored!) + human comment + CI failure (with log!)
+    await writeFile(
+      ghStatePath,
+      JSON.stringify({
+        prCreated: true,
+        branch: afterPr!.branchName!,
+        failedChecks: [{ name: "ci-test", conclusion: "FAILURE" }],
+        comments: [
+          { id: "c_bot", body: "[super-work] Automated summary reply", createdAt: ts },
+          { id: "c_human", body: "Please update feature.ts for CI", createdAt: ts },
+        ],
+      }),
+      "utf8",
+    );
+
+    const ingested = await poller.pollOnce();
+    expect(ingested).toBe(2); // CI failure + human comment (bot comment skipped)
+    await kernel.runUntilIdle();
+
+    const afterFollowup = await store.getTicket(ticket.id);
+    expect(afterFollowup?.status).toBe("delivered");
+    expect(afterFollowup?.prAutoFollowupCount).toBe(1);
+    expect(afterFollowup?.inlineMemory.threadUpdates.some((u) => u.message.includes("FAIL test/pr.test.ts"))).toBe(true);
+
+    // Ensure `gh pr create` ran ONLY once, while `gh pr comment` ran on follow-up push!
+    const ghCalls = (await readFile(ghLogPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as string[]);
+    const prCreates = ghCalls.filter((c) => c[0] === "pr" && c[1] === "create");
+    const prComments = ghCalls.filter((c) => c[0] === "pr" && c[1] === "comment");
+    expect(prCreates).toHaveLength(1);
+    expect(prComments.length).toBeGreaterThanOrEqual(1);
+
+    // Phase 3: Enforce 3-round automatic PR follow-up cap
+    for (let round = 2; round <= 4; round++) {
+      await kernel.ingestTrigger({
+        repoId: "repo_pr",
+        source: "github_pr",
+        externalRef: `manual_pr_comment_${round}`,
+        threadKey: `gh:acme/demo:pr:42`,
+        title: `PR comment round ${round}`,
+        rawText: `More feedback round ${round}`,
+        payload: { prNumber: 42, branch: afterPr!.branchName },
+      });
+      await kernel.runUntilIdle();
+    }
+
+    const capped = await store.getTicket(ticket.id);
+    expect(capped?.status).toBe("needs_human");
+    expect(capped?.prAutoFollowupCount).toBe(3);
+    expect(capped?.errorMessage).toContain("3");
 
     store.close();
   });

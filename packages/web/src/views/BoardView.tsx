@@ -1,4 +1,4 @@
-import { AlertCircle, CheckCircle2, Clock, Layers, Lock, Sparkles } from "lucide-react";
+import { AlertCircle, CheckCircle2, Clock, GitPullRequest, Layers, Lock, Sparkles } from "lucide-react";
 import { formatStage, formatTicketStatus, type TranslationKey, useI18n } from "../i18n.tsx";
 import type { Ticket, TicketStatus } from "../types.ts";
 
@@ -155,6 +155,12 @@ export function BoardView({ tickets, onSelectTicket }: BoardViewProps) {
                         </div>
 
                         <div className="flex flex-wrap gap-1">
+                          {tkt.prNumber && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 text-[10px] font-mono">
+                              <GitPullRequest className="w-2.5 h-2.5" />
+                              PR #{tkt.prNumber}
+                            </span>
+                          )}
                           {tkt.activeEngine && (
                             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-[10px] font-mono">
                               <Sparkles className="w-2.5 h-2.5" />

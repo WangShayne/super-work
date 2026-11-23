@@ -9,6 +9,7 @@ import type {
   CreateEpicInput,
   DeliveryChannel,
   EngineModelProfile,
+  EpicDeliveryMode,
   InboxItemStatus,
   LlmProviderPreset,
   OutboxStatus,
@@ -275,6 +276,14 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         ? body.verificationCommands.map((s) => String(s).trim()).filter(Boolean)
         : [],
       defaultDeliveryChannel: body.defaultDeliveryChannel ?? "auto_pr_or_branch",
+      maxConcurrentWorkers:
+        typeof body.maxConcurrentWorkers === "number" && body.maxConcurrentWorkers > 0
+          ? Math.floor(body.maxConcurrentWorkers)
+          : undefined,
+      dailyBudgetUsd:
+        typeof body.dailyBudgetUsd === "number" && body.dailyBudgetUsd > 0
+          ? body.dailyBudgetUsd
+          : undefined,
       createdAt: ts,
       updatedAt: ts,
     };
@@ -288,7 +297,10 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     if (!existing) {
       return c.json({ error: "Repository not found" }, 404);
     }
-    const patch = (await c.req.json()) as Partial<RepoConfig>;
+    const patch = (await c.req.json()) as Partial<RepoConfig> & {
+      maxConcurrentWorkers?: number | null;
+      dailyBudgetUsd?: number | null;
+    };
     const updated: RepoConfig = {
       ...existing,
       ...patch,
@@ -307,12 +319,31 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         (patch.defaultDeliveryChannel as DeliveryChannel | undefined) ??
         existing.defaultDeliveryChannel ??
         "auto_pr_or_branch",
+      maxConcurrentWorkers:
+        patch.maxConcurrentWorkers !== undefined
+          ? typeof patch.maxConcurrentWorkers === "number" && patch.maxConcurrentWorkers > 0
+            ? Math.floor(patch.maxConcurrentWorkers)
+            : undefined
+          : existing.maxConcurrentWorkers,
+      dailyBudgetUsd:
+        patch.dailyBudgetUsd !== undefined
+          ? typeof patch.dailyBudgetUsd === "number" && patch.dailyBudgetUsd > 0
+            ? patch.dailyBudgetUsd
+            : undefined
+          : existing.dailyBudgetUsd,
       id: existing.id,
       createdAt: existing.createdAt,
       updatedAt: nowIso(),
     };
     await stateStore.upsertRepo(updated);
     return c.json({ repo: updated });
+  });
+
+  // --- Metrics & Quota ---
+  app.get("/api/metrics", async (c) => {
+    const repoId = c.req.query("repoId") || undefined;
+    const metrics = await stateStore.getMetricsSummary(repoId);
+    return c.json({ metrics });
   });
 
   // --- Triggers ---
@@ -523,6 +554,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         title: body.title,
         description: body.description,
         template: body.template,
+        epicDeliveryMode: body.epicDeliveryMode as EpicDeliveryMode | undefined,
         preferredEngine: body.preferredEngine,
         modelOverride: body.modelOverride,
         effortOverride: body.effortOverride,
@@ -565,12 +597,16 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       decision?: "approved" | "rejected";
       note?: string;
       deliveryAction?: "local_merge" | "push_and_create_pr";
+      expandMandate?: boolean;
+      budgetIncreaseUsd?: number;
     };
     if (body.decision !== "approved" && body.decision !== "rejected") {
       return c.json({ error: "decision must be 'approved' or 'rejected'" }, 400);
     }
     const result = await kernel.resolveInboxItem(id, body.decision, body.note, {
       deliveryAction: body.deliveryAction,
+      expandMandate: body.expandMandate,
+      budgetIncreaseUsd: body.budgetIncreaseUsd,
     });
     void kernel.tick();
     void kernel.outbox.processDueEntries();

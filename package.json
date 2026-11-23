@@ -1,14 +1,18 @@
 {
   "name": "super-work",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
+  "bin": {
+    "super-work": "./packages/cli/src/index.ts"
+  },
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
     "dev": "bun run scripts/dev.ts",
     "setup": "bun run scripts/setup.ts",
+    "cli": "bun run packages/cli/src/index.ts",
     "dev:server": "bun --watch packages/server/src/index.ts",
     "dev:web": "bun run --cwd packages/web dev",
     "build": "bun run --cwd packages/web build",

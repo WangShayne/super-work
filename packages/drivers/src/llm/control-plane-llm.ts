@@ -203,10 +203,12 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
     trigger: Trigger;
     activeTickets: Ticket[];
     relatedMemory: MemorySearchHit[];
+    repoStructure?: string;
   }): Promise<TriageProposal> {
     const sys = [
       "You are the Super-agent MasterAssessor / Router.",
       "Decide whether an incoming repository event warrants creating a coding Ticket.",
+      "Prefer exact module paths from repoStructure for allowedPaths when available.",
       "Output ONLY valid JSON matching the schema:",
       JSON.stringify(TRIAGE_SCHEMA),
     ].join("\n");
@@ -216,6 +218,7 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
         name: input.repo.name,
         defaultTemplate: input.repo.defaultTemplate,
       },
+      repoStructure: input.repoStructure,
       trigger: {
         source: input.trigger.source,
         title: input.trigger.title,
@@ -261,10 +264,11 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
     title: string;
     description: string;
     defaultTemplate: PipelineTemplateId;
+    repoStructure?: string;
   }): Promise<EpicDecompositionPlan> {
     const sys = [
       "You are the Super-agent Epic Architect.",
-      "Decompose a complex software requirement into 2-6 focused subtasks with disjoint Mandate allowedPaths whenever possible so independent workers execute concurrently in separate worktrees.",
+      "Decompose a complex software requirement into 2-6 focused subtasks with disjoint Mandate allowedPaths matching the real repository structure whenever possible so independent workers execute concurrently in separate worktrees.",
       "Only add dependsOnKeys when a subtask genuinely consumes contracts/APIs built by another subtask.",
       "Output ONLY valid JSON matching the schema:",
       JSON.stringify(EPIC_DECOMPOSITION_SCHEMA),
@@ -272,6 +276,7 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
 
     const user = JSON.stringify({
       repo: { name: input.repo.name, baseBranch: input.repo.baseBranch },
+      repoStructure: input.repoStructure,
       title: input.title,
       description: input.description,
       defaultTemplate: input.defaultTemplate,
@@ -342,13 +347,17 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
     trigger: Trigger;
     activeTickets: Ticket[];
     relatedMemory: MemorySearchHit[];
+    repoStructure?: string;
   }): Promise<TriageProposal> {
     const prompt = [
       "Evaluate this development trigger and return structured JSON triage proposal.",
       `Repo: ${input.repo.name}, DefaultTemplate: ${input.repo.defaultTemplate}`,
+      input.repoStructure ? `RepoStructure:\n${input.repoStructure}` : "",
       `Source: ${input.trigger.source}, Title: ${input.trigger.title}`,
       `Body: ${input.trigger.rawText}`,
-    ].join("\n");
+    ]
+      .filter(Boolean)
+      .join("\n");
     const parsed = await this.runClaudeJson<TriageProposal>(prompt, TRIAGE_SCHEMA);
     return normalizeTriageProposal(parsed, input.trigger, input.repo.defaultTemplate);
   }
@@ -375,13 +384,17 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
     title: string;
     description: string;
     defaultTemplate: PipelineTemplateId;
+    repoStructure?: string;
   }): Promise<EpicDecompositionPlan> {
     const prompt = [
-      "Decompose this Epic requirement into a DAG of scoped subtasks with disjoint allowedPaths where independent.",
+      "Decompose this Epic requirement into a DAG of scoped subtasks with disjoint allowedPaths aligned to the real repository structure where independent.",
       `Repo: ${input.repo.name}, DefaultTemplate: ${input.defaultTemplate}`,
+      input.repoStructure ? `RepoStructure:\n${input.repoStructure}` : "",
       `Title: ${input.title}`,
       `Description: ${input.description}`,
-    ].join("\n");
+    ]
+      .filter(Boolean)
+      .join("\n");
     const parsed = await this.runClaudeJson<Partial<EpicDecompositionPlan>>(
       prompt,
       EPIC_DECOMPOSITION_SCHEMA,
@@ -446,13 +459,17 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
     trigger: Trigger;
     activeTickets: Ticket[];
     relatedMemory: MemorySearchHit[];
+    repoStructure?: string;
   }): Promise<TriageProposal> {
     const prompt = [
       "Evaluate this development trigger and return structured JSON triage proposal.",
       `Repo: ${input.repo.name}, DefaultTemplate: ${input.repo.defaultTemplate}`,
+      input.repoStructure ? `RepoStructure:\n${input.repoStructure}` : "",
       `Source: ${input.trigger.source}, Title: ${input.trigger.title}`,
       `Body: ${input.trigger.rawText}`,
-    ].join("\n");
+    ]
+      .filter(Boolean)
+      .join("\n");
     const parsed = await this.runCodexJson<TriageProposal>(prompt, TRIAGE_SCHEMA);
     return normalizeTriageProposal(parsed, input.trigger, input.repo.defaultTemplate);
   }
@@ -479,13 +496,17 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
     title: string;
     description: string;
     defaultTemplate: PipelineTemplateId;
+    repoStructure?: string;
   }): Promise<EpicDecompositionPlan> {
     const prompt = [
-      "Decompose this Epic requirement into a DAG of scoped subtasks with disjoint allowedPaths where independent.",
+      "Decompose this Epic requirement into a DAG of scoped subtasks with disjoint allowedPaths aligned to the real repository structure where independent.",
       `Repo: ${input.repo.name}, DefaultTemplate: ${input.defaultTemplate}`,
+      input.repoStructure ? `RepoStructure:\n${input.repoStructure}` : "",
       `Title: ${input.title}`,
       `Description: ${input.description}`,
-    ].join("\n");
+    ]
+      .filter(Boolean)
+      .join("\n");
     const parsed = await this.runCodexJson<Partial<EpicDecompositionPlan>>(
       prompt,
       EPIC_DECOMPOSITION_SCHEMA,
@@ -543,6 +564,9 @@ export class HeuristicControlLLM implements ControlPlaneLLM {
   async triageTrigger(input: {
     repo: RepoConfig;
     trigger: Trigger;
+    activeTickets?: Ticket[];
+    relatedMemory?: MemorySearchHit[];
+    repoStructure?: string;
   }): Promise<TriageProposal> {
     const text = `${input.trigger.title}\n${input.trigger.rawText}`;
     const lower = text.toLowerCase();
@@ -563,11 +587,25 @@ export class HeuristicControlLLM implements ControlPlaneLLM {
 
     const explicitScope = text.match(/scope:([^\s,;]+)/i)?.[1];
     const pathMatches = text.match(/(?:packages|src|apps|docs|test)\/[a-zA-Z0-9_./*-]+/g) ?? [];
+    const structureMatches: string[] = [];
+    if (!explicitScope && pathMatches.length === 0 && input.repoStructure) {
+      const mods = Array.from(
+        input.repoStructure.matchAll(/^\s*-\s+([a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)?)/gm),
+      ).map((m) => m[1]!.replace(/\/+$/, ""));
+      for (const mod of mods) {
+        const leaf = mod.split("/").pop() ?? mod;
+        if (leaf.length >= 3 && new RegExp(`\\b${leaf.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(lower)) {
+          structureMatches.push(`${mod}/**`);
+        }
+      }
+    }
     const allowedPaths = explicitScope
       ? [explicitScope]
       : pathMatches.length > 0
         ? Array.from(new Set(pathMatches)).slice(0, 4)
-        : ["**"];
+        : structureMatches.length > 0
+          ? Array.from(new Set(structureMatches)).slice(0, 4)
+          : ["**"];
 
     const isFast =
       lower.includes("typo") ||
@@ -646,6 +684,7 @@ export class HeuristicControlLLM implements ControlPlaneLLM {
     title: string;
     description: string;
     defaultTemplate: PipelineTemplateId;
+    repoStructure?: string;
   }): Promise<EpicDecompositionPlan> {
     return heuristicDecomposeEpic(input);
   }
@@ -663,6 +702,7 @@ export class CompositeControlPlaneLLM implements ControlPlaneLLM {
     trigger: Trigger;
     activeTickets: Ticket[];
     relatedMemory: MemorySearchHit[];
+    repoStructure?: string;
   }): Promise<TriageProposal> {
     for (const provider of this.chain) {
       try {
@@ -696,6 +736,7 @@ export class CompositeControlPlaneLLM implements ControlPlaneLLM {
     title: string;
     description: string;
     defaultTemplate: PipelineTemplateId;
+    repoStructure?: string;
   }): Promise<EpicDecompositionPlan> {
     for (const provider of this.chain) {
       if (!provider.planEpicDecomposition) continue;
@@ -818,6 +859,7 @@ export class MutableControlPlaneLLM implements ControlPlaneLLM {
     trigger: Trigger;
     activeTickets: Ticket[];
     relatedMemory: MemorySearchHit[];
+    repoStructure?: string;
   }): Promise<TriageProposal> {
     return this.current.triageTrigger(input);
   }
@@ -837,6 +879,7 @@ export class MutableControlPlaneLLM implements ControlPlaneLLM {
     title: string;
     description: string;
     defaultTemplate: PipelineTemplateId;
+    repoStructure?: string;
   }): Promise<EpicDecompositionPlan> {
     if (this.current.planEpicDecomposition) {
       return this.current.planEpicDecomposition(input);

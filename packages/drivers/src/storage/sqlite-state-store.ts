@@ -1,12 +1,14 @@
 import { Database } from "bun:sqlite";
 import type {
   ChainOfRecall,
+  EngineMetricRow,
   InboxItem,
   InboxItemStatus,
   MemorySearchHit,
   OutboxEntry,
   OutboxStatus,
   RepoConfig,
+  RepoMetricsSummary,
   SpillArtifact,
   StageRun,
   StateStore,
@@ -14,6 +16,7 @@ import type {
   Ticket,
   TicketStatus,
   Trigger,
+  WorkerEngineId,
 } from "@super-work/core";
 import { TERMINAL_TICKET_STATUSES } from "@super-work/core";
 
@@ -63,6 +66,10 @@ export class SqliteStateStore implements StateStore {
         auto_cleanup_worktree INTEGER NOT NULL DEFAULT 1,
         verification_commands_json TEXT NOT NULL DEFAULT '[]',
         default_delivery_channel TEXT NOT NULL DEFAULT 'auto_pr_or_branch',
+        max_concurrent_workers INTEGER,
+        daily_budget_usd REAL,
+        daily_budget_override_usd REAL,
+        daily_budget_override_date TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -111,6 +118,11 @@ export class SqliteStateStore implements StateStore {
         parent_ticket_id TEXT,
         is_epic INTEGER NOT NULL DEFAULT 0,
         subtask_key TEXT,
+        epic_delivery_mode TEXT,
+        pr_number INTEGER,
+        pr_url TEXT,
+        pr_auto_followup_count INTEGER NOT NULL DEFAULT 0,
+        pending_violation_paths_json TEXT,
         worktree_path TEXT,
         branch_name TEXT,
         worktree_cleaned_at TEXT,
@@ -225,6 +237,18 @@ export class SqliteStateStore implements StateStore {
         "ALTER TABLE repos ADD COLUMN default_delivery_channel TEXT NOT NULL DEFAULT 'auto_pr_or_branch';",
       );
     }
+    if (!existingRepoCols.has("max_concurrent_workers")) {
+      this.db.run("ALTER TABLE repos ADD COLUMN max_concurrent_workers INTEGER;");
+    }
+    if (!existingRepoCols.has("daily_budget_usd")) {
+      this.db.run("ALTER TABLE repos ADD COLUMN daily_budget_usd REAL;");
+    }
+    if (!existingRepoCols.has("daily_budget_override_usd")) {
+      this.db.run("ALTER TABLE repos ADD COLUMN daily_budget_override_usd REAL;");
+    }
+    if (!existingRepoCols.has("daily_budget_override_date")) {
+      this.db.run("ALTER TABLE repos ADD COLUMN daily_budget_override_date TEXT;");
+    }
 
     const cols = this.db
       .query("PRAGMA table_info(tickets)")
@@ -251,6 +275,23 @@ export class SqliteStateStore implements StateStore {
     if (!existingCols.has("subtask_key")) {
       this.db.run("ALTER TABLE tickets ADD COLUMN subtask_key TEXT;");
     }
+    if (!existingCols.has("epic_delivery_mode")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN epic_delivery_mode TEXT;");
+    }
+    if (!existingCols.has("pr_number")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN pr_number INTEGER;");
+    }
+    if (!existingCols.has("pr_url")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN pr_url TEXT;");
+    }
+    if (!existingCols.has("pr_auto_followup_count")) {
+      this.db.run(
+        "ALTER TABLE tickets ADD COLUMN pr_auto_followup_count INTEGER NOT NULL DEFAULT 0;",
+      );
+    }
+    if (!existingCols.has("pending_violation_paths_json")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN pending_violation_paths_json TEXT;");
+    }
   }
 
   // --- Repos ---
@@ -260,8 +301,10 @@ export class SqliteStateStore implements StateStore {
         `INSERT INTO repos (
           id, name, root_path, base_branch, mode, github_repo, default_template,
           preferred_implement_engine, preferred_review_engine, auto_cleanup_worktree,
-          verification_commands_json, default_delivery_channel, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          verification_commands_json, default_delivery_channel,
+          max_concurrent_workers, daily_budget_usd, daily_budget_override_usd, daily_budget_override_date,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           root_path = excluded.root_path,
@@ -274,6 +317,10 @@ export class SqliteStateStore implements StateStore {
           auto_cleanup_worktree = excluded.auto_cleanup_worktree,
           verification_commands_json = excluded.verification_commands_json,
           default_delivery_channel = excluded.default_delivery_channel,
+          max_concurrent_workers = excluded.max_concurrent_workers,
+          daily_budget_usd = excluded.daily_budget_usd,
+          daily_budget_override_usd = excluded.daily_budget_override_usd,
+          daily_budget_override_date = excluded.daily_budget_override_date,
           updated_at = excluded.updated_at`,
       )
       .run(
@@ -289,6 +336,10 @@ export class SqliteStateStore implements StateStore {
         repo.autoCleanupWorktree === false ? 0 : 1,
         JSON.stringify(repo.verificationCommands ?? []),
         repo.defaultDeliveryChannel ?? "auto_pr_or_branch",
+        repo.maxConcurrentWorkers ?? null,
+        repo.dailyBudgetUsd ?? null,
+        repo.dailyBudgetOverrideUsd ?? null,
+        repo.dailyBudgetOverrideDate ?? null,
         repo.createdAt,
         repo.updatedAt,
       );
@@ -388,10 +439,11 @@ export class SqliteStateStore implements StateStore {
           id, repo_id, thread_id, source_trigger_id, title, description, status, template,
           current_stage, stage_retries, mandate_json, depends_on_json,
           parent_ticket_id, is_epic, subtask_key,
+          epic_delivery_mode, pr_number, pr_url, pr_auto_followup_count, pending_violation_paths_json,
           worktree_path, branch_name, worktree_cleaned_at,
           native_sessions_json, preferred_engine, active_engine, model_override, effort_override,
           inline_memory_json, cost_usd, priority, error_message, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           status = excluded.status,
           template = excluded.template,
@@ -402,6 +454,11 @@ export class SqliteStateStore implements StateStore {
           parent_ticket_id = excluded.parent_ticket_id,
           is_epic = excluded.is_epic,
           subtask_key = excluded.subtask_key,
+          epic_delivery_mode = excluded.epic_delivery_mode,
+          pr_number = excluded.pr_number,
+          pr_url = excluded.pr_url,
+          pr_auto_followup_count = excluded.pr_auto_followup_count,
+          pending_violation_paths_json = excluded.pending_violation_paths_json,
           worktree_path = excluded.worktree_path,
           branch_name = excluded.branch_name,
           worktree_cleaned_at = excluded.worktree_cleaned_at,
@@ -432,6 +489,11 @@ export class SqliteStateStore implements StateStore {
         ticket.parentTicketId ?? null,
         ticket.isEpic ? 1 : 0,
         ticket.subtaskKey ?? null,
+        ticket.epicDeliveryMode ?? null,
+        ticket.prNumber ?? null,
+        ticket.prUrl ?? null,
+        ticket.prAutoFollowupCount ?? 0,
+        ticket.pendingViolationPaths ? JSON.stringify(ticket.pendingViolationPaths) : null,
         ticket.worktreePath ?? null,
         ticket.branchName ?? null,
         ticket.worktreeCleanedAt ?? null,
@@ -736,6 +798,164 @@ export class SqliteStateStore implements StateStore {
     return claimTx();
   }
 
+  async requeueInterruptedOutboxEntries(nowIso: string): Promise<number> {
+    const res = this.db
+      .query(
+        "UPDATE outbox_entries SET status = 'pending', next_attempt_at = ?, updated_at = ? WHERE status = 'processing'",
+      )
+      .run(nowIso, nowIso);
+    return Number(res.changes ?? 0);
+  }
+
+  // --- Daily Budget & Metrics ---
+  async getDailyRepoSpendUsd(repoId: string, utcDatePrefix: string): Promise<number> {
+    const row = this.db
+      .query(
+        `SELECT COALESCE(SUM(sr.cost_usd), 0) AS total
+         FROM stage_runs sr
+         JOIN tickets t ON t.id = sr.ticket_id
+         WHERE t.repo_id = ? AND sr.started_at LIKE ?`,
+      )
+      .get(repoId, `${utcDatePrefix}%`) as { total: number } | null;
+    return Number(row?.total ?? 0);
+  }
+
+  async getMetricsSummary(repoId?: string, utcDatePrefix?: string): Promise<RepoMetricsSummary> {
+    const todayDate = utcDatePrefix ?? new Date().toISOString().slice(0, 10);
+
+    let todayCostUsd = 0;
+    let dailyBudgetUsd: number | undefined;
+    let effectiveDailyBudgetUsd: number | undefined;
+    if (repoId) {
+      todayCostUsd = await this.getDailyRepoSpendUsd(repoId, todayDate);
+      const repo = await this.getRepo(repoId);
+      dailyBudgetUsd = repo?.dailyBudgetUsd;
+      effectiveDailyBudgetUsd =
+        repo?.dailyBudgetOverrideDate === todayDate && repo.dailyBudgetOverrideUsd !== undefined
+          ? repo.dailyBudgetOverrideUsd
+          : repo?.dailyBudgetUsd;
+    } else {
+      const todayRow = this.db
+        .query("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM stage_runs WHERE started_at LIKE ?")
+        .get(`${todayDate}%`) as { total: number } | null;
+      todayCostUsd = Number(todayRow?.total ?? 0);
+    }
+
+    const budgetExceeded = Boolean(
+      effectiveDailyBudgetUsd !== undefined &&
+        effectiveDailyBudgetUsd > 0 &&
+        todayCostUsd >= effectiveDailyBudgetUsd,
+    );
+
+    const totalCostRow = (
+      repoId
+        ? this.db
+            .query(
+              "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM tickets WHERE COALESCE(is_epic, 0) = 0 AND repo_id = ?",
+            )
+            .get(repoId)
+        : this.db
+            .query("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM tickets WHERE COALESCE(is_epic, 0) = 0")
+            .get()
+    ) as { total: number } | null;
+    const totalCostUsd = Number(totalCostRow?.total ?? 0);
+
+    const statusRows = (
+      repoId
+        ? this.db
+            .query(
+              "SELECT status, COUNT(*) AS cnt FROM tickets WHERE COALESCE(is_epic, 0) = 0 AND repo_id = ? GROUP BY status",
+            )
+            .all(repoId)
+        : this.db
+            .query(
+              "SELECT status, COUNT(*) AS cnt FROM tickets WHERE COALESCE(is_epic, 0) = 0 GROUP BY status",
+            )
+            .all()
+    ) as Array<{ status: TicketStatus; cnt: number }>;
+
+    let total = 0;
+    let active = 0;
+    let delivered = 0;
+    let failed = 0;
+    let cancelled = 0;
+    let needsHuman = 0;
+
+    for (const r of statusRows) {
+      const count = Number(r.cnt ?? 0);
+      total += count;
+      if (r.status === "delivered") {
+        delivered += count;
+      } else if (r.status === "failed") {
+        failed += count;
+      } else if (r.status === "cancelled") {
+        cancelled += count;
+      } else {
+        active += count;
+        if (r.status === "needs_human") {
+          needsHuman += count;
+        }
+      }
+    }
+
+    const finished = delivered + failed + cancelled;
+    const deliveryRate = finished > 0 ? delivered / finished : 0;
+
+    const engineSql = `
+      SELECT
+        sr.engine AS engine,
+        COUNT(*) AS runs,
+        SUM(CASE WHEN sr.status = 'completed' THEN 1 ELSE 0 END) AS completed_runs,
+        SUM(CASE WHEN sr.status IN ('failed', 'aborted') THEN 1 ELSE 0 END) AS failed_runs,
+        COALESCE(SUM(sr.cost_usd), 0) AS total_cost_usd,
+        COALESCE(AVG(
+          CASE
+            WHEN sr.completed_at IS NOT NULL THEN
+              MAX(0, (julianday(sr.completed_at) - julianday(sr.started_at)) * 86400000.0)
+            ELSE NULL
+          END
+        ), 0) AS avg_duration_ms
+      FROM stage_runs sr
+      JOIN tickets t ON t.id = sr.ticket_id
+      ${repoId ? "WHERE t.repo_id = ?" : ""}
+      GROUP BY sr.engine
+      ORDER BY total_cost_usd DESC, runs DESC
+    `;
+
+    const engineRows = (
+      repoId ? this.db.query(engineSql).all(repoId) : this.db.query(engineSql).all()
+    ) as Array<Record<string, unknown>>;
+
+    const byEngine: EngineMetricRow[] = engineRows.map((r) => ({
+      engine: String(r.engine) as WorkerEngineId,
+      runs: Number(r.runs ?? 0),
+      completedRuns: Number(r.completed_runs ?? 0),
+      failedRuns: Number(r.failed_runs ?? 0),
+      totalCostUsd: Number(r.total_cost_usd ?? 0),
+      avgDurationMs: Number(r.avg_duration_ms ?? 0),
+    }));
+
+    return {
+      repoId,
+      todayDate,
+      todayCostUsd,
+      dailyBudgetUsd,
+      effectiveDailyBudgetUsd,
+      budgetExceeded,
+      totalCostUsd,
+      ticketCounts: {
+        total,
+        active,
+        delivered,
+        failed,
+        cancelled,
+        needsHuman,
+      },
+      deliveryRate,
+      byEngine,
+    };
+  }
+
   // --- Memory & Chain of Recall ---
   async indexMemoryDocument(doc: {
     entityType: string;
@@ -878,6 +1098,21 @@ function mapRepoRow(r: Record<string, unknown>): RepoConfig {
     defaultDeliveryChannel: (r.default_delivery_channel
       ? String(r.default_delivery_channel)
       : "auto_pr_or_branch") as RepoConfig["defaultDeliveryChannel"],
+    maxConcurrentWorkers:
+      r.max_concurrent_workers !== null && r.max_concurrent_workers !== undefined
+        ? Number(r.max_concurrent_workers)
+        : undefined,
+    dailyBudgetUsd:
+      r.daily_budget_usd !== null && r.daily_budget_usd !== undefined
+        ? Number(r.daily_budget_usd)
+        : undefined,
+    dailyBudgetOverrideUsd:
+      r.daily_budget_override_usd !== null && r.daily_budget_override_usd !== undefined
+        ? Number(r.daily_budget_override_usd)
+        : undefined,
+    dailyBudgetOverrideDate: r.daily_budget_override_date
+      ? String(r.daily_budget_override_date)
+      : undefined,
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
   };
@@ -926,6 +1161,19 @@ function mapTicketRow(r: Record<string, unknown>): Ticket {
     parentTicketId: r.parent_ticket_id ? String(r.parent_ticket_id) : undefined,
     isEpic: Boolean(r.is_epic),
     subtaskKey: r.subtask_key ? String(r.subtask_key) : undefined,
+    epicDeliveryMode: r.epic_delivery_mode
+      ? (String(r.epic_delivery_mode) as Ticket["epicDeliveryMode"])
+      : undefined,
+    prNumber:
+      r.pr_number !== null && r.pr_number !== undefined ? Number(r.pr_number) : undefined,
+    prUrl: r.pr_url ? String(r.pr_url) : undefined,
+    prAutoFollowupCount:
+      r.pr_auto_followup_count !== null && r.pr_auto_followup_count !== undefined
+        ? Number(r.pr_auto_followup_count)
+        : undefined,
+    pendingViolationPaths: r.pending_violation_paths_json
+      ? (JSON.parse(String(r.pending_violation_paths_json)) as string[])
+      : undefined,
     worktreePath: r.worktree_path ? String(r.worktree_path) : undefined,
     branchName: r.branch_name ? String(r.branch_name) : undefined,
     worktreeCleanedAt: r.worktree_cleaned_at ? String(r.worktree_cleaned_at) : undefined,

@@ -128,6 +128,12 @@ export async function startDaemon(options?: {
   });
 
   const ghPoller = new GhCliPollingSource(kernel);
+  const recovery = await kernel.recoverInterruptedRuns();
+  if (recovery.recoveredTickets > 0 || recovery.requeuedOutbox > 0) {
+    console.log(
+      `[super-work] Crash recovery: resumed ${recovery.recoveredTickets} ticket(s), requeued ${recovery.requeuedOutbox} outbox entry/entries`,
+    );
+  }
   kernel.start();
   ghPoller.start();
 
