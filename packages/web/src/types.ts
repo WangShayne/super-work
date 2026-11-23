@@ -3,6 +3,23 @@ export type WorkerEngineId = "claude" | "codex" | "opencode" | "mock";
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 export type PipelineTemplateId = "fast" | "standard" | "strict";
 export type StageKind = "plan" | "implement" | "review" | "rebase";
+export type DeliveryChannel = "auto_pr_or_branch" | "local_merge" | "github_pr";
+
+export interface EpicSubtaskSpec {
+  key: string;
+  title: string;
+  description: string;
+  template: PipelineTemplateId;
+  allowedPaths: string[];
+  dependsOnKeys: string[];
+  acceptanceCriteria: string[];
+}
+
+export interface EpicDecompositionPlan {
+  epicTitle: string;
+  summary: string;
+  subtasks: EpicSubtaskSpec[];
+}
 
 export interface EngineModelProfile {
   model?: string;
@@ -37,6 +54,8 @@ export interface RepoConfig {
   preferredImplementEngine: WorkerEngineId;
   preferredReviewEngine: WorkerEngineId;
   autoCleanupWorktree?: boolean;
+  verificationCommands?: string[];
+  defaultDeliveryChannel?: DeliveryChannel;
   createdAt: string;
   updatedAt: string;
 }
@@ -85,6 +104,9 @@ export interface Ticket {
   stageRetries: number;
   mandate: Mandate;
   dependsOn: string[];
+  parentTicketId?: string;
+  isEpic?: boolean;
+  subtaskKey?: string;
   worktreePath?: string;
   branchName?: string;
   worktreeCleanedAt?: string;
@@ -147,7 +169,7 @@ export interface OutboxEntry {
   id: string;
   repoId: string;
   ticketId: string;
-  action: "push_and_create_pr" | "comment_issue" | "comment_pr";
+  action: "push_and_create_pr" | "local_merge" | "comment_issue" | "comment_pr";
   idempotencyKey: string;
   payload: Record<string, unknown>;
   status: "awaiting_approval" | "pending" | "processing" | "sent" | "failed" | "cancelled";

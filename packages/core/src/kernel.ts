@@ -13,6 +13,7 @@ import {
 import type {
   ArtifactStore,
   ControlPlaneLLM,
+  CreateEpicInput,
   DirectTicketInput,
   IngestTriggerInput,
   KernelConfig,
@@ -23,15 +24,20 @@ import type {
 } from "./ports.ts";
 import { EventIntakeRouter, type IngestResult } from "./router.ts";
 import type {
+  EpicDecompositionPlan,
   InboxItem,
   KernelEvent,
   ManagedWorktreeItem,
+  OutboxAction,
   OutboxEntry,
+  PipelineTemplateId,
   RepoConfig,
+  SpillArtifact,
   StageKind,
   StageRun,
   SystemSetupConfig,
   Ticket,
+  VerificationRunResult,
   WatchdogDecision,
   WatchdogSignal,
   WorkerEngineId,
@@ -102,8 +108,11 @@ export class SuperWorkKernel {
       deps.outboxExecutor,
       emit,
       this.config.outboxMaxAttempts,
-      async (deliveredTicket, repo) => {
-        if (repo.autoCleanupWorktree !== false && deliveredTicket.worktreePath) {
+      async (deliveredTicket, repo, entry) => {
+        if (
+          deliveredTicket.worktreePath &&
+          (repo.autoCleanupWorktree !== false || entry.action === "local_merge")
+        ) {
           await this.cleanupTicketWorktree(deliveredTicket.id);
         }
       },
@@ -178,6 +187,19 @@ export class SuperWorkKernel {
 
   async createDirectTicket(input: DirectTicketInput): Promise<Ticket> {
     return this.router.createDirectTicket(input);
+  }
+
+  async previewEpic(input: {
+    repoId: string;
+    title: string;
+    description: string;
+    template?: PipelineTemplateId;
+  }): Promise<EpicDecompositionPlan> {
+    return this.router.previewEpic(input);
+  }
+
+  async createEpic(input: CreateEpicInput): Promise<{ epic: Ticket; subtasks: Ticket[] }> {
+    return this.router.createEpic(input);
   }
 
   async sendThreadMessage(ticketId: string, message: string): Promise<Ticket> {
@@ -338,6 +360,7 @@ export class SuperWorkKernel {
     inboxId: string,
     decision: "approved" | "rejected",
     note?: string,
+    options?: { deliveryAction?: "local_merge" | "push_and_create_pr" },
   ): Promise<{ item: InboxItem; ticket: Ticket }> {
     const item = await this.stateStore.getInboxItem(inboxId);
     if (!item) throw new Error(`Inbox item not found: ${inboxId}`);
@@ -408,6 +431,10 @@ export class SuperWorkKernel {
       for (const entry of entries) {
         const updatedEntry: OutboxEntry = {
           ...entry,
+          action:
+            decision === "approved" && options?.deliveryAction
+              ? options.deliveryAction
+              : entry.action,
           status: decision === "approved" ? "pending" : "cancelled",
           nextAttemptAt: ts,
           updatedAt: ts,
@@ -450,6 +477,7 @@ export class SuperWorkKernel {
       const repos = await this.stateStore.listRepos();
       for (const repo of repos) {
         await this.router.resolveDependenciesForWaitingTickets(repo);
+        await this.syncEpicStatuses(repo);
       }
 
       const capacity = this.config.maxConcurrentWorkers - this.activeTicketRuns.size;
@@ -457,7 +485,7 @@ export class SuperWorkKernel {
 
       const queued = await this.stateStore.listTickets({ status: "queued" });
       const candidates = queued
-        .filter((t) => !this.activeTicketRuns.has(t.id))
+        .filter((t) => !t.isEpic && !this.activeTicketRuns.has(t.id))
         .slice(0, capacity);
 
       for (const ticket of candidates) {
@@ -479,9 +507,15 @@ export class SuperWorkKernel {
         await Promise.allSettled(Array.from(this.activeTicketRuns.values()));
       }
       await this.outbox.processDueEntries();
+      const reposAfter = await this.stateStore.listRepos();
+      for (const repo of reposAfter) {
+        await this.syncEpicStatuses(repo);
+      }
 
       const waiting = await this.stateStore.listTickets({ status: "waiting_deps" });
-      const queued = await this.stateStore.listTickets({ status: "queued" });
+      const queued = (await this.stateStore.listTickets({ status: "queued" })).filter(
+        (t) => !t.isEpic,
+      );
       const pendingOutbox = await this.stateStore.listOutboxEntries({ status: "pending" });
       if (
         this.activeTicketRuns.size === 0 &&
@@ -529,7 +563,11 @@ export class SuperWorkKernel {
 
     const stage = ticket.currentStage || getFirstStage(ticket.template);
     const availableEngines = await this.getAvailableEngines();
-    const chosenEngine = selectEngineForStage(repo, stage, ticket.activeEngine);
+    const explicitEngine =
+      stage === "review"
+        ? ticket.activeEngine
+        : (ticket.activeEngine ?? ticket.preferredEngine);
+    const chosenEngine = selectEngineForStage(repo, stage, explicitEngine);
     const driver =
       this.drivers.get(chosenEngine) ??
       (availableEngines[0] ? this.drivers.get(availableEngines[0]) : undefined);
@@ -541,15 +579,30 @@ export class SuperWorkKernel {
       return;
     }
 
-    // Prepare isolated worktree workspace
+    // Prepare isolated worktree workspace (and merge upstream dependency branches on initial creation)
+    const hadWorktree = Boolean(ticket.worktreePath);
     const ws = await this.workspace.prepareWorkspace(ticket, repo);
+    if (!hadWorktree && ticket.dependsOn.length > 0) {
+      const depBranches: string[] = [];
+      for (const depId of ticket.dependsOn) {
+        const dep = await this.stateStore.getTicket(depId);
+        if (dep?.branchName) {
+          depBranches.push(dep.branchName);
+        }
+      }
+      if (depBranches.length > 0) {
+        await this.workspace.integrateDependencyBranches(ws.worktreePath, depBranches);
+      }
+    }
+    const existingSessionId =
+      stage === "review" ? undefined : ticket.nativeSessions[driver.engine];
     const stageRun: StageRun = {
       id: newId("run"),
       ticketId: ticket.id,
       stage,
       engine: driver.engine,
       status: "running",
-      nativeSessionId: ticket.nativeSessions[driver.engine],
+      nativeSessionId: existingSessionId,
       costUsd: 0,
       startedAt: nowIso(),
     };
@@ -575,7 +628,12 @@ export class SuperWorkKernel {
     }
 
     const relatedMemory = await this.stateStore.searchMemory(ticket.title, 4, repo.id);
-    const prompt = this.memory.buildWorkerPromptContext(ticket, stage, relatedMemory);
+    const prompt = this.memory.buildWorkerPromptContext(
+      ticket,
+      stage,
+      relatedMemory,
+      repo.verificationCommands,
+    );
 
     const setupConfig = await this.stateStore.getSystemSetting<SystemSetupConfig>("setup_config");
     const engineProfile =
@@ -597,7 +655,6 @@ export class SuperWorkKernel {
         ? ticket.effortOverride
         : engineProfile?.effort;
 
-    const existingSessionId = ticket.nativeSessions[driver.engine];
     const abortController = new AbortController();
     this.abortControllers.set(ticket.id, abortController);
 
@@ -920,7 +977,88 @@ export class SuperWorkKernel {
       if (typeof completedEvent?.structuredOutput?.approved === "boolean") {
         reviewApproved = completedEvent.structuredOutput.approved;
       } else {
-        reviewApproved = !/verdict:\s*rejected/i.test(summary);
+        reviewApproved = !/verdict:\s*[*_`]*\s*rejected/i.test(summary);
+      }
+    }
+
+    let verificationArtifact: SpillArtifact | undefined;
+    let verificationPassed = completedEvent?.structuredOutput?.verificationPassed ?? true;
+    if (stage === "implement") {
+      const gate = await this.runRepoVerificationGate(ticket, repo, stageRun, ws.worktreePath);
+      if (gate.artifact) {
+        verificationArtifact = gate.artifact;
+      }
+      verificationPassed = gate.passed;
+      if (!gate.passed) {
+        const failedSummary = gate.result?.summary ?? "Deterministic verification gate failed";
+        const failedRun: StageRun = {
+          ...stageRun,
+          status: "failed",
+          nativeSessionId: discoveredSessionId,
+          costUsd: stageCostUsd,
+          completedAt: nowIso(),
+          summary: failedSummary,
+        };
+        const { note: failNote } = await this.memory.recordStageSpillAndNote({
+          ticket,
+          stageRun: failedRun,
+          events: collectedEvents,
+          changedFiles,
+          diffText,
+          summary: failedSummary,
+          verificationPassed: false,
+          extraArtifacts: verificationArtifact ? [verificationArtifact] : undefined,
+        });
+        failedRun.spillTranscriptId = failNote.spillArtifactIds[0];
+        await this.stateStore.saveStageRun(failedRun);
+        this.emitEvent({
+          type: "stage_completed",
+          ticketId: ticket.id,
+          stageRun: failedRun,
+          note: failNote,
+          timestamp: failedRun.completedAt!,
+        });
+
+        const updatedFailSessions = discoveredSessionId
+          ? { ...ticket.nativeSessions, [driver.engine]: discoveredSessionId }
+          : ticket.nativeSessions;
+        const updatedFailMemory = {
+          ...ticket.inlineMemory,
+          stageNotes: [...ticket.inlineMemory.stageNotes, failNote],
+          activeHint: `Deterministic verification failed (${gate.result?.failedCommand ?? "checks"}). Fix the errors and verify locally:\n${failedSummary}`,
+        };
+
+        if (ticket.stageRetries < ticket.mandate.maxStageRetries) {
+          const retrying: Ticket = {
+            ...ticket,
+            status: "queued",
+            stageRetries: ticket.stageRetries + 1,
+            costUsd: ticket.costUsd + stageCostUsd,
+            nativeSessions: updatedFailSessions,
+            activeEngine: undefined,
+            inlineMemory: updatedFailMemory,
+            updatedAt: nowIso(),
+          };
+          await this.stateStore.saveTicket(retrying);
+          this.emitEvent({
+            type: "ticket_updated",
+            ticket: retrying,
+            timestamp: retrying.updatedAt,
+          });
+        } else {
+          await this.escalateTicket(
+            {
+              ...ticket,
+              costUsd: ticket.costUsd + stageCostUsd,
+              nativeSessions: updatedFailSessions,
+              inlineMemory: updatedFailMemory,
+            },
+            "watchdog_escalation",
+            `Deterministic verification failed after ${ticket.mandate.maxStageRetries} retries: ${gate.result?.failedCommand ?? failedSummary}`,
+            { stageRunId: failedRun.id, failedCommand: gate.result?.failedCommand },
+          );
+        }
+        return;
       }
     }
 
@@ -940,8 +1078,9 @@ export class SuperWorkKernel {
       changedFiles,
       diffText,
       summary,
-      verificationPassed: completedEvent?.structuredOutput?.verificationPassed ?? true,
+      verificationPassed,
       reviewApproved,
+      extraArtifacts: verificationArtifact ? [verificationArtifact] : undefined,
     });
     finishedRun.spillTranscriptId = note.spillArtifactIds[0];
     await this.stateStore.saveStageRun(finishedRun);
@@ -953,9 +1092,10 @@ export class SuperWorkKernel {
       timestamp: finishedRun.completedAt!,
     });
 
-    const updatedSessions = discoveredSessionId
-      ? { ...ticket.nativeSessions, [driver.engine]: discoveredSessionId }
-      : ticket.nativeSessions;
+    const updatedSessions =
+      discoveredSessionId && stage !== "review"
+        ? { ...ticket.nativeSessions, [driver.engine]: discoveredSessionId }
+        : ticket.nativeSessions;
 
     const updatedMemory = {
       ...ticket.inlineMemory,
@@ -1106,11 +1246,64 @@ export class SuperWorkKernel {
       return;
     }
 
+    const gate = await this.runRepoVerificationGate(ticket, repo, stageRun, worktreePath);
+    if (!gate.passed) {
+      const failedSummary = gate.result?.summary ?? "Post-rebase verification gate failed";
+      const failedRun: StageRun = {
+        ...stageRun,
+        status: "failed",
+        completedAt: nowIso(),
+        summary: failedSummary,
+      };
+      const changedFiles = await this.workspace.getChangedFiles(worktreePath, repo.baseBranch);
+      const { note: failNote } = await this.memory.recordStageSpillAndNote({
+        ticket,
+        stageRun: failedRun,
+        events: [],
+        changedFiles,
+        summary: failedSummary,
+        verificationPassed: false,
+        extraArtifacts: gate.artifact ? [gate.artifact] : undefined,
+      });
+      await this.stateStore.saveStageRun(failedRun);
+
+      if (ticket.stageRetries < ticket.mandate.maxStageRetries) {
+        const retryTicket: Ticket = {
+          ...ticket,
+          status: "queued",
+          currentStage: "implement",
+          stageRetries: ticket.stageRetries + 1,
+          inlineMemory: {
+            ...ticket.inlineMemory,
+            stageNotes: [...ticket.inlineMemory.stageNotes, failNote],
+            activeHint: `Post-rebase verification failed (${gate.result?.failedCommand ?? "checks"}). Fix the issue and ensure checks pass:\n${failedSummary}`,
+          },
+          updatedAt: nowIso(),
+        };
+        await this.stateStore.saveTicket(retryTicket);
+        this.emitEvent({
+          type: "ticket_updated",
+          ticket: retryTicket,
+          timestamp: retryTicket.updatedAt,
+        });
+      } else {
+        await this.escalateTicket(
+          ticket,
+          "watchdog_escalation",
+          `Post-rebase verification failed: ${failedSummary}`,
+          { stageRunId: stageRun.id },
+        );
+      }
+      return;
+    }
+
     const finishedRun: StageRun = {
       ...stageRun,
       status: "completed",
       completedAt: nowIso(),
-      summary: `Rebased cleanly onto ${repo.baseBranch}`,
+      summary: gate.artifact
+        ? `Rebased cleanly onto ${repo.baseBranch}; ${gate.result?.summary ?? "verification passed"}`
+        : `Rebased cleanly onto ${repo.baseBranch}`,
     };
     const changedFiles = await this.workspace.getChangedFiles(worktreePath, repo.baseBranch);
     const diffText = await this.workspace.getDiff(worktreePath, repo.baseBranch);
@@ -1122,6 +1315,7 @@ export class SuperWorkKernel {
       diffText,
       summary: finishedRun.summary!,
       verificationPassed: true,
+      extraArtifacts: gate.artifact ? [gate.artifact] : undefined,
     });
     finishedRun.spillTranscriptId = note.spillArtifactIds[0];
     await this.stateStore.saveStageRun(finishedRun);
@@ -1133,19 +1327,72 @@ export class SuperWorkKernel {
       timestamp: finishedRun.completedAt!,
     });
 
-    await this.enqueueDeliveryOutbox({
-      ...ticket,
-      inlineMemory: {
-        ...ticket.inlineMemory,
-        stageNotes: [...ticket.inlineMemory.stageNotes, note],
+    await this.enqueueDeliveryOutbox(
+      {
+        ...ticket,
+        inlineMemory: {
+          ...ticket.inlineMemory,
+          stageNotes: [...ticket.inlineMemory.stageNotes, note],
+        },
       },
-    });
+      repo,
+    );
   }
 
-  private async enqueueDeliveryOutbox(ticket: Ticket): Promise<void> {
+  private async runRepoVerificationGate(
+    ticket: Ticket,
+    repo: RepoConfig,
+    stageRun: StageRun,
+    worktreePath: string,
+  ): Promise<{ passed: boolean; artifact?: SpillArtifact; result?: VerificationRunResult }> {
+    const commands = (repo.verificationCommands ?? []).map((c) => c.trim()).filter(Boolean);
+    if (commands.length === 0) {
+      return { passed: true };
+    }
+
+    const result = await this.workspace.runVerificationCommands(
+      worktreePath,
+      commands,
+      ticket.mandate.maxDurationSec,
+    );
+    this.emitEvent({
+      type: "verification_completed",
+      ticketId: ticket.id,
+      stageRunId: stageRun.id,
+      result,
+      timestamp: nowIso(),
+    });
+
+    const logBody = result.results
+      .map(
+        (r) =>
+          `$ ${r.command}\n[exit=${r.exitCode}, duration=${r.durationMs}ms]\n${r.output || "(no output)"}\n`,
+      )
+      .join("\n---\n");
+
+    const artifact = await this.artifactStore.writeSpill(
+      {
+        ticketId: ticket.id,
+        stageRunId: stageRun.id,
+        kind: "test_log",
+        summary: `${result.ok ? "PASS" : "FAIL"} verification (${commands.join(" && ")})`,
+        ext: "log",
+      },
+      logBody || result.summary,
+    );
+    await this.stateStore.saveArtifact(artifact, `${result.summary}\n${logBody}`);
+
+    return { passed: result.ok, artifact, result };
+  }
+
+  private async enqueueDeliveryOutbox(ticket: Ticket, repoArg?: RepoConfig): Promise<void> {
+    const repo = repoArg ?? (await this.stateStore.getRepo(ticket.repoId));
     const template = getPipelineTemplate(ticket.template);
     const ts = nowIso();
     const needsSignoff = template.requireOutboxSignoff;
+    const defaultChannel = repo?.defaultDeliveryChannel ?? "auto_pr_or_branch";
+    const action: OutboxAction =
+      defaultChannel === "local_merge" ? "local_merge" : "push_and_create_pr";
 
     const updatedTicket: Ticket = {
       ...ticket,
@@ -1160,12 +1407,13 @@ export class SuperWorkKernel {
       id: newId("obx"),
       repoId: ticket.repoId,
       ticketId: ticket.id,
-      action: "push_and_create_pr",
-      idempotencyKey: `deliver:${ticket.id}:${ticket.branchName ?? "branch"}`,
+      action,
+      idempotencyKey: `deliver:${action}:${ticket.id}:${ticket.branchName ?? "branch"}`,
       payload: {
         title: ticket.title,
         branchName: ticket.branchName,
         worktreePath: ticket.worktreePath,
+        forceGithubPr: defaultChannel === "github_pr",
         summary: ticket.inlineMemory.stageNotes.map((n) => `[${n.stage}] ${n.summary}`).join("\n"),
       },
       status: needsSignoff ? "awaiting_approval" : "pending",
@@ -1184,13 +1432,161 @@ export class SuperWorkKernel {
         ticketId: ticket.id,
         kind: "outbox_signoff",
         status: "pending",
-        title: `Sign off PR Delivery: ${ticket.title}`,
-        summary: `Ready to deliver branch ${ticket.branchName}. Approve Outbox execution to push / create PR.`,
-        contextPayload: { outboxId: outboxEntry.id, branchName: ticket.branchName },
+        title:
+          action === "local_merge"
+            ? `Sign off Local Merge: ${ticket.title}`
+            : `Sign off PR Delivery: ${ticket.title}`,
+        summary:
+          action === "local_merge"
+            ? `Ready to merge branch ${ticket.branchName} into ${repo?.baseBranch ?? "main"}. Approve Outbox execution to merge & cleanup.`
+            : `Ready to deliver branch ${ticket.branchName}. Approve Outbox execution to push / create PR.`,
+        contextPayload: {
+          outboxId: outboxEntry.id,
+          branchName: ticket.branchName,
+          action,
+        },
         createdAt: ts,
       };
       await this.stateStore.saveInboxItem(inboxItem);
       this.emitEvent({ type: "inbox_created", item: inboxItem, timestamp: ts });
+    }
+  }
+
+  async triggerTicketDelivery(
+    ticketId: string,
+    action: "local_merge" | "push_and_create_pr",
+  ): Promise<{ ticket: Ticket; entry: OutboxEntry }> {
+    const ticket = await this.stateStore.getTicket(ticketId);
+    if (!ticket) {
+      throw new Error(`Ticket not found: ${ticketId}`);
+    }
+    if (ticket.isEpic) {
+      throw new Error("Epic umbrella tickets are delivered via their subtasks.");
+    }
+    if (!ticket.branchName) {
+      throw new Error(`Ticket ${ticketId} has no branchName to deliver.`);
+    }
+    if (ticket.status !== "delivered" && ticket.status !== "outbox_pending") {
+      throw new Error(
+        `Ticket ${ticketId} must be delivered or outbox_pending before triggering ${action} (status=${ticket.status})`,
+      );
+    }
+
+    const existingEntries = await this.stateStore.listOutboxEntries({ ticketId: ticket.id });
+    const alreadySent = existingEntries.find((e) => e.action === action && e.status === "sent");
+    if (alreadySent) {
+      return { ticket, entry: alreadySent };
+    }
+
+    const ts = nowIso();
+    const idempotencyKey = `deliver:${action}:${ticket.id}:${ticket.branchName}`;
+    const existingByKey = existingEntries.find((e) => e.idempotencyKey === idempotencyKey);
+    let entry: OutboxEntry;
+    if (existingByKey) {
+      entry = {
+        ...existingByKey,
+        status: "pending",
+        attempts: 0,
+        lastError: undefined,
+        nextAttemptAt: ts,
+        updatedAt: ts,
+      };
+      await this.stateStore.updateOutboxEntry(entry);
+    } else {
+      entry = {
+        id: newId("obx"),
+        repoId: ticket.repoId,
+        ticketId: ticket.id,
+        action,
+        idempotencyKey,
+        payload: {
+          title: ticket.title,
+          branchName: ticket.branchName,
+          worktreePath: ticket.worktreePath,
+          forceGithubPr: action === "push_and_create_pr",
+          summary: ticket.inlineMemory.stageNotes
+            .map((n) => `[${n.stage}] ${n.summary}`)
+            .join("\n"),
+        },
+        status: "pending",
+        attempts: 0,
+        nextAttemptAt: ts,
+        createdAt: ts,
+        updatedAt: ts,
+      };
+      await this.stateStore.enqueueOutbox(entry);
+    }
+    this.emitEvent({ type: "outbox_queued", entry, timestamp: ts });
+
+    await this.outbox.processDueEntries(10);
+
+    let refreshedTicket = (await this.stateStore.getTicket(ticket.id)) ?? ticket;
+    const refreshedEntry = (await this.stateStore.getOutboxEntry(entry.id)) ?? entry;
+    if (action === "local_merge" && refreshedEntry.status === "sent" && refreshedTicket.worktreePath) {
+      refreshedTicket = {
+        ...refreshedTicket,
+        worktreePath: undefined,
+        worktreeCleanedAt: refreshedTicket.worktreeCleanedAt ?? nowIso(),
+        updatedAt: nowIso(),
+      };
+      await this.stateStore.saveTicket(refreshedTicket);
+      this.emitEvent({
+        type: "ticket_updated",
+        ticket: refreshedTicket,
+        timestamp: refreshedTicket.updatedAt,
+      });
+    }
+
+    return { ticket: refreshedTicket, entry: refreshedEntry };
+  }
+
+  private async syncEpicStatuses(repo: RepoConfig): Promise<void> {
+    const repoTickets = await this.stateStore.listTickets({ repoId: repo.id });
+    const epics = repoTickets.filter((t) => t.isEpic && !isTerminalTicketStatus(t.status));
+    if (epics.length === 0) return;
+
+    for (const epic of epics) {
+      const children = repoTickets.filter((t) => t.parentTicketId === epic.id);
+      if (children.length === 0) continue;
+
+      const totalCost = children.reduce((sum, c) => sum + c.costUsd, 0);
+      const allDelivered = children.every((c) => c.status === "delivered");
+      const allCancelled = children.every((c) => c.status === "cancelled");
+      const blockedChild = children.find(
+        (c) => c.status === "needs_human" || c.status === "failed",
+      );
+
+      let nextStatus: Ticket["status"] = "implementing";
+      let nextError: string | undefined;
+      if (allDelivered) {
+        nextStatus = "delivered";
+      } else if (allCancelled) {
+        nextStatus = "cancelled";
+        nextError = "All Epic subtasks were cancelled";
+      } else if (blockedChild) {
+        nextStatus = "needs_human";
+        nextError = `Subtask ${blockedChild.subtaskKey ?? blockedChild.id} (${blockedChild.title}) requires attention: ${blockedChild.errorMessage ?? blockedChild.status}`;
+      }
+
+      if (
+        epic.status !== nextStatus ||
+        Math.abs(epic.costUsd - totalCost) > 0.0001 ||
+        epic.errorMessage !== nextError
+      ) {
+        const updated: Ticket = {
+          ...epic,
+          status: nextStatus,
+          costUsd: totalCost,
+          errorMessage: nextError,
+          updatedAt: nowIso(),
+        };
+        await this.stateStore.saveTicket(updated);
+        this.emitEvent({
+          type: "ticket_updated",
+          ticket: updated,
+          timestamp: updated.updatedAt,
+        });
+      }
     }
   }
 

@@ -16,7 +16,12 @@ import type { InboxItem, Ticket } from "../types.ts";
 interface InboxViewProps {
   items: InboxItem[];
   ticketsById: Map<string, Ticket>;
-  onResolve: (id: string, decision: "approved" | "rejected", note?: string) => Promise<void>;
+  onResolve: (
+    id: string,
+    decision: "approved" | "rejected",
+    note?: string,
+    deliveryAction?: "local_merge" | "push_and_create_pr",
+  ) => Promise<void>;
   onInspectTicket: (ticketId: string) => void;
 }
 
@@ -55,10 +60,14 @@ export function InboxView({ items, ticketsById, onResolve, onInspectTicket }: In
   const pending = items.filter((i) => i.status === "pending");
   const resolved = items.filter((i) => i.status !== "pending").slice(0, 10);
 
-  const handleAction = async (id: string, decision: "approved" | "rejected") => {
+  const handleAction = async (
+    id: string,
+    decision: "approved" | "rejected",
+    deliveryAction?: "local_merge" | "push_and_create_pr",
+  ) => {
     setBusyId(id);
     try {
-      await onResolve(id, decision, notes[id]?.trim() || undefined);
+      await onResolve(id, decision, notes[id]?.trim() || undefined, deliveryAction);
     } finally {
       setBusyId(null);
     }
@@ -146,6 +155,16 @@ export function InboxView({ items, ticketsById, onResolve, onInspectTicket }: In
                     <X className="w-3.5 h-3.5" />
                     {t("inbox.reject")}
                   </button>
+                  {item.kind === "outbox_signoff" && (
+                    <button
+                      disabled={isBusy}
+                      onClick={() => handleAction(item.id, "approved", "local_merge")}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-sky-500/40 bg-sky-500/15 hover:bg-sky-500/25 text-sky-200 text-xs font-medium disabled:opacity-50 transition"
+                    >
+                      <GitMerge className="w-3.5 h-3.5" />
+                      {t("inbox.approveLocalMerge")}
+                    </button>
+                  )}
                   <button
                     disabled={isBusy}
                     onClick={() => handleAction(item.id, "approved")}

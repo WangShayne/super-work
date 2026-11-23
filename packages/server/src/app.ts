@@ -6,10 +6,13 @@ import { streamSSE } from "hono/streaming";
 import type {
   ArtifactStore,
   CliScanReport,
+  CreateEpicInput,
+  DeliveryChannel,
   EngineModelProfile,
   InboxItemStatus,
   LlmProviderPreset,
   OutboxStatus,
+  PipelineTemplateId,
   PublicSetupStatus,
   ReasoningEffort,
   RepoConfig,
@@ -24,8 +27,16 @@ import {
   CliEnvironmentScanner,
   MutableControlPlaneLLM,
   buildControlPlaneLLMFromSetup,
+  sanitizeCliModelName,
   testControlPlaneLLMConnection,
 } from "@super-work/drivers";
+
+function normalizeSetupModel(preset: LlmProviderPreset, model?: string): string {
+  if (preset === "claude_cli" || preset === "codex_cli") {
+    return sanitizeCliModelName(model) ?? "";
+  }
+  return model?.trim() ?? "";
+}
 
 export interface ServerAppDeps {
   kernel: SuperWorkKernel;
@@ -68,6 +79,7 @@ export function toPublicSetupStatus(
     activeLlmProvider,
     config: {
       ...rest,
+      llmModel: normalizeSetupModel(cfg.llmPreset, rest.llmModel),
       hasApiKey: Boolean(llmApiKey?.trim()),
       maskedApiKey: maskApiKey(llmApiKey),
     },
@@ -186,11 +198,12 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       effort: p?.effort || undefined,
     });
 
+    const nextPreset: LlmProviderPreset = body.llmPreset ?? existing?.llmPreset ?? "heuristic";
     const nextConfig: SystemSetupConfig = {
       initialized: true,
-      llmPreset: body.llmPreset ?? existing?.llmPreset ?? "heuristic",
+      llmPreset: nextPreset,
       llmBaseUrl: body.llmBaseUrl?.trim() ?? existing?.llmBaseUrl ?? "",
-      llmModel: body.llmModel?.trim() ?? existing?.llmModel ?? "",
+      llmModel: normalizeSetupModel(nextPreset, body.llmModel ?? existing?.llmModel),
       llmEffort: body.llmEffort ?? existing?.llmEffort ?? "low",
       llmApiKey: finalApiKey,
       preferredImplementEngine:
@@ -258,6 +271,10 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       preferredImplementEngine: body.preferredImplementEngine ?? "claude",
       preferredReviewEngine: body.preferredReviewEngine ?? "codex",
       autoCleanupWorktree: body.autoCleanupWorktree ?? true,
+      verificationCommands: Array.isArray(body.verificationCommands)
+        ? body.verificationCommands.map((s) => String(s).trim()).filter(Boolean)
+        : [],
+      defaultDeliveryChannel: body.defaultDeliveryChannel ?? "auto_pr_or_branch",
       createdAt: ts,
       updatedAt: ts,
     };
@@ -282,6 +299,14 @@ export function createServerApp(deps: ServerAppDeps): Hono {
           ? patch.githubRepo.trim() || undefined
           : existing.githubRepo,
       autoCleanupWorktree: patch.autoCleanupWorktree ?? existing.autoCleanupWorktree ?? true,
+      verificationCommands:
+        patch.verificationCommands !== undefined
+          ? patch.verificationCommands.map((s) => String(s).trim()).filter(Boolean)
+          : (existing.verificationCommands ?? []),
+      defaultDeliveryChannel:
+        (patch.defaultDeliveryChannel as DeliveryChannel | undefined) ??
+        existing.defaultDeliveryChannel ??
+        "auto_pr_or_branch",
       id: existing.id,
       createdAt: existing.createdAt,
       updatedAt: nowIso(),
@@ -395,6 +420,16 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         diff = "";
       }
     }
+    if (!diff.trim()) {
+      const latestDiffArtifact = [...artifacts].reverse().find((a) => a.kind === "diff");
+      if (latestDiffArtifact) {
+        try {
+          diff = await artifactStore.readSpill(latestDiffArtifact.storageUri);
+        } catch {
+          diff = "";
+        }
+      }
+    }
 
     return c.json({
       ticket,
@@ -437,6 +472,71 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     }
   });
 
+  app.post("/api/tickets/:id/deliver", async (c) => {
+    const id = c.req.param("id");
+    const body = (await c.req.json().catch(() => ({}))) as {
+      action?: "local_merge" | "push_and_create_pr";
+    };
+    const action =
+      body.action === "push_and_create_pr" ? "push_and_create_pr" : "local_merge";
+    try {
+      const result = await kernel.triggerTicketDelivery(id, action);
+      return c.json(result);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  // --- Epic DAG Planning & Dispatch ---
+  app.post("/api/epics/preview", async (c) => {
+    const body = (await c.req.json()) as {
+      repoId?: string;
+      title?: string;
+      description?: string;
+      template?: PipelineTemplateId;
+    };
+    if (!body.repoId || !body.title || !body.description) {
+      return c.json({ error: "repoId, title, and description are required" }, 400);
+    }
+    try {
+      const plan = await kernel.previewEpic({
+        repoId: body.repoId,
+        title: body.title,
+        description: body.description,
+        template: body.template,
+      });
+      return c.json({ plan });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("Repository not found") ? 404 : 500);
+    }
+  });
+
+  app.post("/api/epics", async (c) => {
+    const body = (await c.req.json()) as Partial<CreateEpicInput>;
+    if (!body.repoId || !body.title || !body.description) {
+      return c.json({ error: "repoId, title, and description are required" }, 400);
+    }
+    try {
+      const result = await kernel.createEpic({
+        repoId: body.repoId,
+        title: body.title,
+        description: body.description,
+        template: body.template,
+        preferredEngine: body.preferredEngine,
+        modelOverride: body.modelOverride,
+        effortOverride: body.effortOverride,
+        maxCostUsdPerSubtask: body.maxCostUsdPerSubtask,
+        subtasks: body.subtasks,
+      });
+      void kernel.tick();
+      return c.json(result, 201);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("Repository not found") ? 404 : 500);
+    }
+  });
+
   // --- Worktree Lifecycle & GC ---
   app.get("/api/worktrees", async (c) => {
     const repoId = c.req.query("repoId") || undefined;
@@ -464,11 +564,14 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     const body = (await c.req.json()) as {
       decision?: "approved" | "rejected";
       note?: string;
+      deliveryAction?: "local_merge" | "push_and_create_pr";
     };
     if (body.decision !== "approved" && body.decision !== "rejected") {
       return c.json({ error: "decision must be 'approved' or 'rejected'" }, 400);
     }
-    const result = await kernel.resolveInboxItem(id, body.decision, body.note);
+    const result = await kernel.resolveInboxItem(id, body.decision, body.note, {
+      deliveryAction: body.deliveryAction,
+    });
     void kernel.tick();
     void kernel.outbox.processDueEntries();
     return c.json(result);

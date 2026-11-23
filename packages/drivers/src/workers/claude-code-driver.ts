@@ -1,5 +1,6 @@
 import type { WorkerDriver, WorkerStreamEvent, WorkerTurnInput } from "@super-work/core";
 import { nowIso } from "@super-work/core";
+import { createSanitizedClaudeEnv } from "../llm/control-plane-llm.ts";
 import { readLinesFromStream, truncateText } from "./stream-utils.ts";
 
 export function buildClaudeCliArgs(input: WorkerTurnInput): string[] {
@@ -12,13 +13,25 @@ export function buildClaudeCliArgs(input: WorkerTurnInput): string[] {
     "none",
   ];
 
-  const readOnly = input.stage === "plan" || input.stage === "review";
-  if (readOnly) {
+  if (input.stage === "plan") {
     args.push("--permission-mode", "plan", "--tools", "Read,Glob,Grep");
+  } else if (input.stage === "review") {
+    args.push(
+      "--permission-mode",
+      "acceptEdits",
+      "--tools",
+      "Read,Glob,Grep,Bash",
+      "--allowedTools",
+      "Read,Glob,Grep,Bash(git diff*),Bash(git status*),Bash(git log*),Bash(git show*),Bash(bun test*),Bash(bun run typecheck*),Bash(bun run build*),Bash(npm test*),Bash(npm run *),Bash(pnpm *),Bash(npx tsc*)",
+      "--disallowedTools",
+      "Edit,Write,Bash(git push*),Bash(git commit*),Bash(git checkout*),Bash(git reset*),Bash(gh pr *),Bash(gh issue *)",
+    );
   } else {
     args.push(
       "--permission-mode",
       "acceptEdits",
+      "--allowedTools",
+      "Bash,Read,Edit,Write,Glob,Grep",
       "--disallowedTools",
       "Bash(git push*),Bash(gh pr *),Bash(gh issue *)",
     );
@@ -144,6 +157,7 @@ export class ClaudeCodeDriver implements WorkerDriver {
       stdout: "pipe",
       stderr: "pipe",
       stdin: "ignore",
+      env: createSanitizedClaudeEnv(),
     });
 
     const onAbort = () => {

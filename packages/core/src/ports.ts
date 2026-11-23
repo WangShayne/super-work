@@ -1,12 +1,15 @@
 import type {
   ArtifactKind,
   ChainOfRecall,
+  EpicDecompositionPlan,
+  EpicSubtaskSpec,
   InboxItem,
   InboxItemStatus,
   Mandate,
   MemorySearchHit,
   OutboxEntry,
   OutboxStatus,
+  PipelineTemplateId,
   ReasoningEffort,
   RepoConfig,
   SpillArtifact,
@@ -17,6 +20,7 @@ import type {
   TicketStatus,
   TriageProposal,
   Trigger,
+  VerificationRunResult,
   WatchdogDecision,
   WatchdogSignal,
   WorkerEngineId,
@@ -39,6 +43,12 @@ export interface ControlPlaneLLM {
     recentEvents: WorkerStreamEvent[];
     availableEngines: WorkerEngineId[];
   }): Promise<WatchdogDecision>;
+  planEpicDecomposition?(input: {
+    repo: RepoConfig;
+    title: string;
+    description: string;
+    defaultTemplate: PipelineTemplateId;
+  }): Promise<EpicDecompositionPlan>;
 }
 
 export interface WorkerDriver {
@@ -49,11 +59,25 @@ export interface WorkerDriver {
 
 export interface WorkspaceProvider {
   prepareWorkspace(ticket: Ticket, repo: RepoConfig): Promise<{ worktreePath: string; branchName: string }>;
+  integrateDependencyBranches(worktreePath: string, branchNames: string[]): Promise<void>;
   getChangedFiles(worktreePath: string, baseBranch: string): Promise<string[]>;
   getDiff(worktreePath: string, baseBranch: string): Promise<string>;
   getBranchDiff(rootRepoPath: string, baseBranch: string, branchName: string): Promise<string>;
+  runVerificationCommands(
+    worktreePath: string,
+    commands: string[],
+    timeoutSec?: number,
+  ): Promise<VerificationRunResult>;
   commitAll(worktreePath: string, message: string): Promise<boolean>;
   rebaseOntoBase(worktreePath: string, baseBranch: string): Promise<{ ok: boolean; conflictSummary?: string }>;
+  mergeBranchToBase(input: {
+    rootRepoPath: string;
+    baseBranch: string;
+    branchName: string;
+    worktreePath?: string;
+    commitMessage: string;
+    deleteBranch?: boolean;
+  }): Promise<{ commitSha: string; branchCleaned: boolean }>;
   revertPaths(worktreePath: string, paths: string[]): Promise<void>;
   listWorktreeDirs(): Promise<string[]>;
   cleanupWorkspace(worktreePath: string, rootRepoPath?: string): Promise<void>;
@@ -147,6 +171,18 @@ export interface DirectTicketInput {
   effortOverride?: ReasoningEffort;
   acceptanceCriteria?: string[];
   threadKey?: string;
+}
+
+export interface CreateEpicInput {
+  repoId: string;
+  title: string;
+  description: string;
+  template?: PipelineTemplateId;
+  preferredEngine?: WorkerEngineId;
+  modelOverride?: string;
+  effortOverride?: ReasoningEffort;
+  maxCostUsdPerSubtask?: number;
+  subtasks?: EpicSubtaskSpec[];
 }
 
 export interface IngestTriggerInput {

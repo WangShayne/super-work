@@ -72,11 +72,10 @@ bun run setup -- --auto
 
 ## 3. Four Everyday Workflows
 
-### 1. Dispatching a Task with Mandate Guardrails
-1. Click **Dispatch Task** in the header.
-2. Enter title, goal/verification notes, pipeline template, and preferred engine (`claude`, `codex`, or `mock`).
-3. Narrow **Mandate Allowed Paths** (e.g. `packages/core/**, packages/drivers/**`):
-   - Any modification outside allowed paths—or inside forbidden secret files (`.env*`, `*.pem`, `*.key`)—is automatically reverted post-turn and flagged in the Attention Inbox.
+### 1. Dispatching a Task or Decomposing an Epic DAG
+1. Click **Dispatch Task** in the header:
+   - **Single Ticket**: Enter title, goal/verification notes, pipeline template, preferred engine (+ optional per-task model/effort overrides), and narrow **Mandate Allowed Paths** (out-of-scope edits or `.env*` / `*.pem` / `*.key` touches are automatically reverted and escalated).
+   - **Decompose Epic (DAG)**: Switch to the Epic tab, describe a multi-module requirement, click **Preview Epic DAG** to inspect/edit subtask scopes and dependencies, and dispatch parallelizable subtasks (downstream subtasks automatically merge upstream dependency branches).
 
 ### 2. Testing `OBSERVE` vs `AUTO` with GitHub Polling or Simulated Events
 1. With the repository in **`OBSERVE`** mode, click **Simulate Event** (or configure `githubRepo` so `GhCliPollingSource` polls open Issues, PR comments, and failing CI checks).
@@ -90,9 +89,10 @@ bun run setup -- --auto
    - **Chain of Recall**: Trace `Trigger → Thread → Inline Notes → Spill Artifacts`, click **Read Spill** to load full JSONL transcripts or diff patches on demand, or search past tickets via SQLite FTS5.
 2. **Thread Subscription Follow-Up**: Send follow-up instructions via the bottom **Inject** bar; messages route straight into the subscribed Ticket's `inlineMemory.threadUpdates`.
 
-### 4. Handling Watchdog Escalations & Strict PR Sign-off
-- If a worker hits repeated identical errors, `A -> B -> A` diff oscillation, or a silence timeout, `TwoTierWatchdog` attempts automatic self-healing (`INJECT_HINT` or `SWITCH_ENGINE`, e.g., `claude` → `codex`) before escalating to **Attention Inbox**.
-- In `strict` mode, after a clean rebase, delivery pauses at `outbox_pending` until you approve `PR SIGNOFF` in the Inbox, triggering idempotent `Transactional Outbox` push & PR creation.
+### 4. Deterministic Verification, Watchdog Escalations & Local Merge / PR Sign-off
+- Configure **Deterministic Verification Gate Commands** (e.g. `bun run typecheck, bun test`) in **Repository Preferences** so every `implement` and `rebase` stage runs real shell checks with full `Verification Log` Spill artifacts and automatic retry feedback on failure.
+- If a worker hits repeated identical errors, `A -> B -> A` diff oscillation, or a silence timeout, `TwoTierWatchdog` attempts automatic self-healing (`INJECT_HINT` or `SWITCH_ENGINE`) before escalating to **Attention Inbox**.
+- In `strict` mode, `outbox_pending` offers both **Approve & Continue** (PR) and **Approve & Merge Locally** in the Inbox; for already-delivered branches, click **Merge Locally to Base** inside **Deep Dive Drawer** to merge into the base branch and clean up the temporary branch.
 
 ---
 

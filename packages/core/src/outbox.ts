@@ -8,7 +8,11 @@ export class OutboxProcessor {
     private readonly executor: OutboxExecutor,
     private readonly emit: (event: KernelEvent) => void,
     private readonly maxAttempts = 5,
-    private readonly onTicketDelivered?: (ticket: Ticket, repo: RepoConfig) => Promise<void>,
+    private readonly onTicketDelivered?: (
+      ticket: Ticket,
+      repo: RepoConfig,
+      entry: OutboxEntry,
+    ) => Promise<void>,
   ) {}
 
   async processDueEntries(limit = 5): Promise<number> {
@@ -60,7 +64,7 @@ export class OutboxProcessor {
         this.emit({ type: "ticket_updated", ticket: updatedTicket, timestamp: updatedTicket.updatedAt });
         if (this.onTicketDelivered) {
           try {
-            await this.onTicketDelivered(updatedTicket, repo);
+            await this.onTicketDelivered(updatedTicket, repo, sent);
           } catch {
             // Non-fatal post-delivery worktree cleanup hook
           }

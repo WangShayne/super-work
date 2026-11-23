@@ -11,8 +11,10 @@ An asynchronous autonomous development workflow orchestration kernel and local d
 ## Key Capabilities
 
 - **Router + Isolated Worker Architecture**:
-  - **Control Plane (`EventIntakeRouter` & `MasterAssessor`)**: Triages incoming triggers (`web`, `github_issue`, `github_pr`, `github_ci`, `cli`), enforces `off` / `observe` / `auto` operating modes, and routes follow-up comments on active `Thread`s directly to the subscribed `Ticket`.
-  - **Execution Plane (`WorkerDriver` & `GitWorktreeProvider`)**: Schedules external coding agents (`ClaudeCodeDriver` for `claude`, `CodexDriver` for `codex`, `OpenCodeDriver` for `opencode`, plus `MockWorkerDriver`) inside isolated `git worktree` branches. Supports native `--resume` / `exec resume` / `--session` within the same engine, structured `Inline` context handover across engines (e.g., Claude implements → Codex reviews), and automatic or one-click worktree GC after terminal delivery/cancellation.
+  - **Control Plane (`EventIntakeRouter` & `MasterAssessor`)**: Triages incoming triggers (`web`, `github_issue`, `github_pr`, `github_ci`, `cli`), enforces `off` / `observe` / `auto` modes, decomposes complex requirements into **Epic Sub-Ticket DAGs** with automated upstream branch integration, and routes follow-up comments on active `Thread`s directly to the subscribed `Ticket`.
+  - **Execution Plane (`WorkerDriver` & `GitWorktreeProvider`)**: Schedules external coding agents (`ClaudeCodeDriver`, `CodexDriver`, `OpenCodeDriver`, plus `MockWorkerDriver`) inside isolated `git worktree` branches with native session resume, automatic or one-click worktree GC, and clean cross-engine handover.
+- **Deterministic Verification Harness**: Configure mandatory shell checks per repository (e.g. `bun run typecheck`, `bun test`) executed by the kernel after `implement` and `rebase`; outputs persist as `test_log` Spill artifacts and failures automatically feed back to retry or escalate.
+- **Dual-Channel `Transactional Outbox`**: Supports both remote **GitHub PR creation** and **one-click Local Merge (`local_merge`)** into the base branch with branch cleanup, backed by Spill `diff` fallback retention.
 - **Stage Pipeline Templates**: Built-in `fast` (`implement` → `rebase`), `standard` (`plan` → `implement` → `review` → `rebase`), and `strict` (with mandatory `plan_approval` and `outbox_signoff` human gates) workflows.
 - **Immutable `Mandate` Guardrails & Scope Serialization**:
   - Pre-dispatch overlap detection (`mandateScopesOverlap`) serializes tickets touching overlapping paths via `dependsOn`, while disjoint scopes execute in parallel.
@@ -100,7 +102,8 @@ When no API key is configured, the control plane automatically uses the built-in
 - `GET /api/health` — Daemon health, active control-plane LLM provider, available worker engines (`claude`, `codex`, `opencode`, `mock`), and worktree pool counts
 - `GET /api/repos`, `POST /api/repos`, `PATCH /api/repos/:id` — Register repos, configure per-repo preferences (template, engines, worktree cleanup), and switch `off` / `observe` / `auto` mode
 - `POST /api/triggers` — Ingest external or simulated triggers (`github_issue`, `github_pr`, `github_ci`, `cli`)
-- `GET /api/tickets`, `POST /api/tickets`, `GET /api/tickets/:id`, `POST /api/tickets/:id/message`, `POST /api/tickets/:id/cancel`, `POST /api/tickets/:id/cleanup-worktree` — Direct task dispatch, live worktree / committed branch diff inspection, Thread Subscription follow-ups, and worktree reclamation
+- `GET /api/tickets`, `POST /api/tickets`, `GET /api/tickets/:id`, `POST /api/tickets/:id/message`, `POST /api/tickets/:id/cancel`, `POST /api/tickets/:id/cleanup-worktree`, `POST /api/tickets/:id/deliver` — Direct task dispatch, 3-tier Diff inspection (worktree / branch / Spill), Thread Subscription follow-ups, and dual-channel delivery
+- `POST /api/epics/preview`, `POST /api/epics` — Preview and dispatch Epic sub-task dependency DAGs
 - `GET /api/worktrees`, `POST /api/worktrees/gc` — Inspect active/reclaimable worktrees and run one-click garbage collection
 - `GET /api/inbox`, `POST /api/inbox/:id/resolve` — Approve or reject pending Attention Inbox decisions
 - `GET /api/tickets/:id/recall`, `GET /api/memory/search?q=...`, `GET /api/artifacts/:id` — `Chain of Recall` lineage, FTS5 search, and Spill artifact reader

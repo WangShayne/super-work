@@ -1,11 +1,13 @@
+import { existsSync } from "node:fs";
 import type {
   OutboxEntry,
   OutboxExecutor,
   RepoConfig,
   SuperWorkKernel,
   Ticket,
+  WorkspaceProvider,
 } from "@super-work/core";
-import { runGit } from "../workspace/git-worktree-provider.ts";
+import { GitWorktreeProvider, runGit } from "../workspace/git-worktree-provider.ts";
 
 interface GhCommandResult {
   exitCode: number;
@@ -200,6 +202,8 @@ export class GhCliPollingSource {
 }
 
 export class GhOutboxExecutor implements OutboxExecutor {
+  constructor(private readonly workspace?: WorkspaceProvider) {}
+
   async execute(
     entry: OutboxEntry,
     repo: RepoConfig,
@@ -208,11 +212,36 @@ export class GhOutboxExecutor implements OutboxExecutor {
     const worktreePath = ticket.worktreePath ?? (entry.payload.worktreePath as string | undefined);
     const branchName = ticket.branchName ?? (entry.payload.branchName as string | undefined);
 
+    if (entry.action === "local_merge") {
+      if (!branchName) {
+        throw new Error(`Ticket ${ticket.id} has no branchName to merge into ${repo.baseBranch}`);
+      }
+      const provider =
+        this.workspace ?? new GitWorktreeProvider(`${repo.rootPath}/.super-work/worktrees`);
+      const { commitSha, branchCleaned } = await provider.mergeBranchToBase({
+        rootRepoPath: repo.rootPath,
+        baseBranch: repo.baseBranch,
+        branchName,
+        worktreePath,
+        commitMessage: `Merge ${branchName}: ${ticket.title}`,
+        deleteBranch: true,
+      });
+      return {
+        mode: "local_merged",
+        baseBranch: repo.baseBranch,
+        branchName,
+        commitSha,
+        branchCleaned,
+      };
+    }
+
     if (entry.action === "push_and_create_pr") {
-      if (repo.githubRepo && Bun.which("gh") && worktreePath && branchName) {
+      const gitCwd = worktreePath && existsSync(worktreePath) ? worktreePath : repo.rootPath;
+      const forceGithubPr = Boolean(entry.payload.forceGithubPr);
+      if (repo.githubRepo && Bun.which("gh") && branchName) {
         const remoteRes = await runGit(["remote", "get-url", "origin"], repo.rootPath);
         if (remoteRes.exitCode === 0 && remoteRes.stdout.trim()) {
-          const pushRes = await runGit(["push", "-u", "origin", branchName], worktreePath);
+          const pushRes = await runGit(["push", "-u", "origin", branchName], gitCwd);
           if (pushRes.exitCode !== 0) {
             throw new Error(`git push failed: ${pushRes.stderr.trim() || pushRes.stdout.trim()}`);
           }
@@ -232,7 +261,7 @@ export class GhOutboxExecutor implements OutboxExecutor {
               "--body",
               String(entry.payload.summary ?? ticket.description),
             ],
-            worktreePath,
+            gitCwd,
           );
           if (prRes.exitCode !== 0) {
             throw new Error(`gh pr create failed: ${prRes.stderr.trim() || prRes.stdout.trim()}`);
@@ -245,10 +274,22 @@ export class GhOutboxExecutor implements OutboxExecutor {
         }
       }
 
+      if (forceGithubPr) {
+        throw new Error(
+          "githubRepo, git remote origin, and authenticated gh CLI are required for GitHub PR delivery",
+        );
+      }
+
       // Pure local git repository delivery (ready on isolated branch for local merge/review)
       let diffStat = "";
-      if (worktreePath) {
+      if (worktreePath && existsSync(worktreePath)) {
         const statRes = await runGit(["diff", "--stat", repo.baseBranch], worktreePath);
+        diffStat = statRes.stdout.trim();
+      } else if (branchName) {
+        const statRes = await runGit(
+          ["diff", "--stat", `${repo.baseBranch}...${branchName}`],
+          repo.rootPath,
+        );
         diffStat = statRes.stdout.trim();
       }
       return {

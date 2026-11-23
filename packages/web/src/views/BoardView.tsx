@@ -1,4 +1,4 @@
-import { AlertCircle, CheckCircle2, Clock, Lock, Sparkles } from "lucide-react";
+import { AlertCircle, CheckCircle2, Clock, Layers, Lock, Sparkles } from "lucide-react";
 import { formatStage, formatTicketStatus, type TranslationKey, useI18n } from "../i18n.tsx";
 import type { Ticket, TicketStatus } from "../types.ts";
 
@@ -100,6 +100,12 @@ export function BoardView({ tickets, onSelectTicket }: BoardViewProps) {
                     const isRunning = ["planning", "implementing", "reviewing", "rebasing"].includes(
                       tkt.status,
                     );
+                    const childTickets = tkt.isEpic
+                      ? tickets.filter((c) => c.parentTicketId === tkt.id)
+                      : [];
+                    const childDeliveredCount = childTickets.filter(
+                      (c) => c.status === "delivered",
+                    ).length;
                     return (
                       <div
                         key={tkt.id}
@@ -122,6 +128,22 @@ export function BoardView({ tickets, onSelectTicket }: BoardViewProps) {
                           </span>
                           <span className="text-[10px] font-mono text-zinc-500">{tkt.template}</span>
                         </div>
+
+                        {(tkt.isEpic || tkt.parentTicketId) && (
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            {tkt.isEpic ? (
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-purple-500/15 border border-purple-500/30 text-purple-300 text-[10px] font-mono">
+                                <Layers className="w-2.5 h-2.5" />
+                                {t("board.epicBadge")} · {childDeliveredCount}/{childTickets.length}{" "}
+                                {t("board.deliveredSuffix")}
+                              </span>
+                            ) : (
+                              <span className="px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-700/80 text-zinc-300 text-[10px] font-mono">
+                                ↳ {t("board.subtaskBadge")}: {tkt.subtaskKey ?? tkt.parentTicketId}
+                              </span>
+                            )}
+                          </div>
+                        )}
 
                         <div>
                           <h4 className="text-xs font-medium text-zinc-100 group-hover:text-indigo-300 transition line-clamp-2">

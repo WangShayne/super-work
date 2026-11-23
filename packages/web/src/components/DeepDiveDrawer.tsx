@@ -1,10 +1,14 @@
 import { useEffect, useState } from "react";
 import {
   Ban,
+  CheckCircle2,
   Database,
   FileDiff,
   GitBranch,
+  GitMerge,
+  GitPullRequest,
   History,
+  Layers,
   Search,
   Send,
   Shield,
@@ -23,13 +27,18 @@ import type {
   ChainOfRecall,
   LiveEventLogEntry,
   MemorySearchHit,
+  RepoConfig,
+  Ticket,
   TicketDetailResponse,
 } from "../types.ts";
 
 interface DeepDiveDrawerProps {
   ticketId: string | null;
+  allTickets?: Ticket[];
+  repo?: RepoConfig;
   liveEvents: LiveEventLogEntry[];
   onClose: () => void;
+  onSelectTicket?: (ticketId: string) => void;
   onRefresh: () => void;
 }
 
@@ -37,8 +46,11 @@ type DrawerTab = "stream" | "diff" | "recall" | "outbox";
 
 export function DeepDiveDrawer({
   ticketId,
+  allTickets = [],
+  repo,
   liveEvents,
   onClose,
+  onSelectTicket,
   onRefresh,
 }: DeepDiveDrawerProps) {
   const { locale, t } = useI18n();
@@ -48,6 +60,8 @@ export function DeepDiveDrawer({
   const [loading, setLoading] = useState(false);
   const [followUp, setFollowUp] = useState("");
   const [sendingMsg, setSendingMsg] = useState(false);
+  const [delivering, setDelivering] = useState<"local_merge" | "push_and_create_pr" | null>(null);
+  const [deliveryError, setDeliveryError] = useState<string | null>(null);
 
   const [artifactContent, setArtifactContent] = useState<{ id: string; text: string } | null>(null);
   const [searchQ, setSearchQ] = useState("");
@@ -112,6 +126,44 @@ export function DeepDiveDrawer({
     onRefresh();
   };
 
+  const handleDeliver = async (action: "local_merge" | "push_and_create_pr") => {
+    setDelivering(action);
+    setDeliveryError(null);
+    try {
+      await api.deliverTicket(ticketId, action);
+      const [d, r] = await Promise.all([api.getTicketDetail(ticketId), api.getRecall(ticketId)]);
+      setDetail(d);
+      setRecall(r.chain);
+      onRefresh();
+    } catch (err) {
+      setDeliveryError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDelivering(null);
+    }
+  };
+
+  const childSubtasks = ticket?.isEpic
+    ? allTickets.filter((c) => c.parentTicketId === ticket.id)
+    : [];
+  const hasMergedLocally = Boolean(
+    detail?.outboxEntries.some((e) => e.action === "local_merge" && e.status === "sent"),
+  );
+  const hasPushedPr = Boolean(
+    detail?.outboxEntries.some(
+      (e) =>
+        e.action === "push_and_create_pr" &&
+        e.status === "sent" &&
+        (e.resultPayload as { mode?: string } | undefined)?.mode === "github_pr",
+    ),
+  );
+  const canDeliverActions = Boolean(
+    ticket &&
+      !ticket.isEpic &&
+      ticket.branchName &&
+      (ticket.status === "delivered" || ticket.status === "outbox_pending") &&
+      !hasMergedLocally,
+  );
+
   const handleLoadArtifact = async (id: string) => {
     if (artifactContent?.id === id) {
       setArtifactContent(null);
@@ -150,6 +202,22 @@ export function DeepDiveDrawer({
                       {ticket.branchName}
                     </span>
                   )}
+                  {ticket.parentTicketId && (
+                    <button
+                      type="button"
+                      onClick={() => onSelectTicket?.(ticket.parentTicketId!)}
+                      className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded bg-purple-500/15 border border-purple-500/30 text-purple-300 hover:bg-purple-500/25"
+                    >
+                      <Layers className="w-2.5 h-2.5" />
+                      {t("drawer.parentEpicPrefix")} {ticket.parentTicketId}
+                    </button>
+                  )}
+                  {hasMergedLocally && (
+                    <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-300">
+                      <CheckCircle2 className="w-2.5 h-2.5" />
+                      {t("drawer.localMergedTag")}
+                    </span>
+                  )}
                   {ticket.worktreePath ? (
                     <span className="inline-flex items-center gap-1.5 text-[10px] font-mono px-2 py-0.5 rounded bg-sky-500/10 border border-sky-500/30 text-sky-300">
                       {t("drawer.worktreeActive")}
@@ -177,7 +245,31 @@ export function DeepDiveDrawer({
             </h2>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap justify-end">
+            {canDeliverActions && (
+              <button
+                type="button"
+                disabled={delivering !== null}
+                onClick={() => void handleDeliver("local_merge")}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-emerald-500/40 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25 text-xs disabled:opacity-50"
+              >
+                <GitMerge className="w-3 h-3" />
+                {delivering === "local_merge" ? t("drawer.merging") : t("drawer.localMergeButton")}
+              </button>
+            )}
+            {canDeliverActions && repo?.githubRepo && !hasPushedPr && (
+              <button
+                type="button"
+                disabled={delivering !== null}
+                onClick={() => void handleDeliver("push_and_create_pr")}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-indigo-500/40 bg-indigo-500/15 text-indigo-200 hover:bg-indigo-500/25 text-xs disabled:opacity-50"
+              >
+                <GitPullRequest className="w-3 h-3" />
+                {delivering === "push_and_create_pr"
+                  ? t("drawer.pushingPr")
+                  : t("drawer.pushPrButton")}
+              </button>
+            )}
             {ticket && !["delivered", "cancelled", "failed"].includes(ticket.status) && (
               <button
                 onClick={handleCancel}
@@ -234,6 +326,49 @@ export function DeepDiveDrawer({
               {ticket?.errorMessage && (
                 <div className="p-3 rounded-lg border border-rose-500/30 bg-rose-500/10 text-xs text-rose-200">
                   <strong>{t("drawer.attention")}</strong> {ticket.errorMessage}
+                </div>
+              )}
+              {deliveryError && (
+                <div className="p-3 rounded-lg border border-rose-500/30 bg-rose-500/10 text-xs text-rose-200">
+                  <strong>{t("drawer.attention")}</strong> {deliveryError}
+                </div>
+              )}
+
+              {ticket?.isEpic && childSubtasks.length > 0 && (
+                <div className="space-y-2">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-purple-300 flex items-center gap-1.5">
+                    <Layers className="w-3.5 h-3.5" />
+                    {t("drawer.epicDagTitle")} ({childSubtasks.length})
+                  </h3>
+                  <div className="space-y-2">
+                    {childSubtasks.map((sub) => (
+                      <div
+                        key={sub.id}
+                        onClick={() => onSelectTicket?.(sub.id)}
+                        className="rounded-lg border border-zinc-800 bg-zinc-900/60 hover:border-indigo-500/50 p-3 text-xs flex items-center justify-between gap-3 cursor-pointer transition"
+                      >
+                        <div className="min-w-0 space-y-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            {sub.subtaskKey && (
+                              <span className="px-1.5 py-0.5 rounded bg-purple-500/15 border border-purple-500/30 text-purple-200 font-mono text-[10px]">
+                                {sub.subtaskKey}
+                              </span>
+                            )}
+                            <span className="font-medium text-zinc-100 truncate">{sub.title}</span>
+                          </div>
+                          <div className="text-[10px] font-mono text-zinc-400">
+                            {sub.mandate.allowedPaths.join(", ")}
+                            {sub.dependsOn.length > 0
+                              ? ` · deps: ${sub.dependsOn.join(", ")}`
+                              : ""}
+                          </div>
+                        </div>
+                        <span className="shrink-0 px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-[10px] text-zinc-200">
+                          {formatTicketStatus(sub.status, locale)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
 
@@ -461,8 +596,16 @@ export function DeepDiveDrawer({
                       >
                         <div className="flex items-center justify-between">
                           <div>
-                            <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 mr-2">
-                              {art.kind}
+                            <span
+                              className={`font-mono text-[10px] px-1.5 py-0.5 rounded mr-2 ${
+                                art.kind === "test_log"
+                                  ? art.summary.startsWith("FAIL")
+                                    ? "bg-rose-500/20 text-rose-300 border border-rose-500/30"
+                                    : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                                  : "bg-zinc-800 text-zinc-300"
+                              }`}
+                            >
+                              {art.kind === "test_log" ? t("drawer.testLogTag") : art.kind}
                             </span>
                             <span className="text-zinc-200">{art.summary}</span>
                             <span className="text-zinc-500 text-[11px] ml-2">
@@ -493,9 +636,24 @@ export function DeepDiveDrawer({
 
           {tab === "outbox" && (
             <div className="space-y-3">
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
-                {t("drawer.outboxTitle")}
-              </h3>
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                  {t("drawer.outboxTitle")}
+                </h3>
+                {canDeliverActions && (
+                  <button
+                    type="button"
+                    disabled={delivering !== null}
+                    onClick={() => void handleDeliver("local_merge")}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-emerald-500/40 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25 text-[11px] disabled:opacity-50"
+                  >
+                    <GitMerge className="w-3 h-3" />
+                    {delivering === "local_merge"
+                      ? t("drawer.merging")
+                      : t("drawer.localMergeButton")}
+                  </button>
+                )}
+              </div>
               {detail?.outboxEntries.length === 0 ? (
                 <p className="text-xs text-zinc-500">{t("drawer.noOutbox")}</p>
               ) : (

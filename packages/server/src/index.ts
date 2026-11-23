@@ -79,7 +79,7 @@ export async function startDaemon(options?: {
     workspace,
     llm: mutableLlm,
     drivers,
-    outboxExecutor: new GhOutboxExecutor(),
+    outboxExecutor: new GhOutboxExecutor(workspace),
   });
 
   // Auto-register workspace repository if none registered yet

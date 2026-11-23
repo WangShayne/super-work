@@ -1,13 +1,21 @@
 import { describe, expect, it } from "bun:test";
-import { createDefaultMandate, type WorkerTurnInput } from "@super-work/core";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createDefaultMandate, type RepoConfig, type WorkerTurnInput } from "@super-work/core";
 import {
+  CliFallbackControlLLM,
+  CompositeControlPlaneLLM,
+  HeuristicControlLLM,
   buildClaudeCliArgs,
+  buildClaudeControlPlaneArgs,
   buildCodexCliArgs,
   buildOpenCodeCliArgs,
   formatOpenCodeModelArg,
   parseClaudeStreamLine,
   parseCodexStreamLine,
   parseOpenCodeStreamLine,
+  sanitizeCliModelName,
 } from "../src/index.ts";
 
 describe("Worker CLI flag mapping and JSONL stream parsers", () => {
@@ -21,7 +29,7 @@ describe("Worker CLI flag mapping and JSONL stream parsers", () => {
     isResume: false,
   };
 
-  it("builds valid claude 2.1.318 flags without unsupported --max-turns", () => {
+  it("builds valid claude 2.1.318 flags with stage-specific tool permissions and no --max-turns", () => {
     const planArgs = buildClaudeCliArgs({ ...baseInput, stage: "plan" });
     expect(planArgs).not.toContain("--max-turns");
     expect(planArgs).toContain("--verbose");
@@ -29,6 +37,8 @@ describe("Worker CLI flag mapping and JSONL stream parsers", () => {
     expect(planArgs).toContain("--permission-mode");
     expect(planArgs).toContain("plan");
     expect(planArgs).toContain("--tools");
+    expect(planArgs).toContain("Read,Glob,Grep");
+    expect(planArgs).not.toContain("Bash");
 
     const implArgs = buildClaudeCliArgs({
       ...baseInput,
@@ -39,7 +49,10 @@ describe("Worker CLI flag mapping and JSONL stream parsers", () => {
       effort: "high",
     });
     expect(implArgs).toContain("acceptEdits");
+    expect(implArgs).toContain("--allowedTools");
+    expect(implArgs).toContain("Bash,Read,Edit,Write,Glob,Grep");
     expect(implArgs).toContain("--disallowedTools");
+    expect(implArgs).toContain("Bash(git push*),Bash(gh pr *),Bash(gh issue *)");
     expect(implArgs).toContain("--max-budget-usd");
     expect(implArgs).toContain("1.5");
     expect(implArgs).toContain("--model");
@@ -48,6 +61,18 @@ describe("Worker CLI flag mapping and JSONL stream parsers", () => {
     expect(implArgs).toContain("high");
     expect(implArgs).toContain("--resume");
     expect(implArgs).toContain("sess_abc");
+
+    const reviewArgs = buildClaudeCliArgs({ ...baseInput, stage: "review" });
+    expect(reviewArgs).toContain("acceptEdits");
+    expect(reviewArgs).toContain("--tools");
+    expect(reviewArgs).toContain("Read,Glob,Grep,Bash");
+    expect(reviewArgs).toContain("--allowedTools");
+    const reviewAllowedIdx = reviewArgs.indexOf("--allowedTools");
+    expect(reviewArgs[reviewAllowedIdx + 1]).toContain("Bash(git diff*)");
+    expect(reviewArgs[reviewAllowedIdx + 1]).toContain("Bash(bun test*)");
+    const reviewDisallowedIdx = reviewArgs.indexOf("--disallowedTools");
+    expect(reviewArgs[reviewDisallowedIdx + 1]).toContain("Edit,Write");
+    expect(reviewArgs[reviewDisallowedIdx + 1]).toContain("Bash(git push*)");
   });
 
   it("builds valid codex 0.166.0 fresh and resume flags without -s/-C on resume", () => {
@@ -253,5 +278,91 @@ describe("Worker CLI flag mapping and JSONL stream parsers", () => {
       fatal: true,
       message: "Provider rate limited",
     });
+  });
+});
+
+describe("ControlPlaneLLM CLI flags, model sanitization, and timeout fallback", () => {
+  it("strips placeholder CLI models while preserving real model identifiers", () => {
+    expect(sanitizeCliModelName(undefined)).toBeUndefined();
+    expect(sanitizeCliModelName("   ")).toBeUndefined();
+    expect(sanitizeCliModelName("claude-cli")).toBeUndefined();
+    expect(sanitizeCliModelName("Codex-CLI")).toBeUndefined();
+    expect(sanitizeCliModelName("default")).toBeUndefined();
+    expect(sanitizeCliModelName("heuristic")).toBeUndefined();
+    expect(sanitizeCliModelName(" sonnet ")).toBe("sonnet");
+    expect(sanitizeCliModelName("gpt-5.6-sol")).toBe("gpt-5.6-sol");
+  });
+
+  it("isolates control-plane Claude CLI calls from MCP/skills and skips placeholder --model", () => {
+    const schema = { type: "object", properties: {} };
+    const cleanArgs = buildClaudeControlPlaneArgs({
+      prompt: "Plan Epic",
+      schema,
+      model: "claude-cli",
+      effort: "low",
+    });
+    expect(cleanArgs).toContain("--strict-mcp-config");
+    expect(cleanArgs).toContain("--disable-slash-commands");
+    expect(cleanArgs).toContain("--no-session-persistence");
+    expect(cleanArgs).not.toContain("--model");
+    expect(cleanArgs.at(-1)).toBe("Plan Epic");
+
+    const pinnedArgs = buildClaudeControlPlaneArgs({
+      prompt: "Plan Epic",
+      schema,
+      model: "sonnet",
+      effort: "medium",
+    });
+    const modelIdx = pinnedArgs.indexOf("--model");
+    expect(modelIdx).toBeGreaterThan(-1);
+    expect(pinnedArgs[modelIdx + 1]).toBe("sonnet");
+  });
+
+  it("times out a stalled CLI subprocess cleanly and falls back to HeuristicControlLLM", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sw-fake-cli-"));
+    const scriptPath = join(dir, "fake-claude.sh");
+    await writeFile(scriptPath, "#!/bin/sh\nsleep 5\n", "utf8");
+    await chmod(scriptPath, 0o755);
+
+    const repo: RepoConfig = {
+      id: "repo_test",
+      name: "super-work",
+      rootPath: "/tmp/repo",
+      baseBranch: "main",
+      mode: "auto",
+      defaultTemplate: "standard",
+      preferredImplementEngine: "claude",
+      preferredReviewEngine: "codex",
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+    };
+
+    try {
+      const cliLlm = new CliFallbackControlLLM({
+        claudeBin: scriptPath,
+        model: "claude-cli",
+        effort: "low",
+        timeoutMs: 80,
+      });
+      expect(cliLlm.providerName).toBe("cli:claude(default,low)");
+
+      const composite = new CompositeControlPlaneLLM([cliLlm, new HeuristicControlLLM()]);
+      const startedAt = Date.now();
+      const plan = await composite.planEpicDecomposition({
+        repo,
+        title: "Refactor plugin architecture",
+        description: "1. packages/core define plugin contracts\n2. packages/drivers implement loader",
+        defaultTemplate: "standard",
+      });
+      const elapsedMs = Date.now() - startedAt;
+
+      expect(elapsedMs).toBeLessThan(1500);
+      expect(plan.subtasks.length).toBeGreaterThanOrEqual(2);
+      const paths = plan.subtasks.flatMap((s) => s.allowedPaths);
+      expect(paths).toContain("packages/core/**");
+      expect(paths).toContain("packages/drivers/**");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

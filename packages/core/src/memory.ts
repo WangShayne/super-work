@@ -20,6 +20,7 @@ export class MemoryManager {
     ticket: Ticket,
     stage: StageKind,
     relatedMemory: MemorySearchHit[],
+    verificationCommands?: string[],
   ): string {
     const sections: string[] = [];
 
@@ -44,6 +45,11 @@ export class MemoryManager {
     sections.push(`- Allowed paths: ${ticket.mandate.allowedPaths.join(", ") || "**"}`);
     sections.push(`- Forbidden paths: ${ticket.mandate.forbiddenPaths.join(", ")}`);
     sections.push(`- External side effects prohibited: NEVER run git push, gh pr create, or external API mutations directly; super-work handles delivery via Outbox.`);
+    if (verificationCommands && verificationCommands.length > 0) {
+      sections.push(
+        `- Deterministic verification gate: ${verificationCommands.join(" && ")} (executed automatically by super-work after implement and rebase)`,
+      );
+    }
 
     if (ticket.inlineMemory.planSummary) {
       sections.push(`\n## Approved Plan Summary (Inline)\n${ticket.inlineMemory.planSummary}`);
@@ -100,8 +106,9 @@ export class MemoryManager {
     summary: string;
     verificationPassed: boolean;
     reviewApproved?: boolean;
+    extraArtifacts?: SpillArtifact[];
   }): Promise<{ note: InlineStageNote; artifacts: SpillArtifact[] }> {
-    const artifacts: SpillArtifact[] = [];
+    const artifacts: SpillArtifact[] = [...(input.extraArtifacts ?? [])];
 
     const transcriptContent = input.events.map((e) => JSON.stringify(e)).join("\n");
     const transcriptArtifact = await this.artifactStore.writeSpill(

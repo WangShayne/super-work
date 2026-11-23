@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { SuperWorkKernel, type OutboxExecutor } from "@super-work/core";
 import {
   FsArtifactStore,
+  GhOutboxExecutor,
   GitWorktreeProvider,
   HeuristicControlLLM,
   MockWorkerDriver,
@@ -255,6 +256,104 @@ describe("@super-work/server REST + SSE API", () => {
     expect(gcJson.result.removedPaths).toHaveLength(1);
     expect(gcJson.result.cleanedTicketIds).toEqual([ticket.id]);
     expect(gcJson.items).toHaveLength(0);
+
+    await kernel.stop();
+    stateStore.close();
+  });
+
+  it("supports Epic preview/dispatch and on-demand local_merge delivery with Spill diff retention", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sw-v03-api-"));
+    tempDirs.push(dir);
+    const repoDir = await createTempGitRepo(dir);
+
+    const stateStore = new SqliteStateStore(join(dir, "state.db"));
+    const artifactStore = new FsArtifactStore(join(dir, "artifacts"));
+    const workspace = new GitWorktreeProvider(join(dir, "worktrees"));
+    const llm = new HeuristicControlLLM();
+    const kernel = new SuperWorkKernel({
+      stateStore,
+      artifactStore,
+      workspace,
+      llm,
+      drivers: [new MockWorkerDriver({ engine: "mock", stepDelayMs: 1 })],
+      outboxExecutor: new GhOutboxExecutor(workspace),
+    });
+    const app = createServerApp({ kernel, stateStore, artifactStore, llmProviderName: llm.providerName });
+
+    await app.request("/api/repos", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: "repo_v03",
+        name: "v03-demo",
+        rootPath: repoDir,
+        baseBranch: "main",
+        mode: "auto",
+        defaultTemplate: "fast",
+        preferredImplementEngine: "mock",
+        preferredReviewEngine: "mock",
+        verificationCommands: ["git status --short"],
+      }),
+    });
+
+    // 1. Preview Epic DAG decomposition
+    const previewRes = await app.request("/api/epics/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        repoId: "repo_v03",
+        title: "Add plugin architecture",
+        description: "1. packages/core define types\n2. packages/drivers add loader\n3. packages/web add panel",
+      }),
+    });
+    expect(previewRes.status).toBe(200);
+    const { plan } = (await previewRes.json()) as {
+      plan: { subtasks: Array<{ key: string; allowedPaths: string[] }> };
+    };
+    expect(plan.subtasks.length).toBeGreaterThanOrEqual(3);
+
+    // 2. Dispatch Epic DAG
+    const createEpicRes = await app.request("/api/epics", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        repoId: "repo_v03",
+        title: "Add plugin architecture",
+        description: "1. packages/core define types\n2. packages/drivers add loader\n3. packages/web add panel",
+        preferredEngine: "mock",
+        subtasks: plan.subtasks,
+      }),
+    });
+    expect(createEpicRes.status).toBe(201);
+    const { epic, subtasks } = (await createEpicRes.json()) as {
+      epic: { id: string; isEpic?: boolean };
+      subtasks: Array<{ id: string; parentTicketId?: string }>;
+    };
+    expect(epic.isEpic).toBe(true);
+    expect(subtasks.every((s) => s.parentTicketId === epic.id)).toBe(true);
+
+    await kernel.runUntilIdle();
+    const epicAfter = await stateStore.getTicket(epic.id);
+    expect(epicAfter?.status).toBe("delivered");
+
+    // 3. Deliver one completed subtask locally and verify Spill diff fallback keeps Diff intact
+    const targetSub = subtasks[0]!;
+    const deliverRes = await app.request(`/api/tickets/${targetSub.id}/deliver`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "local_merge" }),
+    });
+    expect(deliverRes.status).toBe(200);
+    const deliveredJson = (await deliverRes.json()) as {
+      entry: { action: string; status: string; resultPayload?: { mode?: string } };
+    };
+    expect(deliveredJson.entry.action).toBe("local_merge");
+    expect(deliveredJson.entry.status).toBe("sent");
+    expect(deliveredJson.entry.resultPayload?.mode).toBe("local_merged");
+
+    const detailRes = await app.request(`/api/tickets/${targetSub.id}`);
+    const detail = (await detailRes.json()) as { diff: string };
+    expect(detail.diff.length).toBeGreaterThan(0);
 
     await kernel.stop();
     stateStore.close();

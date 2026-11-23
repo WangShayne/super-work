@@ -129,4 +129,6 @@ stateDiagram-v2
 实现于 [outbox.ts](./packages/core/src/outbox.ts) 与 [gh-cli-source.ts](./packages/drivers/src/sources/gh-cli-source.ts)：
 - 交付前由 `SuperWorkKernel` 自动执行 `GitWorktreeProvider.rebaseOntoBase(...)`；若发生冲突则优先注入冲突文件摘要唤醒 Worker 自愈，超出重试上限再升级人工处理。
 - Rebase 干净后写入带 SQLite `UNIQUE(idempotency_key)` 约束的 `OutboxEntry`；`OutboxProcessor.processDueEntries()` 通过事务方法 `claimNextOutboxEntries` 原子认领任务并交由 `GhOutboxExecutor` 执行（有远端及 `gh` 授权时自动 Push 分支并建 PR，纯本地仓库则完成本地分支交付汇总）。
-- **Worktree 生命周期与 GC**：启用仓库 `autoCleanupWorktree`（默认开启）时，任务到达 `delivered` 或被 `cancelTicket` 取消后会自动移除工作树目录并保留提交分支；即使清理后，`GET /api/tickets/:id` 仍可通过 `GitWorktreeProvider.getBranchDiff(...)` 回看分支 Diff，也可通过 `/api/worktrees/gc` 回收历史或孤儿目录。
+- **Worktree 生命周期与 GC**：启用仓库 `autoCleanupWorktree`（默认开启）时，任务到达 `delivered` 或被 `cancelTicket` 取消后会自动移除工作树目录并保留提交分支；即使清理或 `local_merge` 删除临时分支后，`GET /api/tickets/:id` 仍依次通过 Worktree Diff → 分支 Diff → Spill `diff` 产物三层兜底展示。
+- **确定性质量门禁（Verification Gate）**：若仓库配置 `verificationCommands`，在 `implement`（`commitAll` 之前）及 `rebase` 干净后由 `GitWorktreeProvider.runVerificationCommands(...)` 强制执行，产出 `test_log` Spill 产物并发送 `verification_completed` 事件；失败时注入日志摘要自动返工，耗尽重试则升级至收件箱。
+- **双通道交付与 Epic DAG**：支持 `push_and_create_pr` 与 `local_merge`（合入 `baseBranch` 并自动删除临时分支）；通过 `previewEpic` / `createEpic` 拆分子任务 DAG 时，下游子单首次创建工作树会自动合并上游依赖分支代码（`integrateDependencyBranches`），并由 `syncEpicStatuses` 实时聚合父级 Epic 状态与总花费。

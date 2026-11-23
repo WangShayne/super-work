@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
@@ -7,10 +7,12 @@ import {
   type OutboxExecutor,
   type RepoConfig,
   SuperWorkKernel,
+  type WorkerDriver,
   nowIso,
 } from "@super-work/core";
 import {
   FsArtifactStore,
+  GhOutboxExecutor,
   GitWorktreeProvider,
   type MockScenarioKind,
   MockWorkerDriver,
@@ -312,6 +314,470 @@ describe("SuperWorkKernel E2E on real Git worktrees", () => {
     expect(cancelled.worktreePath).toBeUndefined();
     expect(cancelled.worktreeCleanedAt).toBeDefined();
     expect(await kernel.inspectWorktrees(repo.id)).toHaveLength(0);
+
+    store.close();
+  });
+
+  it("enforces deterministic verificationCommands gate and self-heals on retry", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sw-verify-"));
+    tempDirs.push(dir);
+    const repoDir = await createTempGitRepo(dir);
+    const store = new SqliteStateStore(join(dir, "state.db"));
+    const artifacts = new FsArtifactStore(join(dir, "artifacts"));
+    const workspace = new GitWorktreeProvider(join(dir, "worktrees"));
+
+    let attempts = 0;
+    const verifyingDriver: WorkerDriver = {
+      engine: "claude",
+      async isAvailable() {
+        return true;
+      },
+      async *runTurn(input) {
+        attempts += 1;
+        yield { type: "session_started", nativeSessionId: `s_${attempts}`, timestamp: nowIso() };
+        await mkdir(join(input.worktreePath, "src"), { recursive: true });
+        await writeFile(join(input.worktreePath, "src", "feature.ts"), "export const x = 1;\n");
+        if (input.prompt.includes("Deterministic verification failed")) {
+          await writeFile(join(input.worktreePath, "src", "verified.ok"), "ok\n");
+        }
+        yield {
+          type: "completed",
+          summary: `Attempt ${attempts} finished`,
+          costUsd: 0.01,
+          timestamp: nowIso(),
+        };
+      },
+    };
+
+    const kernel = new SuperWorkKernel({
+      stateStore: store,
+      artifactStore: artifacts,
+      workspace,
+      llm: makeTestLlm(),
+      drivers: [verifyingDriver],
+      outboxExecutor: new GhOutboxExecutor(workspace),
+    });
+
+    const ts = nowIso();
+    await store.upsertRepo({
+      id: "repo_verify",
+      name: "verify-demo",
+      rootPath: repoDir,
+      baseBranch: "main",
+      mode: "auto",
+      defaultTemplate: "fast",
+      preferredImplementEngine: "claude",
+      preferredReviewEngine: "claude",
+      verificationCommands: ["test -f src/verified.ok"],
+      createdAt: ts,
+      updatedAt: ts,
+    });
+
+    const ticket = await kernel.createDirectTicket({
+      repoId: "repo_verify",
+      title: "Verified feature",
+      description: "Ensure gate passes",
+      template: "fast",
+      allowedPaths: ["src/**"],
+      preferredEngine: "claude",
+    });
+
+    await kernel.runUntilIdle();
+
+    const finalTicket = await store.getTicket(ticket.id);
+    expect(finalTicket?.status).toBe("delivered");
+    expect(attempts).toBe(2);
+
+    const artList = await store.listArtifacts(ticket.id);
+    const testLogs = artList.filter((a) => a.kind === "test_log");
+    expect(testLogs.some((a) => a.summary.startsWith("FAIL"))).toBe(true);
+    expect(testLogs.some((a) => a.summary.startsWith("PASS"))).toBe(true);
+
+    store.close();
+  });
+
+  it("delivers via local_merge directly into base branch and cleans temporary branch", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sw-localmerge-"));
+    tempDirs.push(dir);
+    const repoDir = await createTempGitRepo(dir);
+    const store = new SqliteStateStore(join(dir, "state.db"));
+    const artifacts = new FsArtifactStore(join(dir, "artifacts"));
+    const workspace = new GitWorktreeProvider(join(dir, "worktrees"));
+
+    const kernel = new SuperWorkKernel({
+      stateStore: store,
+      artifactStore: artifacts,
+      workspace,
+      llm: makeTestLlm(),
+      drivers: [new MockWorkerDriver({ engine: "claude", stepDelayMs: 2 })],
+      outboxExecutor: new GhOutboxExecutor(workspace),
+    });
+
+    const ts = nowIso();
+    await store.upsertRepo({
+      id: "repo_merge",
+      name: "merge-demo",
+      rootPath: repoDir,
+      baseBranch: "main",
+      mode: "auto",
+      defaultTemplate: "fast",
+      preferredImplementEngine: "claude",
+      preferredReviewEngine: "claude",
+      defaultDeliveryChannel: "local_merge",
+      autoCleanupWorktree: false,
+      createdAt: ts,
+      updatedAt: ts,
+    });
+
+    const ticket = await kernel.createDirectTicket({
+      repoId: "repo_merge",
+      title: "Merge feature locally",
+      description: "Implement local merge change",
+      template: "fast",
+      allowedPaths: ["src/local/**"],
+      preferredEngine: "claude",
+    });
+
+    await kernel.runUntilIdle();
+
+    const finalTicket = await store.getTicket(ticket.id);
+    expect(finalTicket?.status).toBe("delivered");
+    expect(finalTicket?.worktreePath).toBeUndefined();
+
+    const outbox = await store.listOutboxEntries({ ticketId: ticket.id });
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]!.action).toBe("local_merge");
+    expect(outbox[0]!.status).toBe("sent");
+    expect(outbox[0]!.resultPayload).toMatchObject({
+      mode: "local_merged",
+      baseBranch: "main",
+      branchCleaned: true,
+    });
+
+    // Verify committed change now lives directly in repoDir main branch and temp branch is deleted
+    const mergedFile = join(repoDir, "src", "local", `${ticket.id}.ts`);
+    expect(await Bun.file(mergedFile).exists()).toBe(true);
+    const branchCheck = await runGit(["branch", "--list", finalTicket!.branchName!], repoDir);
+    expect(branchCheck.stdout.trim()).toBe("");
+
+    store.close();
+  });
+
+  it("orchestrates Epic DAG subtasks with parallel execution and upstream branch integration", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sw-epic-"));
+    tempDirs.push(dir);
+    const repoDir = await createTempGitRepo(dir);
+    const store = new SqliteStateStore(join(dir, "state.db"));
+    const artifacts = new FsArtifactStore(join(dir, "artifacts"));
+    const workspace = new GitWorktreeProvider(join(dir, "worktrees"));
+
+    const downstreamSawContract: Record<string, boolean> = {};
+    const epicDriver: WorkerDriver = {
+      engine: "claude",
+      async isAvailable() {
+        return true;
+      },
+      async *runTurn(input) {
+        yield { type: "session_started", nativeSessionId: `ep_${input.ticketId}`, timestamp: nowIso() };
+        const ticketHeader =
+          input.prompt
+            .split("\n")
+            .find((l) => l.startsWith("Ticket:")) ?? input.prompt;
+        if (ticketHeader.includes("[Contracts]")) {
+          await mkdir(join(input.worktreePath, "packages/core"), { recursive: true });
+          await writeFile(join(input.worktreePath, "packages/core/contract.ts"), "export interface Contract { ok: true }\n");
+        } else if (ticketHeader.includes("[Backend]")) {
+          downstreamSawContract.drivers = await Bun.file(
+            join(input.worktreePath, "packages/core/contract.ts"),
+          ).exists();
+          await mkdir(join(input.worktreePath, "packages/drivers"), { recursive: true });
+          await writeFile(join(input.worktreePath, "packages/drivers/impl.ts"), "export const impl = true;\n");
+        } else if (ticketHeader.includes("[UI]")) {
+          downstreamSawContract.web = await Bun.file(
+            join(input.worktreePath, "packages/core/contract.ts"),
+          ).exists();
+          await mkdir(join(input.worktreePath, "packages/web"), { recursive: true });
+          await writeFile(join(input.worktreePath, "packages/web/panel.tsx"), "export const Panel = () => null;\n");
+        }
+        yield { type: "completed", summary: "Subtask done", costUsd: 0.05, timestamp: nowIso() };
+      },
+    };
+
+    const kernel = new SuperWorkKernel({
+      stateStore: store,
+      artifactStore: artifacts,
+      workspace,
+      llm: makeTestLlm(),
+      drivers: [epicDriver],
+      outboxExecutor: new GhOutboxExecutor(workspace),
+    });
+
+    const ts = nowIso();
+    await store.upsertRepo({
+      id: "repo_epic",
+      name: "epic-demo",
+      rootPath: repoDir,
+      baseBranch: "main",
+      mode: "auto",
+      defaultTemplate: "fast",
+      preferredImplementEngine: "claude",
+      preferredReviewEngine: "claude",
+      createdAt: ts,
+      updatedAt: ts,
+    });
+
+    const { epic, subtasks } = await kernel.createEpic({
+      repoId: "repo_epic",
+      title: "Plugin System Epic",
+      description: "Add plugin architecture",
+      template: "fast",
+      preferredEngine: "claude",
+      subtasks: [
+        {
+          key: "core",
+          title: "[Contracts] Define core plugin types",
+          description: "[Contracts] Define core plugin types",
+          template: "fast",
+          allowedPaths: ["packages/core/**"],
+          dependsOnKeys: [],
+          acceptanceCriteria: ["Types ready"],
+        },
+        {
+          key: "drivers",
+          title: "[Backend] Implement plugin loader",
+          description: "[Backend] Implement plugin loader",
+          template: "fast",
+          allowedPaths: ["packages/drivers/**"],
+          dependsOnKeys: ["core"],
+          acceptanceCriteria: ["Loader ready"],
+        },
+        {
+          key: "web",
+          title: "[UI] Build plugin manager view",
+          description: "[UI] Build plugin manager view",
+          template: "fast",
+          allowedPaths: ["packages/web/**"],
+          dependsOnKeys: ["core"],
+          acceptanceCriteria: ["UI ready"],
+        },
+      ],
+    });
+
+    expect(epic.isEpic).toBe(true);
+    expect(subtasks).toHaveLength(3);
+    expect(subtasks[0]!.status).toBe("queued");
+    expect(subtasks[1]!.status).toBe("waiting_deps");
+    expect(subtasks[2]!.status).toBe("waiting_deps");
+
+    await kernel.runUntilIdle();
+
+    expect(downstreamSawContract).toEqual({ drivers: true, web: true });
+    for (const sub of subtasks) {
+      expect((await store.getTicket(sub.id))?.status).toBe("delivered");
+    }
+    const finalEpic = await store.getTicket(epic.id);
+    expect(finalEpic?.status).toBe("delivered");
+    expect(finalEpic?.costUsd).toBeCloseTo(0.15, 3);
+
+    store.close();
+  });
+
+  it("mirrors gitignored node_modules and workspace relative symlinks into isolated worktrees", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sw-nm-"));
+    tempDirs.push(dir);
+    const repoDir = await createTempGitRepo(dir);
+    await writeFile(join(repoDir, ".gitignore"), "node_modules/\n", "utf8");
+    await mkdir(join(repoDir, "packages/shared"), { recursive: true });
+    await mkdir(join(repoDir, "packages/app"), { recursive: true });
+    await writeFile(join(repoDir, "packages/shared/val.js"), "export const VAL = 1;\n", "utf8");
+    await writeFile(join(repoDir, "packages/app/.gitkeep"), "", "utf8");
+    await runGit(["add", "."], repoDir);
+    await runGit(["commit", "-m", "add workspace packages"], repoDir);
+
+    // Populate gitignored external & scoped workspace symlinks inside repoDir
+    await mkdir(join(repoDir, "node_modules/ext-pkg"), { recursive: true });
+    await writeFile(join(repoDir, "node_modules/ext-pkg/index.js"), "export const EXT = 100;\n", "utf8");
+    await mkdir(join(repoDir, "packages/app/node_modules/@ws"), { recursive: true });
+    await symlink("../../../shared", join(repoDir, "packages/app/node_modules/@ws/shared"));
+
+    const store = new SqliteStateStore(join(dir, "state.db"));
+    const artifacts = new FsArtifactStore(join(dir, "artifacts"));
+    const workspace = new GitWorktreeProvider(join(dir, "worktrees"));
+
+    const customDriver: WorkerDriver = {
+      engine: "claude",
+      async isAvailable() {
+        return true;
+      },
+      async *runTurn(input) {
+        const ts = nowIso();
+        await writeFile(
+          join(input.worktreePath, "packages/shared/val.js"),
+          "export const VAL = 42;\n",
+          "utf8",
+        );
+        yield {
+          type: "completed",
+          summary: "Updated shared value to 42",
+          costUsd: 0.03,
+          timestamp: ts,
+        };
+      },
+    };
+
+    const kernel = new SuperWorkKernel({
+      stateStore: store,
+      artifactStore: artifacts,
+      workspace,
+      llm: makeTestLlm(),
+      drivers: [customDriver],
+      outboxExecutor: new GhOutboxExecutor(workspace),
+    });
+
+    const ts = nowIso();
+    await store.upsertRepo({
+      id: "repo_nm",
+      name: "nm-demo",
+      rootPath: repoDir,
+      baseBranch: "main",
+      mode: "auto",
+      defaultTemplate: "fast",
+      preferredImplementEngine: "claude",
+      preferredReviewEngine: "claude",
+      defaultDeliveryChannel: "local_merge",
+      verificationCommands: [
+        `bun -e "import { EXT } from 'ext-pkg'; import { VAL } from './packages/app/node_modules/@ws/shared/val.js'; if (EXT + VAL !== 142) process.exit(1);"`,
+      ],
+      createdAt: ts,
+      updatedAt: ts,
+    });
+
+    const ticket = await kernel.createDirectTicket({
+      repoId: "repo_nm",
+      title: "Update shared constant",
+      description: "Update packages/shared/val.js and verify via mirrored dependencies",
+      template: "fast",
+      allowedPaths: ["packages/shared/**"],
+      preferredEngine: "claude",
+    });
+
+    await kernel.runUntilIdle();
+
+    const finalTicket = await store.getTicket(ticket.id);
+    expect(finalTicket?.status).toBe("delivered");
+    // Verification ran against the worktree's edited value (42), not main's (1)
+    expect(await Bun.file(join(repoDir, "packages/shared/val.js")).text()).toContain("VAL = 42");
+
+    // Ensure node_modules was never tracked by git
+    const lsNodeModules = await runGit(["ls-files", "*node_modules*"], repoDir);
+    expect(lsNodeModules.stdout.trim()).toBe("");
+
+    store.close();
+  });
+
+  it("isolates same-engine review into a fresh session without clobbering implementer session", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sw-blind-rev-"));
+    tempDirs.push(dir);
+    const repoDir = await createTempGitRepo(dir);
+    const store = new SqliteStateStore(join(dir, "state.db"));
+    const artifacts = new FsArtifactStore(join(dir, "artifacts"));
+    const workspace = new GitWorktreeProvider(join(dir, "worktrees"));
+
+    const turns: Array<{ stage: string; isResume: boolean; nativeSessionId?: string }> = [];
+    let reviewCount = 0;
+
+    const sameEngineDriver: WorkerDriver = {
+      engine: "claude",
+      async isAvailable() {
+        return true;
+      },
+      async *runTurn(input) {
+        const ts = nowIso();
+        turns.push({
+          stage: input.stage,
+          isResume: input.isResume,
+          nativeSessionId: input.nativeSessionId,
+        });
+
+        if (input.stage === "plan") {
+          yield { type: "session_started", nativeSessionId: "sess_impl_plan", timestamp: ts };
+          yield { type: "completed", summary: "Plan complete", costUsd: 0.02, timestamp: ts };
+          return;
+        }
+
+        if (input.stage === "implement") {
+          await mkdir(join(input.worktreePath, "src"), { recursive: true });
+          await writeFile(
+            join(input.worktreePath, "src/feature.ts"),
+            `export const rev = ${reviewCount};\n`,
+            "utf8",
+          );
+          yield { type: "completed", summary: "Implemented fix", costUsd: 0.03, timestamp: ts };
+          return;
+        }
+
+        if (input.stage === "review") {
+          reviewCount += 1;
+          yield {
+            type: "session_started",
+            nativeSessionId: `sess_review_${reviewCount}`,
+            timestamp: ts,
+          };
+          const summary =
+            reviewCount === 1
+              ? "Needs fix\n\nVERDICT: **REJECTED** - missing check"
+              : "Looks good\n\nVERDICT: APPROVED";
+          yield { type: "completed", summary, costUsd: 0.02, timestamp: ts };
+          return;
+        }
+      },
+    };
+
+    const kernel = new SuperWorkKernel({
+      stateStore: store,
+      artifactStore: artifacts,
+      workspace,
+      llm: makeTestLlm(),
+      drivers: [sameEngineDriver],
+      outboxExecutor: new GhOutboxExecutor(workspace),
+    });
+
+    const ts = nowIso();
+    await store.upsertRepo({
+      id: "repo_rev",
+      name: "rev-demo",
+      rootPath: repoDir,
+      baseBranch: "main",
+      mode: "auto",
+      defaultTemplate: "standard",
+      preferredImplementEngine: "claude",
+      preferredReviewEngine: "claude",
+      defaultDeliveryChannel: "local_merge",
+      createdAt: ts,
+      updatedAt: ts,
+    });
+
+    const ticket = await kernel.createDirectTicket({
+      repoId: "repo_rev",
+      title: "Fix feature with review loop",
+      description: "Verify blind same-engine review session isolation",
+      template: "standard",
+      allowedPaths: ["src/**"],
+      preferredEngine: "claude",
+    });
+
+    await kernel.runUntilIdle();
+
+    const finalTicket = await store.getTicket(ticket.id);
+    expect(finalTicket?.status).toBe("delivered");
+    expect(finalTicket?.nativeSessions.claude).toBe("sess_impl_plan");
+    expect(turns).toEqual([
+      { stage: "plan", isResume: false, nativeSessionId: undefined },
+      { stage: "implement", isResume: true, nativeSessionId: "sess_impl_plan" },
+      { stage: "review", isResume: false, nativeSessionId: undefined },
+      { stage: "implement", isResume: true, nativeSessionId: "sess_impl_plan" },
+      { stage: "review", isResume: false, nativeSessionId: undefined },
+    ]);
 
     store.close();
   });

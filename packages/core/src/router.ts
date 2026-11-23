@@ -1,15 +1,19 @@
+import { heuristicDecomposeEpic, sanitizeEpicSubtasks } from "./epic.ts";
 import { createDefaultMandate, mandateScopesOverlap } from "./mandate.ts";
 import { getFirstStage } from "./pipeline.ts";
 import type {
   ControlPlaneLLM,
+  CreateEpicInput,
   DirectTicketInput,
   IngestTriggerInput,
   StateStore,
 } from "./ports.ts";
 import type {
+  EpicDecompositionPlan,
   InboxItem,
   KernelEvent,
   Mandate,
+  PipelineTemplateId,
   RepoConfig,
   Thread,
   Ticket,
@@ -312,6 +316,214 @@ export class EventIntakeRouter {
     return ticket;
   }
 
+  async previewEpic(input: {
+    repoId: string;
+    title: string;
+    description: string;
+    template?: PipelineTemplateId;
+  }): Promise<EpicDecompositionPlan> {
+    const repo = await this.stateStore.getRepo(input.repoId);
+    if (!repo) {
+      throw new Error(`Repository not found: ${input.repoId}`);
+    }
+    const defaultTemplate = input.template ?? repo.defaultTemplate;
+    if (this.llm.planEpicDecomposition) {
+      const plan = await this.llm.planEpicDecomposition({
+        repo,
+        title: input.title,
+        description: input.description,
+        defaultTemplate,
+      });
+      return {
+        ...plan,
+        subtasks: sanitizeEpicSubtasks(plan.subtasks, defaultTemplate),
+      };
+    }
+    return heuristicDecomposeEpic({
+      repo,
+      title: input.title,
+      description: input.description,
+      defaultTemplate,
+    });
+  }
+
+  async createEpic(input: CreateEpicInput): Promise<{ epic: Ticket; subtasks: Ticket[] }> {
+    const repo = await this.stateStore.getRepo(input.repoId);
+    if (!repo) {
+      throw new Error(`Repository not found: ${input.repoId}`);
+    }
+
+    const defaultTemplate = input.template ?? repo.defaultTemplate;
+    const plan =
+      input.subtasks && input.subtasks.length > 0
+        ? {
+            epicTitle: input.title,
+            summary: `Epic decomposed into ${input.subtasks.length} subtask(s).`,
+            subtasks: sanitizeEpicSubtasks(input.subtasks, defaultTemplate),
+          }
+        : await this.previewEpic({
+            repoId: repo.id,
+            title: input.title,
+            description: input.description,
+            template: defaultTemplate,
+          });
+
+    const ts = nowIso();
+    const threadKey = `epic:${newId("epc")}`;
+    const trigger: Trigger = {
+      id: newId("trg"),
+      repoId: repo.id,
+      source: "web",
+      threadKey,
+      title: input.title,
+      payload: { epic: true },
+      rawText: input.description,
+      createdAt: ts,
+    };
+    await this.stateStore.saveTrigger(trigger);
+    this.emit({ type: "trigger_ingested", trigger, timestamp: ts });
+
+    const epicThread: Thread = {
+      id: newId("thr"),
+      repoId: repo.id,
+      threadKey,
+      metadata: { source: "web", epic: true },
+      createdAt: ts,
+      updatedAt: ts,
+    };
+    await this.stateStore.upsertThread(epicThread);
+
+    const epicId = newId("epc");
+    const epic: Ticket = {
+      id: epicId,
+      repoId: repo.id,
+      threadId: epicThread.id,
+      sourceTriggerId: trigger.id,
+      title: input.title,
+      description: input.description,
+      status: "implementing",
+      template: defaultTemplate,
+      currentStage: "implement",
+      stageRetries: 0,
+      mandate: createDefaultMandate({
+        allowedPaths: ["**"],
+        maxCostUsd: (input.maxCostUsdPerSubtask ?? 2.0) * Math.max(1, plan.subtasks.length),
+      }),
+      dependsOn: [],
+      isEpic: true,
+      nativeSessions: {},
+      preferredEngine: input.preferredEngine,
+      inlineMemory: {
+        goal: input.description,
+        acceptanceCriteria: plan.subtasks.map((s) => `[${s.key}] ${s.title}`),
+        planSummary: `${plan.summary}\n${plan.subtasks
+          .map((s) => `- ${s.key}: ${s.title} (${s.allowedPaths.join(", ")})`)
+          .join("\n")}`,
+        stageNotes: [],
+        threadUpdates: [],
+      },
+      costUsd: 0,
+      priority: 1,
+      createdAt: ts,
+      updatedAt: ts,
+    };
+    await this.stateStore.saveTicket(epic);
+    await this.stateStore.upsertThread({
+      ...epicThread,
+      subscribedTicketId: epic.id,
+      updatedAt: ts,
+    });
+    this.emit({ type: "ticket_created", ticket: epic, timestamp: ts });
+
+    const createdByKey = new Map<string, Ticket>();
+    const subtasks: Ticket[] = [];
+    const activeBefore = (await this.stateStore.listActiveTickets(repo.id)).filter(
+      (t) => !t.isEpic,
+    );
+
+    for (const spec of plan.subtasks) {
+      const subTs = nowIso();
+      const subThreadKey = `${threadKey}:${spec.key}`;
+      const subThread: Thread = {
+        id: newId("thr"),
+        repoId: repo.id,
+        threadKey: subThreadKey,
+        metadata: { source: "web", epicId: epic.id, subtaskKey: spec.key },
+        createdAt: subTs,
+        updatedAt: subTs,
+      };
+      await this.stateStore.upsertThread(subThread);
+
+      const subMandate = createDefaultMandate({
+        allowedPaths: spec.allowedPaths,
+        maxCostUsd: input.maxCostUsdPerSubtask ?? 2.0,
+      });
+
+      const explicitDeps = spec.dependsOnKeys
+        .map((k) => createdByKey.get(k)?.id)
+        .filter((id): id is string => Boolean(id));
+      const existingOverlapDeps = this.computeOverlappingDependencies(subMandate, [
+        ...activeBefore,
+        ...subtasks.filter((existing) => !explicitDeps.includes(existing.id)),
+      ]);
+      const dependsOn = Array.from(new Set([...explicitDeps, ...existingOverlapDeps]));
+
+      const subTicket: Ticket = {
+        id: newId("tkt"),
+        repoId: repo.id,
+        threadId: subThread.id,
+        sourceTriggerId: trigger.id,
+        title: spec.title,
+        description: spec.description,
+        status: dependsOn.length > 0 ? "waiting_deps" : "queued",
+        template: spec.template,
+        currentStage: getFirstStage(spec.template),
+        stageRetries: 0,
+        mandate: subMandate,
+        dependsOn,
+        parentTicketId: epic.id,
+        isEpic: false,
+        subtaskKey: spec.key,
+        nativeSessions: {},
+        preferredEngine: input.preferredEngine,
+        activeEngine: input.preferredEngine,
+        modelOverride: input.modelOverride?.trim() || undefined,
+        effortOverride: input.effortOverride,
+        inlineMemory: {
+          goal: spec.description,
+          acceptanceCriteria: spec.acceptanceCriteria,
+          stageNotes: [],
+          threadUpdates: [],
+        },
+        costUsd: 0,
+        priority: 1,
+        createdAt: subTs,
+        updatedAt: subTs,
+      };
+
+      await this.stateStore.saveTicket(subTicket);
+      await this.stateStore.upsertThread({
+        ...subThread,
+        subscribedTicketId: subTicket.id,
+        updatedAt: subTs,
+      });
+      await this.stateStore.indexMemoryDocument({
+        entityType: "ticket",
+        entityId: subTicket.id,
+        ticketId: subTicket.id,
+        repoId: repo.id,
+        title: subTicket.title,
+        body: `${subTicket.description}\nAllowed: ${subMandate.allowedPaths.join(", ")}`,
+      });
+      this.emit({ type: "ticket_created", ticket: subTicket, timestamp: subTs });
+
+      createdByKey.set(spec.key, subTicket);
+      subtasks.push(subTicket);
+    }
+
+    return { epic, subtasks };
+  }
+
   async resolveDependenciesForWaitingTickets(repo: RepoConfig): Promise<Ticket[]> {
     const waiting = await this.stateStore.listTickets({ repoId: repo.id, status: "waiting_deps" });
     const unblocked: Ticket[] = [];
@@ -376,7 +588,7 @@ export class EventIntakeRouter {
   private computeOverlappingDependencies(mandate: Mandate, activeTickets: Ticket[]): string[] {
     const deps: string[] = [];
     for (const active of activeTickets) {
-      if (active.status === "proposed") continue;
+      if (active.status === "proposed" || active.isEpic) continue;
       if (mandateScopesOverlap(mandate, active.mandate)) {
         deps.push(active.id);
       }

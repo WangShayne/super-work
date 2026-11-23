@@ -1,7 +1,10 @@
 import type {
   ChainOfRecall,
   CliScanReport,
+  DeliveryChannel,
   EngineModelProfile,
+  EpicDecompositionPlan,
+  EpicSubtaskSpec,
   HealthResponse,
   InboxItem,
   LlmConnectionTestResult,
@@ -50,6 +53,8 @@ export const api = {
     defaultTemplate?: PipelineTemplateId;
     preferredImplementEngine?: WorkerEngineId;
     preferredReviewEngine?: WorkerEngineId;
+    verificationCommands?: string[];
+    defaultDeliveryChannel?: DeliveryChannel;
   }) => request<{ repo: RepoConfig }>("/api/repos", { method: "POST", body: JSON.stringify(payload) }),
 
   patchRepo: (id: string, patch: Partial<RepoConfig>) =>
@@ -90,6 +95,39 @@ export const api = {
       body: "{}",
     }),
 
+  deliverTicket: (ticketId: string, action: "local_merge" | "push_and_create_pr") =>
+    request<{ ticket: Ticket; entry: OutboxEntry }>(`/api/tickets/${ticketId}/deliver`, {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    }),
+
+  previewEpic: (payload: {
+    repoId: string;
+    title: string;
+    description: string;
+    template?: PipelineTemplateId;
+  }) =>
+    request<{ plan: EpicDecompositionPlan }>("/api/epics/preview", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  createEpic: (payload: {
+    repoId: string;
+    title: string;
+    description: string;
+    template?: PipelineTemplateId;
+    preferredEngine?: WorkerEngineId;
+    modelOverride?: string;
+    effortOverride?: ReasoningEffort;
+    maxCostUsdPerSubtask?: number;
+    subtasks?: EpicSubtaskSpec[];
+  }) =>
+    request<{ epic: Ticket; subtasks: Ticket[] }>("/api/epics", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
   listWorktrees: (repoId?: string) =>
     request<{ items: ManagedWorktreeItem[] }>(
       repoId ? `/api/worktrees?repoId=${encodeURIComponent(repoId)}` : "/api/worktrees",
@@ -117,10 +155,15 @@ export const api = {
     return request<{ items: InboxItem[] }>(qs ? `/api/inbox?${qs}` : "/api/inbox");
   },
 
-  resolveInbox: (id: string, decision: "approved" | "rejected", note?: string) =>
+  resolveInbox: (
+    id: string,
+    decision: "approved" | "rejected",
+    note?: string,
+    deliveryAction?: "local_merge" | "push_and_create_pr",
+  ) =>
     request<{ item: InboxItem; ticket: Ticket }>(`/api/inbox/${id}/resolve`, {
       method: "POST",
-      body: JSON.stringify({ decision, note }),
+      body: JSON.stringify({ decision, note, deliveryAction }),
     }),
 
   getRecall: (ticketId: string) => request<{ chain: ChainOfRecall }>(`/api/tickets/${ticketId}/recall`),

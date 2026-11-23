@@ -115,6 +115,7 @@ export function App() {
       "outbox_sent",
       "outbox_failed",
       "worktrees_gc",
+      "verification_completed",
     ];
 
     for (const name of eventNames) {
@@ -196,8 +197,9 @@ export function App() {
     id: string,
     decision: "approved" | "rejected",
     note?: string,
+    deliveryAction?: "local_merge" | "push_and_create_pr",
   ) => {
-    await api.resolveInbox(id, decision, note);
+    await api.resolveInbox(id, decision, note, deliveryAction);
     await refreshAll(selectedRepoId || undefined);
   };
 
@@ -273,8 +275,11 @@ export function App() {
 
       <DeepDiveDrawer
         ticketId={inspectedTicketId}
+        allTickets={tickets}
+        repo={activeRepo}
         liveEvents={liveEvents}
         onClose={() => setInspectedTicketId(null)}
+        onSelectTicket={(id) => setInspectedTicketId(id)}
         onRefresh={() => void refreshAll(selectedRepoId || undefined)}
       />
 
@@ -282,12 +287,18 @@ export function App() {
         <>
           <DispatchTaskModal
             open={dispatchOpen}
+            repoId={activeRepo.id}
             availableEngines={health?.availableEngines ?? ["mock"]}
             defaultTemplate={activeRepo.defaultTemplate}
             defaultEngine={activeRepo.preferredImplementEngine}
             onClose={() => setDispatchOpen(false)}
             onSubmit={async (data) => {
               await api.createTicket({ repoId: activeRepo.id, ...data });
+              await refreshAll(activeRepo.id);
+              setActiveTab("board");
+            }}
+            onCreateEpic={async (epicPayload) => {
+              await api.createEpic(epicPayload);
               await refreshAll(activeRepo.id);
               setActiveTab("board");
             }}

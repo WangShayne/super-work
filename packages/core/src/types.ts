@@ -32,6 +32,38 @@ export type TicketStatus =
 
 export type TriggerSource = "web" | "github_issue" | "github_pr" | "github_ci" | "cli";
 
+export type DeliveryChannel = "auto_pr_or_branch" | "local_merge" | "github_pr";
+
+export interface VerificationCommandOutput {
+  command: string;
+  exitCode: number;
+  durationMs: number;
+  output: string;
+}
+
+export interface VerificationRunResult {
+  ok: boolean;
+  results: VerificationCommandOutput[];
+  failedCommand?: string;
+  summary: string;
+}
+
+export interface EpicSubtaskSpec {
+  key: string;
+  title: string;
+  description: string;
+  template: PipelineTemplateId;
+  allowedPaths: string[];
+  dependsOnKeys: string[];
+  acceptanceCriteria: string[];
+}
+
+export interface EpicDecompositionPlan {
+  epicTitle: string;
+  summary: string;
+  subtasks: EpicSubtaskSpec[];
+}
+
 export interface RepoConfig {
   id: string;
   name: string;
@@ -43,6 +75,8 @@ export interface RepoConfig {
   preferredImplementEngine: WorkerEngineId;
   preferredReviewEngine: WorkerEngineId;
   autoCleanupWorktree?: boolean;
+  verificationCommands?: string[];
+  defaultDeliveryChannel?: DeliveryChannel;
   createdAt: string;
   updatedAt: string;
 }
@@ -119,6 +153,9 @@ export interface Ticket {
   stageRetries: number;
   mandate: Mandate;
   dependsOn: string[];
+  parentTicketId?: string;
+  isEpic?: boolean;
+  subtaskKey?: string;
   worktreePath?: string;
   branchName?: string;
   worktreeCleanedAt?: string;
@@ -188,7 +225,7 @@ export interface InboxItem {
   resolvedAt?: string;
 }
 
-export type OutboxAction = "push_and_create_pr" | "comment_issue" | "comment_pr";
+export type OutboxAction = "push_and_create_pr" | "local_merge" | "comment_issue" | "comment_pr";
 
 export type OutboxStatus = "awaiting_approval" | "pending" | "processing" | "sent" | "failed" | "cancelled";
 
@@ -327,7 +364,14 @@ export type KernelEvent =
   | { type: "outbox_queued"; entry: OutboxEntry; timestamp: string }
   | { type: "outbox_sent"; entry: OutboxEntry; timestamp: string }
   | { type: "outbox_failed"; entry: OutboxEntry; timestamp: string }
-  | { type: "worktrees_gc"; result: WorktreeGcResult; timestamp: string };
+  | { type: "worktrees_gc"; result: WorktreeGcResult; timestamp: string }
+  | {
+      type: "verification_completed";
+      ticketId: string;
+      stageRunId: string;
+      result: VerificationRunResult;
+      timestamp: string;
+    };
 
 export interface ManagedWorktreeItem {
   path: string;

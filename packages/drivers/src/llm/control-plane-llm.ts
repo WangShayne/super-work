@@ -1,9 +1,11 @@
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getAlternateEngine } from "@super-work/core";
+import { getAlternateEngine, normalizeEpicDecompositionPlan, heuristicDecomposeEpic } from "@super-work/core";
 import type {
   ControlPlaneLLM,
+  EpicDecompositionPlan,
   LlmProviderPreset,
   MemorySearchHit,
   PipelineTemplateId,
@@ -25,6 +27,105 @@ export interface OpenAICompatibleConfig {
   baseUrl: string;
   model: string;
   providerLabel?: string;
+  timeoutMs?: number;
+}
+
+const DEFAULT_CONTROL_PLANE_TIMEOUT_MS = 20_000;
+const DEFAULT_HTTP_LLM_TIMEOUT_MS = 25_000;
+const PLACEHOLDER_CLI_MODELS = new Set(["claude-cli", "codex-cli", "heuristic", "default"]);
+
+export function sanitizeCliModelName(model?: string): string | undefined {
+  const trimmed = model?.trim();
+  if (!trimmed) return undefined;
+  if (PLACEHOLDER_CLI_MODELS.has(trimmed.toLowerCase())) return undefined;
+  return trimmed;
+}
+
+export function createSanitizedClaudeEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.CLAUDECODE;
+  delete env.CLAUDE_CODE_ENTRYPOINT;
+  return env;
+}
+
+export function buildClaudeControlPlaneArgs(input: {
+  prompt: string;
+  schema: Record<string, unknown>;
+  model?: string;
+  effort: ReasoningEffort;
+}): string[] {
+  const args = [
+    "-p",
+    "--output-format",
+    "json",
+    "--tools",
+    "",
+    "--strict-mcp-config",
+    "--disable-slash-commands",
+    "--no-session-persistence",
+    "--effort",
+    input.effort,
+    "--json-schema",
+    JSON.stringify(input.schema),
+  ];
+  const cleanModel = sanitizeCliModelName(input.model);
+  if (cleanModel) {
+    args.push("--model", cleanModel);
+  }
+  args.push(input.prompt);
+  return args;
+}
+
+function resolveExecutable(bin: string): string | null {
+  if (bin.includes("/")) {
+    return existsSync(bin) ? bin : null;
+  }
+  return Bun.which(bin);
+}
+
+async function runSpawnWithTimeout(
+  cmd: string[],
+  options: { timeoutMs: number; env?: NodeJS.ProcessEnv; label: string },
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const proc = Bun.spawn(cmd, {
+    stdout: "pipe",
+    stderr: "pipe",
+    stdin: "ignore",
+    env: options.env,
+  });
+
+  const stdoutPromise = new Response(proc.stdout).text().catch(() => "");
+  const stderrPromise = new Response(proc.stderr).text().catch(() => "");
+  const completionPromise = Promise.all([stdoutPromise, stderrPromise, proc.exited]).then(
+    ([stdout, stderr, exitCode]) => ({ stdout, stderr, exitCode }),
+  );
+  completionPromise.catch(() => {});
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        // Ignore already exited process
+      }
+      const killTimer = setTimeout(() => {
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          // Ignore already exited process
+        }
+      }, 250);
+      killTimer.unref?.();
+      reject(new Error(`${options.label} timed out after ${options.timeoutMs}ms`));
+    }, options.timeoutMs);
+  });
+
+  try {
+    return await Promise.race([completionPromise, timeoutPromise]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 const TRIAGE_SCHEMA = {
@@ -63,6 +164,31 @@ const WATCHDOG_SCHEMA = {
     targetEngine: { type: "string", enum: ["claude", "codex", "opencode", "mock"] },
   },
   required: ["action", "reason"],
+};
+
+const EPIC_DECOMPOSITION_SCHEMA = {
+  type: "object",
+  properties: {
+    epicTitle: { type: "string" },
+    summary: { type: "string" },
+    subtasks: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          key: { type: "string" },
+          title: { type: "string" },
+          description: { type: "string" },
+          template: { type: "string", enum: ["fast", "standard", "strict"] },
+          allowedPaths: { type: "array", items: { type: "string" } },
+          dependsOnKeys: { type: "array", items: { type: "string" } },
+          acceptanceCriteria: { type: "array", items: { type: "string" } },
+        },
+        required: ["key", "title", "description", "template", "allowedPaths", "dependsOnKeys"],
+      },
+    },
+  },
+  required: ["epicTitle", "summary", "subtasks"],
 };
 
 export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
@@ -130,6 +256,31 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
     return normalizeWatchdogDecision(parsed, input.stageRun.engine, input.availableEngines);
   }
 
+  async planEpicDecomposition(input: {
+    repo: RepoConfig;
+    title: string;
+    description: string;
+    defaultTemplate: PipelineTemplateId;
+  }): Promise<EpicDecompositionPlan> {
+    const sys = [
+      "You are the Super-agent Epic Architect.",
+      "Decompose a complex software requirement into 2-6 focused subtasks with disjoint Mandate allowedPaths whenever possible so independent workers execute concurrently in separate worktrees.",
+      "Only add dependsOnKeys when a subtask genuinely consumes contracts/APIs built by another subtask.",
+      "Output ONLY valid JSON matching the schema:",
+      JSON.stringify(EPIC_DECOMPOSITION_SCHEMA),
+    ].join("\n");
+
+    const user = JSON.stringify({
+      repo: { name: input.repo.name, baseBranch: input.repo.baseBranch },
+      title: input.title,
+      description: input.description,
+      defaultTemplate: input.defaultTemplate,
+    });
+
+    const parsed = await this.chatJson<Partial<EpicDecompositionPlan>>(sys, user);
+    return normalizeEpicDecompositionPlan(parsed, input);
+  }
+
   private async chatJson<T>(systemPrompt: string, userPrompt: string): Promise<T> {
     const url = `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`;
     const res = await fetch(url, {
@@ -147,6 +298,7 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
           { role: "user", content: userPrompt },
         ],
       }),
+      signal: AbortSignal.timeout(this.config.timeoutMs ?? DEFAULT_HTTP_LLM_TIMEOUT_MS),
     });
 
     if (!res.ok) {
@@ -170,11 +322,18 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
   private readonly claudeBin: string;
   private readonly model?: string;
   private readonly effort: ReasoningEffort;
+  private readonly timeoutMs: number;
 
-  constructor(options?: { claudeBin?: string; model?: string; effort?: ReasoningEffort }) {
+  constructor(options?: {
+    claudeBin?: string;
+    model?: string;
+    effort?: ReasoningEffort;
+    timeoutMs?: number;
+  }) {
     this.claudeBin = options?.claudeBin ?? "claude";
-    this.model = options?.model?.trim() || undefined;
+    this.model = sanitizeCliModelName(options?.model);
     this.effort = options?.effort ?? "low";
+    this.timeoutMs = options?.timeoutMs ?? DEFAULT_CONTROL_PLANE_TIMEOUT_MS;
     this.providerName = `cli:claude(${this.model ?? "default"},${this.effort})`;
   }
 
@@ -211,37 +370,44 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
     return normalizeWatchdogDecision(parsed, input.stageRun.engine, input.availableEngines);
   }
 
+  async planEpicDecomposition(input: {
+    repo: RepoConfig;
+    title: string;
+    description: string;
+    defaultTemplate: PipelineTemplateId;
+  }): Promise<EpicDecompositionPlan> {
+    const prompt = [
+      "Decompose this Epic requirement into a DAG of scoped subtasks with disjoint allowedPaths where independent.",
+      `Repo: ${input.repo.name}, DefaultTemplate: ${input.defaultTemplate}`,
+      `Title: ${input.title}`,
+      `Description: ${input.description}`,
+    ].join("\n");
+    const parsed = await this.runClaudeJson<Partial<EpicDecompositionPlan>>(
+      prompt,
+      EPIC_DECOMPOSITION_SCHEMA,
+    );
+    return normalizeEpicDecompositionPlan(parsed, input);
+  }
+
   private async runClaudeJson<T>(prompt: string, schema: Record<string, unknown>): Promise<T> {
-    if (!Bun.which(this.claudeBin)) {
+    const resolvedBin = resolveExecutable(this.claudeBin);
+    if (!resolvedBin) {
       throw new Error("claude CLI not found on PATH");
     }
-    const args = [
-      this.claudeBin,
-      "-p",
-      "--output-format",
-      "json",
-      "--tools",
-      "",
-      "--no-session-persistence",
-      "--effort",
-      this.effort,
-      "--json-schema",
-      JSON.stringify(schema),
-    ];
-    if (this.model) {
-      args.push("--model", this.model);
-    }
-    args.push(prompt);
+    const args = buildClaudeControlPlaneArgs({
+      prompt,
+      schema,
+      model: this.model,
+      effort: this.effort,
+    });
 
-    const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
-
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
-    if (code !== 0) {
-      throw new Error(`CLI LLM failed (${code}): ${stderr.slice(0, 200)}`);
+    const { stdout, stderr, exitCode } = await runSpawnWithTimeout([resolvedBin, ...args], {
+      timeoutMs: this.timeoutMs,
+      env: createSanitizedClaudeEnv(),
+      label: "Claude CLI ControlPlaneLLM",
+    });
+    if (exitCode !== 0) {
+      throw new Error(`CLI LLM failed (${exitCode}): ${stderr.slice(0, 200)}`);
     }
     const envelope = JSON.parse(stdout) as { structured_output?: T; result?: string };
     if (envelope.structured_output) {
@@ -259,12 +425,19 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
   private readonly codexBin: string;
   private readonly model?: string;
   private readonly effort: "low" | "medium" | "high" | "xhigh";
+  private readonly timeoutMs: number;
 
-  constructor(options?: { codexBin?: string; model?: string; effort?: ReasoningEffort }) {
+  constructor(options?: {
+    codexBin?: string;
+    model?: string;
+    effort?: ReasoningEffort;
+    timeoutMs?: number;
+  }) {
     this.codexBin = options?.codexBin ?? "codex";
-    this.model = options?.model?.trim() || undefined;
+    this.model = sanitizeCliModelName(options?.model);
     const rawEffort = options?.effort ?? "low";
     this.effort = rawEffort === "max" ? "xhigh" : rawEffort;
+    this.timeoutMs = options?.timeoutMs ?? DEFAULT_CONTROL_PLANE_TIMEOUT_MS;
     this.providerName = `cli:codex(${this.model ?? "default"},${this.effort})`;
   }
 
@@ -301,8 +474,28 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
     return normalizeWatchdogDecision(parsed, input.stageRun.engine, input.availableEngines);
   }
 
+  async planEpicDecomposition(input: {
+    repo: RepoConfig;
+    title: string;
+    description: string;
+    defaultTemplate: PipelineTemplateId;
+  }): Promise<EpicDecompositionPlan> {
+    const prompt = [
+      "Decompose this Epic requirement into a DAG of scoped subtasks with disjoint allowedPaths where independent.",
+      `Repo: ${input.repo.name}, DefaultTemplate: ${input.defaultTemplate}`,
+      `Title: ${input.title}`,
+      `Description: ${input.description}`,
+    ].join("\n");
+    const parsed = await this.runCodexJson<Partial<EpicDecompositionPlan>>(
+      prompt,
+      EPIC_DECOMPOSITION_SCHEMA,
+    );
+    return normalizeEpicDecompositionPlan(parsed, input);
+  }
+
   private async runCodexJson<T>(prompt: string, schema: Record<string, unknown>): Promise<T> {
-    if (!Bun.which(this.codexBin)) {
+    const resolvedBin = resolveExecutable(this.codexBin);
+    if (!resolvedBin) {
       throw new Error("codex CLI not found on PATH");
     }
     const dir = await mkdtemp(join(tmpdir(), "sw-codex-llm-"));
@@ -311,7 +504,7 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
     try {
       await writeFile(schemaPath, JSON.stringify({ ...schema, additionalProperties: false }), "utf8");
       const args = [
-        this.codexBin,
+        resolvedBin,
         "exec",
         "--ephemeral",
         "--skip-git-repo-check",
@@ -329,10 +522,12 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
       }
       args.push(prompt);
 
-      const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
-      const [stderr, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
-      if (code !== 0) {
-        throw new Error(`Codex CLI LLM failed (${code}): ${stderr.slice(0, 200)}`);
+      const { stderr, exitCode } = await runSpawnWithTimeout(args, {
+        timeoutMs: this.timeoutMs,
+        label: "Codex CLI ControlPlaneLLM",
+      });
+      if (exitCode !== 0) {
+        throw new Error(`Codex CLI LLM failed (${exitCode}): ${stderr.slice(0, 200)}`);
       }
       const rawOut = await readFile(outPath, "utf8");
       return extractJsonObject<T>(rawOut);
@@ -445,6 +640,15 @@ export class HeuristicControlLLM implements ControlPlaneLLM {
       reason: `Retries exhausted after ${input.signal.kind}: ${input.signal.details}`,
     };
   }
+
+  async planEpicDecomposition(input: {
+    repo: RepoConfig;
+    title: string;
+    description: string;
+    defaultTemplate: PipelineTemplateId;
+  }): Promise<EpicDecompositionPlan> {
+    return heuristicDecomposeEpic(input);
+  }
 }
 
 export class CompositeControlPlaneLLM implements ControlPlaneLLM {
@@ -485,6 +689,23 @@ export class CompositeControlPlaneLLM implements ControlPlaneLLM {
       }
     }
     throw new Error("All ControlPlaneLLM providers failed");
+  }
+
+  async planEpicDecomposition(input: {
+    repo: RepoConfig;
+    title: string;
+    description: string;
+    defaultTemplate: PipelineTemplateId;
+  }): Promise<EpicDecompositionPlan> {
+    for (const provider of this.chain) {
+      if (!provider.planEpicDecomposition) continue;
+      try {
+        return await provider.planEpicDecomposition(input);
+      } catch {
+        // Fallback to next control-plane provider
+      }
+    }
+    return heuristicDecomposeEpic(input);
   }
 }
 
@@ -557,7 +778,7 @@ export function buildControlPlaneLLMFromSetup(config?: SystemSetupConfig | null)
   if (config.llmPreset === "claude_cli") {
     return new CompositeControlPlaneLLM([
       new CliFallbackControlLLM({
-        model: config.llmModel?.trim() || undefined,
+        model: sanitizeCliModelName(config.llmModel),
         effort: config.llmEffort ?? "low",
       }),
       new HeuristicControlLLM(),
@@ -567,7 +788,7 @@ export function buildControlPlaneLLMFromSetup(config?: SystemSetupConfig | null)
   if (config.llmPreset === "codex_cli") {
     return new CompositeControlPlaneLLM([
       new CodexCliControlLLM({
-        model: config.llmModel?.trim() || undefined,
+        model: sanitizeCliModelName(config.llmModel),
         effort: config.llmEffort ?? "low",
       }),
       new HeuristicControlLLM(),
@@ -610,6 +831,18 @@ export class MutableControlPlaneLLM implements ControlPlaneLLM {
   }): Promise<WatchdogDecision> {
     return this.current.diagnoseWatchdog(input);
   }
+
+  planEpicDecomposition(input: {
+    repo: RepoConfig;
+    title: string;
+    description: string;
+    defaultTemplate: PipelineTemplateId;
+  }): Promise<EpicDecompositionPlan> {
+    if (this.current.planEpicDecomposition) {
+      return this.current.planEpicDecomposition(input);
+    }
+    return Promise.resolve(heuristicDecomposeEpic(input));
+  }
 }
 
 export async function testControlPlaneLLMConnection(input: {
@@ -631,7 +864,8 @@ export async function testControlPlaneLLMConnection(input: {
   }
 
   if (input.llmPreset === "claude_cli") {
-    const label = `cli:claude(${input.llmModel.trim() || "default"},${input.llmEffort ?? "low"})`;
+    const cleanModel = sanitizeCliModelName(input.llmModel);
+    const label = `cli:claude(${cleanModel ?? "default"},${input.llmEffort ?? "low"})`;
     const bin = Bun.which("claude");
     if (!bin) {
       return {
@@ -641,44 +875,52 @@ export async function testControlPlaneLLMConnection(input: {
         message: "claude CLI not found on PATH.",
       };
     }
-    const proc = Bun.spawn([bin, "auth", "status", "--json"], {
-      stdout: "pipe",
-      stderr: "pipe",
-      stdin: "ignore",
-    });
-    const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
     try {
-      const parsed = JSON.parse(stdout) as { loggedIn?: boolean; authMethod?: string };
-      if (parsed.loggedIn) {
-        return {
-          ok: true,
-          providerName: label,
-          latencyMs: Date.now() - started,
-          message: `claude CLI authenticated (${parsed.authMethod ?? "ok"}).`,
-        };
+      const { stdout, exitCode: code } = await runSpawnWithTimeout(
+        [bin, "auth", "status", "--json"],
+        { timeoutMs: 10_000, env: createSanitizedClaudeEnv(), label: "claude auth status" },
+      );
+      try {
+        const parsed = JSON.parse(stdout) as { loggedIn?: boolean; authMethod?: string };
+        if (parsed.loggedIn) {
+          return {
+            ok: true,
+            providerName: label,
+            latencyMs: Date.now() - started,
+            message: `claude CLI authenticated (${parsed.authMethod ?? "ok"}).`,
+          };
+        }
+      } catch {
+        if (code === 0) {
+          return {
+            ok: true,
+            providerName: label,
+            latencyMs: Date.now() - started,
+            message: "claude CLI authenticated.",
+          };
+        }
       }
-    } catch {
-      if (code === 0) {
-        return {
-          ok: true,
-          providerName: label,
-          latencyMs: Date.now() - started,
-          message: "claude CLI authenticated.",
-        };
-      }
+      return {
+        ok: false,
+        providerName: label,
+        latencyMs: Date.now() - started,
+        message: "claude CLI is installed but not logged in (run `claude auth login`).",
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        providerName: label,
+        latencyMs: Date.now() - started,
+        message: err instanceof Error ? err.message : String(err),
+      };
     }
-    return {
-      ok: false,
-      providerName: label,
-      latencyMs: Date.now() - started,
-      message: "claude CLI is installed but not logged in (run `claude auth login`).",
-    };
   }
 
   if (input.llmPreset === "codex_cli") {
     const rawEffort = input.llmEffort ?? "low";
     const normEffort = rawEffort === "max" ? "xhigh" : rawEffort;
-    const label = `cli:codex(${input.llmModel.trim() || "default"},${normEffort})`;
+    const cleanModel = sanitizeCliModelName(input.llmModel);
+    const label = `cli:codex(${cleanModel ?? "default"},${normEffort})`;
     const bin = Bun.which("codex");
     if (!bin) {
       return {
@@ -688,30 +930,33 @@ export async function testControlPlaneLLMConnection(input: {
         message: "codex CLI not found on PATH.",
       };
     }
-    const proc = Bun.spawn([bin, "login", "status"], {
-      stdout: "pipe",
-      stderr: "pipe",
-      stdin: "ignore",
-    });
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
-    if (code === 0) {
+    try {
+      const { stdout, stderr, exitCode: code } = await runSpawnWithTimeout(
+        [bin, "login", "status"],
+        { timeoutMs: 10_000, label: "codex login status" },
+      );
+      if (code === 0) {
+        return {
+          ok: true,
+          providerName: label,
+          latencyMs: Date.now() - started,
+          message: (stdout || stderr).trim() || "codex CLI authenticated.",
+        };
+      }
       return {
-        ok: true,
+        ok: false,
         providerName: label,
         latencyMs: Date.now() - started,
-        message: (stdout || stderr).trim() || "codex CLI authenticated.",
+        message: "codex CLI is installed but not logged in (run `codex login`).",
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        providerName: label,
+        latencyMs: Date.now() - started,
+        message: err instanceof Error ? err.message : String(err),
       };
     }
-    return {
-      ok: false,
-      providerName: label,
-      latencyMs: Date.now() - started,
-      message: "codex CLI is installed but not logged in (run `codex login`).",
-    };
   }
 
   const apiKey = input.llmApiKey?.trim();

@@ -61,6 +61,8 @@ export class SqliteStateStore implements StateStore {
         preferred_implement_engine TEXT NOT NULL,
         preferred_review_engine TEXT NOT NULL,
         auto_cleanup_worktree INTEGER NOT NULL DEFAULT 1,
+        verification_commands_json TEXT NOT NULL DEFAULT '[]',
+        default_delivery_channel TEXT NOT NULL DEFAULT 'auto_pr_or_branch',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -106,6 +108,9 @@ export class SqliteStateStore implements StateStore {
         stage_retries INTEGER NOT NULL DEFAULT 0,
         mandate_json TEXT NOT NULL,
         depends_on_json TEXT NOT NULL,
+        parent_ticket_id TEXT,
+        is_epic INTEGER NOT NULL DEFAULT 0,
+        subtask_key TEXT,
         worktree_path TEXT,
         branch_name TEXT,
         worktree_cleaned_at TEXT,
@@ -210,6 +215,16 @@ export class SqliteStateStore implements StateStore {
     if (!existingRepoCols.has("auto_cleanup_worktree")) {
       this.db.run("ALTER TABLE repos ADD COLUMN auto_cleanup_worktree INTEGER NOT NULL DEFAULT 1;");
     }
+    if (!existingRepoCols.has("verification_commands_json")) {
+      this.db.run(
+        "ALTER TABLE repos ADD COLUMN verification_commands_json TEXT NOT NULL DEFAULT '[]';",
+      );
+    }
+    if (!existingRepoCols.has("default_delivery_channel")) {
+      this.db.run(
+        "ALTER TABLE repos ADD COLUMN default_delivery_channel TEXT NOT NULL DEFAULT 'auto_pr_or_branch';",
+      );
+    }
 
     const cols = this.db
       .query("PRAGMA table_info(tickets)")
@@ -227,6 +242,15 @@ export class SqliteStateStore implements StateStore {
     if (!existingCols.has("worktree_cleaned_at")) {
       this.db.run("ALTER TABLE tickets ADD COLUMN worktree_cleaned_at TEXT;");
     }
+    if (!existingCols.has("parent_ticket_id")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN parent_ticket_id TEXT;");
+    }
+    if (!existingCols.has("is_epic")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN is_epic INTEGER NOT NULL DEFAULT 0;");
+    }
+    if (!existingCols.has("subtask_key")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN subtask_key TEXT;");
+    }
   }
 
   // --- Repos ---
@@ -235,8 +259,9 @@ export class SqliteStateStore implements StateStore {
       .query(
         `INSERT INTO repos (
           id, name, root_path, base_branch, mode, github_repo, default_template,
-          preferred_implement_engine, preferred_review_engine, auto_cleanup_worktree, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          preferred_implement_engine, preferred_review_engine, auto_cleanup_worktree,
+          verification_commands_json, default_delivery_channel, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           root_path = excluded.root_path,
@@ -247,6 +272,8 @@ export class SqliteStateStore implements StateStore {
           preferred_implement_engine = excluded.preferred_implement_engine,
           preferred_review_engine = excluded.preferred_review_engine,
           auto_cleanup_worktree = excluded.auto_cleanup_worktree,
+          verification_commands_json = excluded.verification_commands_json,
+          default_delivery_channel = excluded.default_delivery_channel,
           updated_at = excluded.updated_at`,
       )
       .run(
@@ -260,6 +287,8 @@ export class SqliteStateStore implements StateStore {
         repo.preferredImplementEngine,
         repo.preferredReviewEngine,
         repo.autoCleanupWorktree === false ? 0 : 1,
+        JSON.stringify(repo.verificationCommands ?? []),
+        repo.defaultDeliveryChannel ?? "auto_pr_or_branch",
         repo.createdAt,
         repo.updatedAt,
       );
@@ -357,10 +386,12 @@ export class SqliteStateStore implements StateStore {
       .query(
         `INSERT INTO tickets (
           id, repo_id, thread_id, source_trigger_id, title, description, status, template,
-          current_stage, stage_retries, mandate_json, depends_on_json, worktree_path, branch_name,
-          worktree_cleaned_at, native_sessions_json, preferred_engine, active_engine, model_override, effort_override,
+          current_stage, stage_retries, mandate_json, depends_on_json,
+          parent_ticket_id, is_epic, subtask_key,
+          worktree_path, branch_name, worktree_cleaned_at,
+          native_sessions_json, preferred_engine, active_engine, model_override, effort_override,
           inline_memory_json, cost_usd, priority, error_message, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           status = excluded.status,
           template = excluded.template,
@@ -368,6 +399,9 @@ export class SqliteStateStore implements StateStore {
           stage_retries = excluded.stage_retries,
           mandate_json = excluded.mandate_json,
           depends_on_json = excluded.depends_on_json,
+          parent_ticket_id = excluded.parent_ticket_id,
+          is_epic = excluded.is_epic,
+          subtask_key = excluded.subtask_key,
           worktree_path = excluded.worktree_path,
           branch_name = excluded.branch_name,
           worktree_cleaned_at = excluded.worktree_cleaned_at,
@@ -395,6 +429,9 @@ export class SqliteStateStore implements StateStore {
         ticket.stageRetries,
         JSON.stringify(ticket.mandate),
         JSON.stringify(ticket.dependsOn),
+        ticket.parentTicketId ?? null,
+        ticket.isEpic ? 1 : 0,
+        ticket.subtaskKey ?? null,
         ticket.worktreePath ?? null,
         ticket.branchName ?? null,
         ticket.worktreeCleanedAt ?? null,
@@ -835,6 +872,12 @@ function mapRepoRow(r: Record<string, unknown>): RepoConfig {
       r.auto_cleanup_worktree === undefined || r.auto_cleanup_worktree === null
         ? true
         : Boolean(r.auto_cleanup_worktree),
+    verificationCommands: r.verification_commands_json
+      ? (JSON.parse(String(r.verification_commands_json)) as string[])
+      : [],
+    defaultDeliveryChannel: (r.default_delivery_channel
+      ? String(r.default_delivery_channel)
+      : "auto_pr_or_branch") as RepoConfig["defaultDeliveryChannel"],
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
   };
@@ -880,6 +923,9 @@ function mapTicketRow(r: Record<string, unknown>): Ticket {
     stageRetries: Number(r.stage_retries),
     mandate: JSON.parse(String(r.mandate_json)),
     dependsOn: JSON.parse(String(r.depends_on_json)),
+    parentTicketId: r.parent_ticket_id ? String(r.parent_ticket_id) : undefined,
+    isEpic: Boolean(r.is_epic),
+    subtaskKey: r.subtask_key ? String(r.subtask_key) : undefined,
     worktreePath: r.worktree_path ? String(r.worktree_path) : undefined,
     branchName: r.branch_name ? String(r.branch_name) : undefined,
     worktreeCleanedAt: r.worktree_cleaned_at ? String(r.worktree_cleaned_at) : undefined,
