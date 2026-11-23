@@ -10,14 +10,16 @@ import {
   GitMerge,
   GitPullRequest,
   Kanban,
+  Layers,
   Plus,
   Send,
   ShieldAlert,
   ShieldPlus,
+  Sparkles,
   X,
 } from "lucide-react";
 import { formatInboxKind, formatInboxStatus, useI18n } from "../i18n.tsx";
-import type { InboxItem, Ticket } from "../types.ts";
+import type { ArenaCandidateResult, EpicReplanProposal, InboxItem, Ticket } from "../types.ts";
 
 interface InboxViewProps {
   items: InboxItem[];
@@ -29,7 +31,7 @@ interface InboxViewProps {
     decision: "approved" | "rejected",
     note?: string,
     deliveryAction?: "local_merge" | "push_and_create_pr",
-    options?: { expandMandate?: boolean; budgetIncreaseUsd?: number },
+    options?: { expandMandate?: boolean; budgetIncreaseUsd?: number; arenaWinnerId?: string },
   ) => Promise<void>;
   onInspectTicket: (ticketId: string) => void;
   onOpenDispatch?: () => void;
@@ -70,6 +72,14 @@ const KIND_STYLE: Record<InboxItem["kind"], { color: string; icon: typeof Eye }>
     color: "bg-cyan-500/15 text-cyan-300 border-cyan-500/30",
     icon: GitPullRequest,
   },
+  arena_tiebreak: {
+    color: "bg-teal-500/15 text-teal-300 border-teal-500/30",
+    icon: Sparkles,
+  },
+  epic_replan: {
+    color: "bg-purple-500/15 text-purple-300 border-purple-500/30",
+    icon: Layers,
+  },
 };
 
 export function InboxView({
@@ -94,7 +104,7 @@ export function InboxView({
     id: string,
     decision: "approved" | "rejected",
     deliveryAction?: "local_merge" | "push_and_create_pr",
-    options?: { expandMandate?: boolean; budgetIncreaseUsd?: number },
+    options?: { expandMandate?: boolean; budgetIncreaseUsd?: number; arenaWinnerId?: string },
   ) => {
     setBusyId(id);
     try {
@@ -224,6 +234,87 @@ export function InboxView({
                   </div>
                 )}
 
+                {item.kind === "arena_tiebreak" &&
+                  Array.isArray(item.contextPayload.candidates) && (
+                    <div className="space-y-2 rounded-lg border border-teal-500/30 bg-teal-500/5 p-3">
+                      <div className="text-[11px] font-semibold text-teal-300">
+                        {t("inbox.arenaTitle")}
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                        {(item.contextPayload.candidates as ArenaCandidateResult[]).map((cand) => (
+                          <div
+                            key={cand.candidateId}
+                            className={`rounded-lg border p-2.5 text-xs space-y-1.5 ${
+                              cand.recommended
+                                ? "border-emerald-500/40 bg-emerald-500/10"
+                                : "border-zinc-800 bg-zinc-950/80"
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-mono font-semibold text-zinc-100">
+                                {cand.engine} ({cand.candidateId})
+                              </span>
+                              <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-teal-200">
+                                {t("inbox.arenaScorePrefix")}: {cand.score}
+                                {cand.recommended ? " ★" : ""}
+                              </span>
+                            </div>
+                            <div className="font-mono text-[10px] text-zinc-400">
+                              +{cand.addedLines}/-{cand.deletedLines} · {cand.changedFiles.length} file(s) · ${cand.costUsd.toFixed(3)} · {(cand.durationMs / 1000).toFixed(1)}s
+                            </div>
+                            {cand.rationale && (
+                              <p className="text-[11px] text-zinc-300">{cand.rationale}</p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                {item.kind === "epic_replan" &&
+                  Boolean(item.contextPayload.proposal) && (
+                    <div className="space-y-2 rounded-lg border border-purple-500/30 bg-purple-500/5 p-3">
+                      <div className="text-[11px] font-semibold text-purple-300">
+                        {t("inbox.epicReplanTitle")}
+                      </div>
+                      <div className="space-y-1.5">
+                        {((item.contextPayload.proposal as EpicReplanProposal).mutations ?? []).map(
+                          (m, mIdx) => (
+                            <div
+                              key={mIdx}
+                              className="flex flex-wrap items-center gap-2 text-[11px] rounded bg-zinc-950/70 border border-zinc-800 px-2.5 py-1.5"
+                            >
+                              <span
+                                className={`px-1.5 py-0.2 rounded font-mono text-[10px] border ${
+                                  m.kind === "add_subtask"
+                                    ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                                    : m.kind === "skip_subtask"
+                                      ? "bg-rose-500/15 text-rose-300 border-rose-500/30"
+                                      : "bg-sky-500/15 text-sky-300 border-sky-500/30"
+                                }`}
+                              >
+                                {m.kind === "add_subtask"
+                                  ? "+ add"
+                                  : m.kind === "skip_subtask"
+                                    ? "✂ skip"
+                                    : "✎ update"}
+                              </span>
+                              <span className="font-medium text-zinc-200">
+                                {m.title ?? m.targetSubtaskKey ?? m.targetTicketId}
+                              </span>
+                              {m.allowedPaths && m.allowedPaths.length > 0 && (
+                                <code className="text-[10px] text-emerald-300">
+                                  [{m.allowedPaths.join(", ")}]
+                                </code>
+                              )}
+                              <span className="text-zinc-400">— {m.reason}</span>
+                            </div>
+                          ),
+                        )}
+                      </div>
+                    </div>
+                  )}
+
                 <div className="flex flex-wrap items-center gap-2.5">
                   <input
                     type="text"
@@ -262,7 +353,28 @@ export function InboxView({
                       {t("inbox.expandMandate")}
                     </button>
                   )}
-                  {item.kind === "budget_cap" ? (
+                  {item.kind === "arena_tiebreak" &&
+                  Array.isArray(item.contextPayload.candidates) ? (
+                    (item.contextPayload.candidates as ArenaCandidateResult[]).map((cand) => (
+                      <button
+                        key={cand.candidateId}
+                        disabled={isBusy}
+                        onClick={() =>
+                          handleAction(item.id, "approved", undefined, {
+                            arenaWinnerId: cand.candidateId,
+                          })
+                        }
+                        className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-white text-xs font-medium disabled:opacity-50 transition ${
+                          cand.recommended
+                            ? "bg-emerald-600 hover:bg-emerald-500"
+                            : "bg-indigo-600 hover:bg-indigo-500"
+                        }`}
+                      >
+                        <Check className="w-3.5 h-3.5" />
+                        {t("inbox.arenaAdoptPrefix")} {cand.engine}
+                      </button>
+                    ))
+                  ) : item.kind === "budget_cap" ? (
                     <button
                       disabled={isBusy}
                       onClick={() =>
@@ -280,7 +392,7 @@ export function InboxView({
                       className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium disabled:opacity-50 transition"
                     >
                       <Check className="w-3.5 h-3.5" />
-                      {t("inbox.approve")}
+                      {item.kind === "epic_replan" ? t("inbox.epicReplanApprove") : t("inbox.approve")}
                     </button>
                   )}
                 </div>

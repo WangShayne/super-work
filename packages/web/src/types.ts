@@ -88,7 +88,117 @@ export interface RepoContractFile {
   playbook?: SharedPlaybookRuleSpec[];
 }
 
+export type RoutineScheduleKind = "interval" | "cron";
+
+export type RoutineRunStatus =
+  | "probing"
+  | "clean"
+  | "promoted"
+  | "skipped_overlap"
+  | "skipped_budget"
+  | "failed";
+
+export interface RoutineSpec {
+  id: string;
+  repoId: string;
+  name: string;
+  prompt: string;
+  scheduleKind: RoutineScheduleKind;
+  intervalMinutes?: number;
+  cronExpr?: string;
+  activeHoursStart?: string;
+  activeHoursEnd?: string;
+  allowedPaths: string[];
+  template: PipelineTemplateId;
+  preferredEngine?: WorkerEngineId;
+  maxBudgetUsd: number;
+  enabled: boolean;
+  activeTicketId?: string;
+  lastRunAt?: string;
+  lastRunStatus?: RoutineRunStatus;
+  nextRunAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RoutineRun {
+  id: string;
+  routineId: string;
+  repoId: string;
+  status: RoutineRunStatus;
+  summary: string;
+  changedFiles: string[];
+  promotedTicketId?: string;
+  costUsd: number;
+  startedAt: string;
+  completedAt?: string;
+}
+
+export interface RoutinePresetTemplate {
+  id: string;
+  nameZh: string;
+  nameEn: string;
+  descZh: string;
+  descEn: string;
+  scheduleKind: RoutineScheduleKind;
+  cronExpr?: string;
+  intervalMinutes?: number;
+  activeHoursStart?: string;
+  activeHoursEnd?: string;
+  allowedPaths: string[];
+  template: PipelineTemplateId;
+  maxBudgetUsd: number;
+  prompt: string;
+}
+
+export interface ArenaCandidateResult {
+  candidateId: string;
+  engine: WorkerEngineId;
+  branchName: string;
+  worktreePath?: string;
+  stageRunId: string;
+  verificationPassed: boolean;
+  verificationSummary: string;
+  changedFiles: string[];
+  addedLines: number;
+  deletedLines: number;
+  durationMs: number;
+  costUsd: number;
+  summary: string;
+  diffArtifactId?: string;
+  score: number;
+  recommended?: boolean;
+  rationale?: string;
+}
+
+export type EpicReplanMutationKind = "update_subtask" | "add_subtask" | "skip_subtask";
+
+export interface EpicReplanMutation {
+  kind: EpicReplanMutationKind;
+  targetSubtaskKey?: string;
+  targetTicketId?: string;
+  title?: string;
+  description?: string;
+  allowedPaths?: string[];
+  acceptanceCriteria?: string[];
+  dependsOnKeys?: string[];
+  repoId?: string;
+  template?: PipelineTemplateId;
+  reason: string;
+}
+
+export interface EpicReplanProposal {
+  shouldReplan: boolean;
+  requiresHumanApproval: boolean;
+  summary: string;
+  triggeredByTicketId: string;
+  mutations: EpicReplanMutation[];
+  createdAt: string;
+}
+
 export type PlaybookSource = "human" | "auto_healed" | "repo_contract";
+
+export type PlaybookHealthStatus = "healthy" | "stale" | "zombie_path" | "suspect";
 
 export interface PlaybookEntry {
   id: string;
@@ -99,6 +209,29 @@ export interface PlaybookEntry {
   sourceTicketId?: string;
   enabled: boolean;
   pinned: boolean;
+  hitCount?: number;
+  lastMatchedAt?: string;
+  suspect?: boolean;
+  healthStatus?: PlaybookHealthStatus;
+  prunable?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CasebookEntry {
+  id: string;
+  repoId: string;
+  ticketId: string;
+  title: string;
+  goalSummary: string;
+  solutionSummary: string;
+  pitfallsAndFixes?: string;
+  changedFiles: string[];
+  scopePaths: string[];
+  exportedSymbols: string[];
+  reverted: boolean;
+  hitCount: number;
+  lastMatchedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -133,6 +266,7 @@ export interface RepoConfig {
   defaultTemplate: PipelineTemplateId;
   preferredImplementEngine: WorkerEngineId;
   preferredReviewEngine: WorkerEngineId;
+  fallbackEngines?: WorkerEngineId[];
   autoCleanupWorktree?: boolean;
   verificationCommands?: string[];
   setupCommands?: string[];
@@ -211,6 +345,15 @@ export interface Ticket {
   worktreeCleanedAt?: string;
   nativeSessions: Partial<Record<WorkerEngineId, string>>;
   activeEngine?: WorkerEngineId;
+  failedEngines?: WorkerEngineId[];
+  arenaMode?: boolean;
+  arenaCompetitorEngine?: WorkerEngineId;
+  arenaCandidates?: ArenaCandidateResult[];
+  arenaWinnerId?: string;
+  routineId?: string;
+  epicReplanCount?: number;
+  epicReplanHistory?: EpicReplanProposal[];
+  pendingEpicReplan?: EpicReplanProposal;
   inlineMemory: InlineMemory;
   handoverDigest?: HandoverDigest;
   costUsd: number;
@@ -257,7 +400,9 @@ export interface InboxItem {
     | "merge_conflict"
     | "outbox_signoff"
     | "budget_cap"
-    | "pr_followup";
+    | "pr_followup"
+    | "arena_tiebreak"
+    | "epic_replan";
   status: "pending" | "approved" | "rejected";
   title: string;
   summary: string;
@@ -294,6 +439,7 @@ export interface HealthResponse {
     pendingOutbox: number;
     activeWorktrees?: number;
     reclaimableWorktrees?: number;
+    activeRoutines?: number;
   };
   timestamp: string;
 }
@@ -347,6 +493,7 @@ export interface ChainOfRecall {
     status: TicketStatus;
     snippet: string;
   }>;
+  matchedCases?: CasebookEntry[];
 }
 
 export interface MemorySearchHit {
@@ -366,6 +513,7 @@ export interface TicketDetailResponse {
   outboxEntries: OutboxEntry[];
   diff: string;
   subtasks?: Ticket[];
+  arenaCandidateDiffs?: Record<string, string>;
   upstreamDependencies?: Array<{
     id: string;
     repoId: string;

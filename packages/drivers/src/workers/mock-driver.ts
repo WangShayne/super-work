@@ -14,7 +14,9 @@ export type MockScenarioKind =
   | "infinite_error_loop"
   | "diff_oscillation"
   | "review_reject_once"
-  | "review_nit_only";
+  | "review_nit_only"
+  | "routine_clean"
+  | "cli_error";
 
 export interface MockDriverOptions {
   engine?: WorkerEngineId;
@@ -68,6 +70,30 @@ export class MockWorkerDriver implements WorkerDriver {
       timestamp: nowIso(),
     };
     await this.waitStep(signal);
+
+    if (scenario === "cli_error") {
+      yield {
+        type: "error",
+        message: "429 rate limit exceeded (capacity unavailable)",
+        fatal: true,
+        timestamp: nowIso(),
+      };
+      return;
+    }
+
+    if (scenario === "routine_clean") {
+      const msg = "Patrol scan completed: all tests and checks look clean. ROUTINE_VERDICT: CLEAN";
+      yield { type: "text", text: msg, timestamp: nowIso() };
+      yield { type: "usage", costUsd: 0.01, timestamp: nowIso() };
+      yield {
+        type: "completed",
+        summary: msg,
+        costUsd: 0.01,
+        structuredOutput: { changedFiles: [], verificationPassed: true },
+        timestamp: nowIso(),
+      };
+      return;
+    }
 
     if (scenario === "infinite_error_loop") {
       for (let i = 1; i <= 4; i++) {

@@ -42,7 +42,14 @@ function parseCliArgs(argv: string[]): ParsedArgs {
     "token",
     "ticket",
     "timeout-ms",
+    "winner",
+    "cron",
+    "every",
+    "window",
+    "routine",
   ]);
+  const optionalEngineFlags = new Set(["arena"]);
+  const engineValues = new Set(["claude", "codex", "opencode", "mock"]);
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -55,6 +62,13 @@ function parseCliArgs(argv: string[]): ParsedArgs {
         const next = argv[i + 1];
         if (valueFlags.has(key) && next !== undefined && !next.startsWith("-")) {
           flags[key] = next;
+          i += 1;
+        } else if (
+          optionalEngineFlags.has(key) &&
+          next !== undefined &&
+          engineValues.has(next.trim().toLowerCase())
+        ) {
+          flags[key] = next.trim().toLowerCase();
           i += 1;
         } else {
           flags[key] = true;
@@ -213,6 +227,14 @@ function formatEventLine(ev: ParsedSseEvent, watchedTicketId?: string): string {
       ? `[playbook_updated] (${entry.source}) ${entry.rule ?? entry.id}`
       : `[playbook_updated] deleted=${String(data.deletedId ?? "")}`;
   }
+  if (ev.event === "routine_run_updated") {
+    const run = data.run as { routineId?: string; status?: string; summary?: string } | undefined;
+    return `[routine_run] ${run?.routineId ?? "?"} status=${run?.status ?? "?"}${run?.summary ? `: ${run.summary.slice(0, 100)}` : ""}`;
+  }
+  if (ev.event === "epic_replanned") {
+    const prop = data.proposal as { summary?: string } | undefined;
+    return `[epic_replanned] epic=${String(data.epicId ?? "?")} auto=${String(Boolean(data.autoApplied))} :: ${prop?.summary ?? ""}`;
+  }
   return `${childPrefix}[${ev.event}] ${JSON.stringify(data).slice(0, 140)}`;
 }
 
@@ -304,21 +326,23 @@ async function waitForTicketCompletion(
 }
 
 function printHelp(stdout: (line: string) => void): void {
-  stdout(`super-work v0.6.0 CLI
+  stdout(`super-work v0.7.0 CLI
 
 Usage:
   super-work up [-d|--detach] [--port 4318] [--data-dir path]
   super-work status [--repo <id>] [--auto-start] [--json]
   super-work dispatch <title> [-d|--desc <text>] [--repo <id>] [--paths <csv>] [--depends-on <csv>]
                       [--template fast|standard|strict] [--engine claude|codex|opencode|mock]
-                      [--budget <usd>] [--wait] [--auto-start] [--json]
+                      [--arena [engine]] [--budget <usd>] [--wait] [--auto-start] [--json]
   super-work epic <title> [-d|--desc <text>] [--repo <id>] [--template fast|standard|strict]
                   [--engine ...] [--preview-only] [--per-subtask] [--wait] [--auto-start] [--json]
-  super-work inbox [list | approve <id> [--expand-mandate] [--local-merge] [--budget-add <usd>] [-m <note>] | reject <id> [-m <note>]]
+  super-work inbox [list | approve <id> [--expand-mandate] [--local-merge] [--budget-add <usd>] [--winner <candId>] [-m <note>] | reject <id> [-m <note>]]
+  super-work routine [list | add <name> -d <prompt> [--cron <expr> | --every <min>] [--window HH:MM-HH:MM] [--paths <csv>] [--budget <usd>] | run <id> | toggle <id> | runs [--routine <id>] | delete <id>]
+  super-work casebook [list | search <query>] [--repo <id>] [--auto-start] [--json]
+  super-work playbook [list | add <rule> [--paths <csv>] [--pin] | toggle <entryId> | delete <entryId> | prune | sync [--export]] [--repo <id>] [--auto-start] [--json]
   super-work logs <ticketId> [-f|--follow] [--auto-start] [--json]
   super-work watch [--repo <id>] [--ticket <id>] [--timeout-ms <ms>] [--auto-start] [--json]
   super-work revert <ticketId> [--auto-start] [--json]
-  super-work playbook [list | add <rule> [--paths <csv>] [--pin] | toggle <entryId> | delete <entryId> | sync [--export]] [--repo <id>] [--auto-start] [--json]
 
 Env / Flags:
   SUPER_WORK_URL     Daemon base URL (default: http://localhost:4318) or --url
@@ -449,6 +473,10 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
       const preferredEngine = getStringFlag(flags, "engine") as WorkerEngineId | undefined;
       const budgetStr = getStringFlag(flags, "budget");
       const maxCostUsd = budgetStr ? Number(budgetStr) : undefined;
+      const arenaFlag = flags.arena;
+      const arenaMode = Boolean(arenaFlag);
+      const arenaCompetitorEngine =
+        typeof arenaFlag === "string" ? (arenaFlag as WorkerEngineId) : undefined;
       const wait = Boolean(flags.wait);
 
       const { ticket } = await withAutoStart(
@@ -464,6 +492,8 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
             allowedPaths,
             dependsOn,
             preferredEngine,
+            arenaMode,
+            arenaCompetitorEngine,
             maxCostUsd: Number.isFinite(maxCostUsd) ? maxCostUsd : undefined,
           });
         },
@@ -617,6 +647,7 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
         const note = getStringFlag(flags, "m", "note");
         const budgetAddRaw = getStringFlag(flags, "budget-add");
         const budgetIncreaseUsd = budgetAddRaw ? Number(budgetAddRaw) : undefined;
+        const arenaWinnerId = getStringFlag(flags, "winner");
         const result = await withAutoStart(
           baseUrl,
           autoStart,
@@ -627,6 +658,7 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
               expandMandate: Boolean(flags["expand-mandate"]),
               deliveryAction: flags["local-merge"] ? "local_merge" : undefined,
               budgetIncreaseUsd: Number.isFinite(budgetIncreaseUsd) ? budgetIncreaseUsd : undefined,
+              arenaWinnerId,
             }),
           stdout,
         );
@@ -776,9 +808,27 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
         }
         for (const e of entries) {
           stdout(
-            `[${e.id}] (${e.source}${e.pinned ? " | PIN" : ""}${e.enabled ? "" : " | DISABLED"}) [${e.scopePaths.join(",")}] ${e.rule}`,
+            `[${e.id}] (${e.source}${e.pinned ? " | PIN" : ""}${e.enabled ? "" : " | DISABLED"}${e.healthStatus && e.healthStatus !== "healthy" ? ` | ${e.healthStatus.toUpperCase()}` : ""} | hits=${e.hitCount ?? 0}) [${e.scopePaths.join(",")}] ${e.rule}`,
           );
         }
+        return 0;
+      }
+
+      if (subCmd === "prune") {
+        const res = await withAutoStart(
+          baseUrl,
+          autoStart,
+          async () => {
+            const repoId = await resolveTargetRepoId(client, getStringFlag(flags, "repo"));
+            return client.prunePlaybook(repoId);
+          },
+          stdout,
+        );
+        stdout(
+          asJson
+            ? JSON.stringify(res, null, 2)
+            : `Pruned ${res.prunedIds.length} stale/suspect auto-healed rule(s); ${res.keptCount} rule(s) kept.`,
+        );
         return 0;
       }
 
@@ -884,6 +934,210 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
 
       stderr(`Unknown playbook subcommand: ${subCmd}`);
       return 1;
+    }
+
+    if (cmd === "routine") {
+      const subCmd = positionals[1] ?? "list";
+      if (subCmd === "list") {
+        const requestedRepo = getStringFlag(flags, "repo");
+        const res = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.listRoutines(requestedRepo),
+          stdout,
+        );
+        if (asJson) {
+          stdout(JSON.stringify(res, null, 2));
+          return 0;
+        }
+        if (res.routines.length === 0) {
+          stdout("No scheduled routines configured.");
+          return 0;
+        }
+        for (const r of res.routines) {
+          const sched =
+            r.scheduleKind === "cron" ? `cron="${r.cronExpr}"` : `every=${r.intervalMinutes}m`;
+          const win =
+            r.activeHoursStart && r.activeHoursEnd
+              ? ` window=${r.activeHoursStart}-${r.activeHoursEnd}`
+              : "";
+          stdout(
+            `[${r.id}] (${r.enabled ? "ON" : "PAUSED"} | ${sched}${win} | last=${r.lastRunStatus ?? "never"}) ${r.name}`,
+          );
+        }
+        return 0;
+      }
+
+      if (subCmd === "add") {
+        const name = positionals[2];
+        if (!name) {
+          stderr('Error: routine name is required. Usage: super-work routine add "<name>" -d "<prompt>"');
+          return 1;
+        }
+        const prompt = getStringFlag(flags, "d", "desc", "description") ?? name;
+        const cronExpr = getStringFlag(flags, "cron");
+        const everyStr = getStringFlag(flags, "every");
+        const windowStr = getStringFlag(flags, "window");
+        const [winStart, winEnd] = windowStr ? windowStr.split("-").map((s) => s.trim()) : [];
+        const pathsRaw = getStringFlag(flags, "paths");
+        const allowedPaths = pathsRaw
+          ? pathsRaw.split(",").map((s) => s.trim()).filter(Boolean)
+          : undefined;
+        const template = getStringFlag(flags, "template") as PipelineTemplateId | undefined;
+        const preferredEngine = getStringFlag(flags, "engine") as WorkerEngineId | undefined;
+        const budgetStr = getStringFlag(flags, "budget");
+        const maxBudgetUsd = budgetStr ? Number(budgetStr) : undefined;
+
+        const { routine } = await withAutoStart(
+          baseUrl,
+          autoStart,
+          async () => {
+            const repoId = await resolveTargetRepoId(client, getStringFlag(flags, "repo"));
+            return client.createRoutine({
+              repoId,
+              name,
+              prompt,
+              scheduleKind: cronExpr ? "cron" : "interval",
+              cronExpr,
+              intervalMinutes: everyStr ? Number(everyStr) : undefined,
+              activeHoursStart: winStart,
+              activeHoursEnd: winEnd,
+              allowedPaths,
+              template,
+              preferredEngine,
+              maxBudgetUsd: Number.isFinite(maxBudgetUsd) ? maxBudgetUsd : undefined,
+            });
+          },
+          stdout,
+        );
+        stdout(
+          asJson
+            ? JSON.stringify({ routine }, null, 2)
+            : `Created routine ${routine.id}: ${routine.name} (nextRun=${routine.nextRunAt ?? "soon"})`,
+        );
+        return 0;
+      }
+
+      if (subCmd === "run") {
+        const routineId = positionals[2];
+        if (!routineId) {
+          stderr("Error: routineId is required. Usage: super-work routine run <routineId>");
+          return 1;
+        }
+        const { run } = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.runRoutineNow(routineId),
+          stdout,
+        );
+        stdout(
+          asJson
+            ? JSON.stringify({ run }, null, 2)
+            : `Routine run ${run.id} finished [${run.status}]${run.promotedTicketId ? ` -> ticket ${run.promotedTicketId}` : ""}: ${run.summary}`,
+        );
+        return 0;
+      }
+
+      if (subCmd === "toggle") {
+        const routineId = positionals[2];
+        if (!routineId) {
+          stderr("Error: routineId is required. Usage: super-work routine toggle <routineId>");
+          return 1;
+        }
+        const { routine } = await withAutoStart(
+          baseUrl,
+          autoStart,
+          async () => {
+            const { routines } = await client.listRoutines();
+            const target = routines.find((r) => r.id === routineId);
+            if (!target) throw new Error(`Routine not found: ${routineId}`);
+            return client.patchRoutine(routineId, { enabled: !target.enabled });
+          },
+          stdout,
+        );
+        stdout(
+          asJson
+            ? JSON.stringify({ routine }, null, 2)
+            : `Routine ${routine.id} is now ${routine.enabled ? "ENABLED" : "PAUSED"}`,
+        );
+        return 0;
+      }
+
+      if (subCmd === "runs") {
+        const routineId = getStringFlag(flags, "routine") ?? positionals[2];
+        const { runs } = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.listRoutineRuns({ repoId: getStringFlag(flags, "repo"), routineId }),
+          stdout,
+        );
+        if (asJson) {
+          stdout(JSON.stringify({ runs }, null, 2));
+          return 0;
+        }
+        if (runs.length === 0) {
+          stdout("No routine runs recorded.");
+          return 0;
+        }
+        for (const run of runs) {
+          stdout(
+            `[${run.id}] (${run.status}) routine=${run.routineId}${run.promotedTicketId ? ` ticket=${run.promotedTicketId}` : ""} :: ${run.summary.slice(0, 120)}`,
+          );
+        }
+        return 0;
+      }
+
+      if (subCmd === "delete") {
+        const routineId = positionals[2];
+        if (!routineId) {
+          stderr("Error: routineId is required. Usage: super-work routine delete <routineId>");
+          return 1;
+        }
+        const res = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.deleteRoutine(routineId),
+          stdout,
+        );
+        stdout(asJson ? JSON.stringify(res, null, 2) : `Deleted routine ${routineId}`);
+        return 0;
+      }
+
+      stderr(`Unknown routine subcommand: ${subCmd}`);
+      return 1;
+    }
+
+    if (cmd === "casebook") {
+      const subCmd = positionals[1];
+      const q =
+        subCmd === "search"
+          ? positionals.slice(2).join(" ")
+          : subCmd && subCmd !== "list"
+            ? positionals.slice(1).join(" ")
+            : undefined;
+      const { entries } = await withAutoStart(
+        baseUrl,
+        autoStart,
+        async () => {
+          const repoId = await resolveTargetRepoId(client, getStringFlag(flags, "repo"));
+          return client.listCasebook(repoId, q);
+        },
+        stdout,
+      );
+      if (asJson) {
+        stdout(JSON.stringify({ entries }, null, 2));
+        return 0;
+      }
+      if (entries.length === 0) {
+        stdout("Casebook is empty.");
+        return 0;
+      }
+      for (const c of entries) {
+        stdout(
+          `[${c.id}] (${c.reverted ? "REVERTED WARNING" : "VERIFIED"} | hits=${c.hitCount} | ${c.scopePaths.join(",")}) ${c.title} :: ${c.solutionSummary.slice(0, 100)}`,
+        );
+      }
+      return 0;
     }
 
     stderr(`Unknown command: ${cmd}`);

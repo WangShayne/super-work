@@ -1,4 +1,5 @@
 import type {
+  CasebookEntry,
   EpicDecompositionPlan,
   EpicDeliveryMode,
   HandoverDigest,
@@ -10,6 +11,9 @@ import type {
   RepoConfig,
   RepoContractFile,
   RepoMetricsSummary,
+  RoutineRun,
+  RoutineScheduleKind,
+  RoutineSpec,
   SpillArtifact,
   StageRun,
   Ticket,
@@ -42,6 +46,7 @@ export interface DaemonHealth {
     pendingOutbox: number;
     activeWorktrees?: number;
     reclaimableWorktrees?: number;
+    activeRoutines?: number;
   };
   timestamp: string;
 }
@@ -111,6 +116,7 @@ export class SuperWorkHttpClient {
     outboxEntries: OutboxEntry[];
     diff: string;
     subtasks?: Ticket[];
+    arenaCandidateDiffs?: Record<string, string>;
     upstreamDependencies?: Array<{
       id: string;
       repoId: string;
@@ -188,11 +194,89 @@ export class SuperWorkHttpClient {
     dependsOn?: string[];
     maxCostUsd?: number;
     preferredEngine?: WorkerEngineId;
+    arenaMode?: boolean;
+    arenaCompetitorEngine?: WorkerEngineId;
   }): Promise<{ ticket: Ticket }> {
     return this.request<{ ticket: Ticket }>("/api/tickets", {
       method: "POST",
       body: JSON.stringify(payload),
     });
+  }
+
+  prunePlaybook(
+    repoId: string,
+  ): Promise<{ prunedIds: string[]; keptCount: number; entries: PlaybookEntry[] }> {
+    return this.request(`/api/repos/${encodeURIComponent(repoId)}/playbook/prune`, {
+      method: "POST",
+      body: "{}",
+    });
+  }
+
+  listCasebook(repoId: string, q?: string): Promise<{ entries: CasebookEntry[] }> {
+    const qs = q ? `?q=${encodeURIComponent(q)}` : "";
+    return this.request(`/api/repos/${encodeURIComponent(repoId)}/casebook${qs}`);
+  }
+
+  listRoutines(repoId?: string): Promise<{ routines: RoutineSpec[]; presets: unknown[] }> {
+    const qs = repoId ? `?repoId=${encodeURIComponent(repoId)}` : "";
+    return this.request(`/api/routines${qs}`);
+  }
+
+  createRoutine(payload: {
+    repoId: string;
+    name: string;
+    prompt: string;
+    scheduleKind: RoutineScheduleKind;
+    intervalMinutes?: number;
+    cronExpr?: string;
+    activeHoursStart?: string;
+    activeHoursEnd?: string;
+    allowedPaths?: string[];
+    template?: PipelineTemplateId;
+    preferredEngine?: WorkerEngineId;
+    maxBudgetUsd?: number;
+    enabled?: boolean;
+  }): Promise<{ routine: RoutineSpec }> {
+    return this.request("/api/routines", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  patchRoutine(
+    id: string,
+    patch: Partial<Omit<RoutineSpec, "id" | "repoId" | "createdAt" | "updatedAt">>,
+  ): Promise<{ routine: RoutineSpec }> {
+    return this.request(`/api/routines/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    });
+  }
+
+  deleteRoutine(id: string): Promise<{ ok: boolean; id: string }> {
+    return this.request(`/api/routines/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+  }
+
+  runRoutineNow(id: string): Promise<{ run: RoutineRun }> {
+    return this.request(`/api/routines/${encodeURIComponent(id)}/run`, {
+      method: "POST",
+      body: "{}",
+    });
+  }
+
+  listRoutineRuns(filter?: {
+    repoId?: string;
+    routineId?: string;
+    limit?: number;
+  }): Promise<{ runs: RoutineRun[] }> {
+    const params = new URLSearchParams();
+    if (filter?.repoId) params.set("repoId", filter.repoId);
+    if (filter?.routineId) params.set("routineId", filter.routineId);
+    if (filter?.limit) params.set("limit", String(filter.limit));
+    const qs = params.toString();
+    return this.request(qs ? `/api/routines/runs?${qs}` : "/api/routines/runs");
   }
 
   previewEpic(payload: {
@@ -238,6 +322,7 @@ export class SuperWorkHttpClient {
       deliveryAction?: "local_merge" | "push_and_create_pr";
       expandMandate?: boolean;
       budgetIncreaseUsd?: number;
+      arenaWinnerId?: string;
     },
   ): Promise<{ item: InboxItem; ticket: Ticket }> {
     return this.request<{ item: InboxItem; ticket: Ticket }>(

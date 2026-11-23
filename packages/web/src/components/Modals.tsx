@@ -1,5 +1,27 @@
 import { useEffect, useState } from "react";
-import { Activity, ArrowRight, BookOpen, ChevronDown, ChevronUp, Download, FileJson2, FolderGit2, GitBranch, Layers, Pin, Plus, RefreshCw, Search, Sparkles, Trash2, Upload, X } from "lucide-react";
+import {
+  Activity,
+  AlertTriangle,
+  ArrowRight,
+  BookOpen,
+  ChevronDown,
+  ChevronUp,
+  Database,
+  Download,
+  FileJson2,
+  FolderGit2,
+  GitBranch,
+  Layers,
+  Pin,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Search,
+  Sparkles,
+  Trash2,
+  Upload,
+  X,
+} from "lucide-react";
 
 function useEscapeKey(open: boolean, onClose: () => void): void {
   useEffect(() => {
@@ -42,6 +64,7 @@ function computeSubtaskWaves(subtasks: EpicSubtaskSpec[]): {
 import { api } from "../api.ts";
 import { formatTemplate, formatTicketStatus, useI18n } from "../i18n.tsx";
 import type {
+  CasebookEntry,
   DeliveryChannel,
   EpicDecompositionPlan,
   EpicDeliveryMode,
@@ -75,6 +98,8 @@ interface DispatchModalProps {
     allowedPaths: string[];
     dependsOn?: string[];
     preferredEngine: WorkerEngineId;
+    arenaMode?: boolean;
+    arenaCompetitorEngine?: WorkerEngineId;
     modelOverride?: string;
     effortOverride?: ReasoningEffort;
     maxCostUsd: number;
@@ -116,6 +141,8 @@ export function DispatchTaskModal({
   const [depsExpanded, setDepsExpanded] = useState(false);
   const [depsQuery, setDepsQuery] = useState("");
   const [engine, setEngine] = useState<WorkerEngineId>(defaultEngine);
+  const [arenaMode, setArenaMode] = useState(false);
+  const [arenaCompetitorEngine, setArenaCompetitorEngine] = useState<string>("");
   const [modelOverride, setModelOverride] = useState("");
   const [effortOverride, setEffortOverride] = useState<ReasoningEffort | "">("");
   const [budget, setBudget] = useState("2.0");
@@ -136,6 +163,8 @@ export function DispatchTaskModal({
       setEpicDeliveryMode("unified");
       setTemplate(defaultTemplate);
       setEngine(defaultEngine);
+      setArenaMode(false);
+      setArenaCompetitorEngine("");
       setModelOverride("");
       setEffortOverride("");
       setDependsOn([]);
@@ -281,6 +310,11 @@ export function DispatchTaskModal({
             .filter(Boolean),
           dependsOn: dependsOn.length > 0 ? dependsOn : undefined,
           preferredEngine: engine,
+          arenaMode: arenaMode || undefined,
+          arenaCompetitorEngine:
+            arenaMode && arenaCompetitorEngine
+              ? (arenaCompetitorEngine as WorkerEngineId)
+              : undefined,
           modelOverride: isCliEngine ? modelOverride.trim() || undefined : undefined,
           effortOverride: isCliEngine ? effortOverride || undefined : undefined,
           maxCostUsd: Number(budget) || 2.0,
@@ -459,6 +493,39 @@ export function DispatchTaskModal({
                   placeholder={t("modal.dispatch.pathsPlaceholder")}
                   className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
                 />
+              </div>
+
+              <div className="rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-2.5 space-y-2">
+                <label className="flex items-center gap-2 cursor-pointer text-zinc-200">
+                  <input
+                    type="checkbox"
+                    checked={arenaMode}
+                    onChange={(e) => setArenaMode(e.target.checked)}
+                    className="rounded border-zinc-700 bg-zinc-950 text-indigo-500"
+                  />
+                  <span className="text-[11px] font-medium">{t("modal.dispatch.arenaEnable")}</span>
+                </label>
+                {arenaMode && (
+                  <div className="flex items-center gap-2 pl-5">
+                    <span className="text-[11px] text-zinc-400 shrink-0">
+                      {t("modal.dispatch.arenaOpponent")}:
+                    </span>
+                    <select
+                      value={arenaCompetitorEngine}
+                      onChange={(e) => setArenaCompetitorEngine(e.target.value)}
+                      className="flex-1 bg-zinc-950 border border-zinc-800 rounded px-2 py-1 font-mono text-[11px] text-zinc-100"
+                    >
+                      <option value="">{t("modal.dispatch.arenaAutoOpponent")}</option>
+                      {availableEngines
+                        .filter((eng) => eng !== engine)
+                        .map((eng) => (
+                          <option key={eng} value={eng}>
+                            {eng}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                )}
               </div>
               <div className="rounded-lg border border-zinc-800/80 bg-zinc-900/35 p-2.5 space-y-2">
                 <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -1104,17 +1171,18 @@ interface RepoSettingsModalProps {
     repoId: string,
     patch: Omit<
       Partial<RepoConfig>,
-      "maxConcurrentWorkers" | "dailyBudgetUsd" | "conventions" | "smokeCheck"
+      "maxConcurrentWorkers" | "dailyBudgetUsd" | "conventions" | "smokeCheck" | "fallbackEngines"
     > & {
       maxConcurrentWorkers?: number | null;
       dailyBudgetUsd?: number | null;
       conventions?: string | null;
       smokeCheck?: SmokeCheckConfig | null;
+      fallbackEngines?: WorkerEngineId[] | null;
     },
   ) => Promise<void>;
 }
 
-type SettingsTab = "runtime" | "contract" | "playbook";
+type SettingsTab = "runtime" | "contract" | "playbook" | "casebook";
 
 export function RepoSettingsModal({
   open,
@@ -1134,6 +1202,7 @@ export function RepoSettingsModal({
   const [defaultTemplate, setDefaultTemplate] = useState<PipelineTemplateId>("standard");
   const [implEngine, setImplEngine] = useState<WorkerEngineId>("claude");
   const [reviewEngine, setReviewEngine] = useState<WorkerEngineId>("codex");
+  const [fallbackEngines, setFallbackEngines] = useState<WorkerEngineId[]>([]);
   const [deliveryChannel, setDeliveryChannel] = useState<DeliveryChannel>("auto_pr_or_branch");
   const [verificationInput, setVerificationInput] = useState("");
   const [setupInput, setSetupInput] = useState("");
@@ -1155,9 +1224,15 @@ export function RepoSettingsModal({
 
   const [playbook, setPlaybook] = useState<PlaybookEntry[]>([]);
   const [playbookLoading, setPlaybookLoading] = useState(false);
+  const [pruningPlaybook, setPruningPlaybook] = useState(false);
+  const [pruneNotice, setPruneNotice] = useState<string | null>(null);
   const [newRule, setNewRule] = useState("");
   const [newRuleScope, setNewRuleScope] = useState("");
   const [newRulePinned, setNewRulePinned] = useState(false);
+
+  const [casebook, setCasebook] = useState<CasebookEntry[]>([]);
+  const [casebookLoading, setCasebookLoading] = useState(false);
+  const [casebookQuery, setCasebookQuery] = useState("");
 
   const loadPlaybook = async (repoId: string) => {
     setPlaybookLoading(true);
@@ -1169,10 +1244,22 @@ export function RepoSettingsModal({
     }
   };
 
+  const loadCasebook = async (repoId: string, q?: string) => {
+    setCasebookLoading(true);
+    try {
+      const res = await api.listCasebook(repoId, q);
+      setCasebook(res.entries);
+    } finally {
+      setCasebookLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (!open || !repo) return;
     setSettingsTab(initialTab);
     setContractNotice(null);
+    setPruneNotice(null);
+    setCasebookQuery("");
     setName(repo.name);
     setBaseBranch(repo.baseBranch);
     setGithubRepo(repo.githubRepo ?? "");
@@ -1180,6 +1267,7 @@ export function RepoSettingsModal({
     setDefaultTemplate(repo.defaultTemplate);
     setImplEngine(repo.preferredImplementEngine);
     setReviewEngine(repo.preferredReviewEngine);
+    setFallbackEngines(repo.fallbackEngines ?? []);
     setDeliveryChannel(repo.defaultDeliveryChannel ?? "auto_pr_or_branch");
     setVerificationInput((repo.verificationCommands ?? []).join("\n"));
     setSetupInput((repo.setupCommands ?? []).join("\n"));
@@ -1197,6 +1285,7 @@ export function RepoSettingsModal({
     setDailyBudgetInput(repo.dailyBudgetUsd ? String(repo.dailyBudgetUsd) : "");
     setAutoCleanupWorktree(repo.autoCleanupWorktree !== false);
     void loadPlaybook(repo.id);
+    void loadCasebook(repo.id);
   }, [open, repo, initialTab]);
 
   useEscapeKey(open, onClose);
@@ -1258,6 +1347,7 @@ export function RepoSettingsModal({
         defaultTemplate,
         preferredImplementEngine: implEngine,
         preferredReviewEngine: reviewEngine,
+        fallbackEngines: fallbackEngines.length > 0 ? fallbackEngines : null,
         defaultDeliveryChannel: deliveryChannel,
         verificationCommands,
         setupCommands,
@@ -1352,6 +1442,37 @@ export function RepoSettingsModal({
     onRefresh?.();
   };
 
+  const handlePrunePlaybook = async () => {
+    setPruningPlaybook(true);
+    setPruneNotice(null);
+    try {
+      const res = await api.prunePlaybook(repo.id);
+      setPlaybook(res.entries);
+      setPruneNotice(
+        t("modal.repoSettings.playbookPrunedMsg")
+          .replace("{removed}", String(res.prunedIds.length))
+          .replace("{kept}", String(res.keptCount)),
+      );
+      onRefresh?.();
+    } finally {
+      setPruningPlaybook(false);
+    }
+  };
+
+  const handleDeleteCase = async (entryId: string) => {
+    await api.deleteCasebookEntry(entryId);
+    await loadCasebook(repo.id, casebookQuery.trim() || undefined);
+    onRefresh?.();
+  };
+
+  const toggleFallbackEngine = (eng: WorkerEngineId) => {
+    setFallbackEngines((prev) =>
+      prev.includes(eng) ? prev.filter((item) => item !== eng) : [...prev, eng],
+    );
+  };
+
+  const prunableCount = playbook.filter((e) => e.prunable).length;
+
   return (
     <div
       onMouseDown={(e) => {
@@ -1410,10 +1531,22 @@ export function RepoSettingsModal({
               <BookOpen className="w-3.5 h-3.5" />
               {t("modal.repoSettings.tab.playbook")} ({playbook.length})
             </button>
+            <button
+              type="button"
+              onClick={() => setSettingsTab("casebook")}
+              className={`inline-flex items-center gap-1.5 px-3 py-2 border-b-2 font-medium transition ${
+                settingsTab === "casebook"
+                  ? "border-indigo-500 text-indigo-300"
+                  : "border-transparent text-zinc-500 hover:text-zinc-300"
+              }`}
+            >
+              <Database className="w-3.5 h-3.5" />
+              {t("modal.repoSettings.tab.casebook")} ({casebook.length})
+            </button>
           </div>
         </div>
 
-        {settingsTab !== "playbook" ? (
+        {(settingsTab === "runtime" || settingsTab === "contract") ? (
           <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0 overflow-hidden text-xs">
             <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-3">
               {settingsTab === "runtime" && (
@@ -1500,6 +1633,37 @@ export function RepoSettingsModal({
                         </option>
                       ))}
                     </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-zinc-400 mb-1.5">
+                    {t("modal.repoSettings.fallbackEngines")}
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    {engineOptions.map((eng) => {
+                      const orderIdx = fallbackEngines.indexOf(eng);
+                      const active = orderIdx !== -1;
+                      return (
+                        <button
+                          key={eng}
+                          type="button"
+                          onClick={() => toggleFallbackEngine(eng)}
+                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border font-mono text-[11px] transition ${
+                            active
+                              ? "border-indigo-500/40 bg-indigo-500/15 text-indigo-200"
+                              : "border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200"
+                          }`}
+                        >
+                          {active && (
+                            <span className="px-1 rounded bg-indigo-500/30 text-[10px] text-indigo-100">
+                              #{orderIdx + 1}
+                            </span>
+                          )}
+                          <span>{eng}</span>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
 
@@ -1816,9 +1980,30 @@ export function RepoSettingsModal({
               </button>
             </div>
           </form>
-        ) : (
+        ) : settingsTab === "playbook" ? (
           <div className="flex flex-col flex-1 min-h-0 overflow-hidden text-xs">
             <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                {pruneNotice ? (
+                  <span className="text-[11px] text-emerald-300">{pruneNotice}</span>
+                ) : (
+                  <span className="text-[11px] text-zinc-500">
+                    {playbook.length} rule(s)
+                  </span>
+                )}
+                <button
+                  type="button"
+                  disabled={pruningPlaybook || prunableCount === 0}
+                  onClick={() => void handlePrunePlaybook()}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-amber-500/35 bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 text-[11px] font-medium disabled:opacity-40 transition"
+                >
+                  <Sparkles className="w-3 h-3" />
+                  {pruningPlaybook
+                    ? t("modal.repoSettings.playbookPruning")
+                    : `${t("modal.repoSettings.playbookPruneBtn")} (${prunableCount})`}
+                </button>
+              </div>
+
               <form onSubmit={(e) => void handleAddPlaybookRule(e)} className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3 space-y-2">
                 <input
                   required
@@ -1881,6 +2066,15 @@ export function RepoSettingsModal({
                                 PIN
                               </span>
                             )}
+                            {entry.healthStatus && entry.healthStatus !== "healthy" && (
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded font-mono text-[10px] bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                                <AlertTriangle className="w-2.5 h-2.5" />
+                                {t(`modal.repoSettings.health.${entry.healthStatus}` as const)}
+                              </span>
+                            )}
+                            <span className="px-1.5 py-0.2 rounded font-mono text-[10px] bg-zinc-950 text-zinc-400 border border-zinc-800">
+                              {t("modal.repoSettings.playbookHits")}: {entry.hitCount ?? 0}
+                            </span>
                             <span className="font-mono text-[10px] text-emerald-300">
                               [{entry.scopePaths.join(", ")}]
                             </span>
@@ -1922,6 +2116,116 @@ export function RepoSettingsModal({
                   ))
                 )}
               </div>
+            </div>
+
+            <div className="shrink-0 border-t border-zinc-800 bg-zinc-900/95 px-5 py-3 flex justify-end">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-3 py-1.5 rounded-lg border border-zinc-800 text-zinc-400 hover:text-zinc-200"
+              >
+                {t("modal.worktrees.close")}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-col flex-1 min-h-0 overflow-hidden text-xs">
+            <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-3">
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void loadCasebook(repo.id, casebookQuery.trim() || undefined);
+                }}
+                className="flex gap-2"
+              >
+                <div className="relative flex-1">
+                  <Search className="w-3.5 h-3.5 text-zinc-500 absolute left-2.5 top-2" />
+                  <input
+                    type="text"
+                    value={casebookQuery}
+                    onChange={(e) => setCasebookQuery(e.target.value)}
+                    placeholder={t("modal.repoSettings.casebookSearchPlaceholder")}
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg pl-8 pr-3 py-1.5 text-zinc-200 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200"
+                >
+                  <Search className="w-3.5 h-3.5" />
+                </button>
+              </form>
+
+              {casebookLoading ? (
+                <div className="py-6 text-center text-zinc-500">{t("drawer.loading")}</div>
+              ) : casebook.length === 0 ? (
+                <div className="py-6 px-4 text-center rounded-lg border border-dashed border-zinc-800 text-zinc-500">
+                  {t("modal.repoSettings.casebookEmpty")}
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  {casebook.map((c) => (
+                    <div
+                      key={c.id}
+                      className={`rounded-lg border p-3 space-y-1.5 ${
+                        c.reverted
+                          ? "border-rose-500/35 bg-rose-500/5"
+                          : "border-zinc-800 bg-zinc-900/60"
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span
+                            className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded font-mono text-[10px] border ${
+                              c.reverted
+                                ? "bg-rose-500/15 text-rose-300 border-rose-500/30"
+                                : "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                            }`}
+                          >
+                            {c.reverted && <RotateCcw className="w-2.5 h-2.5" />}
+                            {c.reverted
+                              ? t("modal.repoSettings.casebookRevertedBadge")
+                              : t("modal.repoSettings.casebookVerifiedBadge")}
+                          </span>
+                          <span className="font-mono text-[10px] text-zinc-500">{c.ticketId}</span>
+                          <span className="px-1.5 py-0.2 rounded font-mono text-[10px] bg-zinc-950 text-zinc-400 border border-zinc-800">
+                            {t("modal.repoSettings.playbookHits")}: {c.hitCount}
+                          </span>
+                          <span className="font-mono text-[10px] text-emerald-300">
+                            [{c.scopePaths.join(", ")}]
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void handleDeleteCase(c.id)}
+                          className="p-1 rounded text-zinc-500 hover:text-rose-400 shrink-0"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                      <div className="font-medium text-zinc-100">{c.title}</div>
+                      <p className="text-zinc-300 leading-relaxed">{c.solutionSummary}</p>
+                      {c.pitfallsAndFixes && (
+                        <p className="text-[11px] text-amber-300/90 bg-amber-500/10 border border-amber-500/20 rounded px-2 py-1">
+                          {c.pitfallsAndFixes}
+                        </p>
+                      )}
+                      {c.exportedSymbols.length > 0 && (
+                        <div className="flex flex-wrap gap-1 pt-0.5">
+                          {c.exportedSymbols.slice(0, 6).map((sym) => (
+                            <code
+                              key={sym}
+                              className="px-1.5 py-0.2 rounded bg-indigo-500/10 border border-indigo-500/20 font-mono text-[10px] text-indigo-300"
+                            >
+                              {sym}
+                            </code>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div className="shrink-0 border-t border-zinc-800 bg-zinc-900/95 px-5 py-3 flex justify-end">

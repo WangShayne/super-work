@@ -11,7 +11,7 @@
 ## 核心能力
 
 - **Router + 隔离 Worker 双层架构**：
-  - **控制面（`EventIntakeRouter` & `MasterAssessor`）**：统一接收入站触发器（`web`、`github_issue`、`github_pr`、`github_ci`、`cli`），注入目标仓库真实目录结构（`RepoStructureScanner`）、仓库工程契约（`super-work.json`）与**自进化经验库 Playbook**（按路径匹配注入 Top 8 / `<= 1200` 字符），支持 `off` / `observe` / `auto` 模式、**跨仓库联合 Epic 与显式 `--depends-on` 依赖编排**及 **上游产物契约交接摘要（Handover Digest & 返工漂移提醒）**、**Epic 统一集成分支（`super-work/epic/<id>`）+ 全局终验与单 PR 原子交付**、**PR 评审与 CI 失败同分支自动返修**，以及守护进程重启无损断点自愈。
+  - **控制面（`EventIntakeRouter` & `MasterAssessor`）**：统一接收入站触发器（`web`、`github_issue`、`github_pr`、`github_ci`、`cli`），注入目标仓库真实目录结构（`RepoStructureScanner`）、仓库工程契约（`super-work.json`）、**命中追踪与衰减自净的 Playbook 经验库**及**混合加权历史判例库（Casebook，支持回滚转反面警示）**，支持 `off` / `observe` / `auto` 模式、**跨仓库联合 Epic 与显式 `--depends-on` 依赖编排**及 **上游契约交接摘要 + 自适应 Epic 动态重规划（Scoped 热更新 / `epic_replan` 拓扑扩权审批）**、**定时探测晋升巡航（Probe-to-Promote Routines，无问题静默退出）**、**跨引擎自动故障降级链 & 双引擎 Arena 并行竞速（`--arena`）**、**Epic 统一集成分支 + 全局终验与单 PR 原子交付**、**PR 评审与 CI 失败同分支自动返修**，以及守护进程重启无损断点自愈。
   - **执行面（`WorkerDriver` & `GitWorktreeProvider`）**：在独立的 `git worktree` 分支中调度成熟 Coding Agent（`ClaudeCodeDriver`、`CodexDriver`、`OpenCodeDriver`、`MockWorkerDriver`），新建工作树支持 **Worktree 预热命令（`setupCommands`）**，支持**结构化对抗式交叉盲审（`blocker`/`major`/`nit` 分级检查单）**、**临时服务运行时冒烟门禁（`smokeCheck`，动态端口探测与整棵进程组回收）**、原生会话续跑与自动/一键 Worktree GC。
 - **工程契约（`super-work.json`）、运行时冒烟与闭环自进化 Playbook**：仓库根目录 `super-work.json` 承载团队共享的验证门禁、`smokeCheck` 运行时探针、工作树预热命令、禁止路径、架构约定与共享规则，与本地 SQLite 个人运行态配置分层解耦；验证与冒烟日志持久化为 `test_log` / `smoke_log` 产物并反哺避坑经验条目。
 - **双通道 `Transactional Outbox` 与安全一键回滚**：支持 **PR 推送/增量更新** 与 **本地 `--no-ff` 原子合入主干**，并在 Web 与 CLI 提供 **安全反向提交回滚（`git revert -m 1`）**。
@@ -19,11 +19,12 @@
 - **分级不可变 `Mandate` 护栏、并发配额与每日预算柔性熔断**：
   - 派单前通过 `mandateScopesOverlap` 检测活跃任务的授权路径重合度；支持单仓 `maxConcurrentWorkers` 与 `dailyBudgetUsd` 每日花费上限（触顶后跑完进行中 Stage 并暂停排队推送 `budget_cap` 审批卡）。
   - 事后基于 `git diff` 校验改动路径：触及 `.env*`、`*.pem`、`*.key` 等禁区立即回滚禁止扩权；仅超出 `allowedPaths` 的普通文件**保留在 Worktree 挂起**，支持收件箱 **「一键扩权并继续」**（免重烧 Token 直接验证流转）。
-- **四合一控制入口（三层 Web 指挥舱 + 一等公民 `super-work` CLI）**：
-  1. **Attention Inbox（决策收件箱）**：聚合 `observe_proposal`、`plan_approval`、`watchdog_escalation`、`mandate_violation`、`merge_conflict`、`outbox_signoff`、`budget_cap`、`pr_followup` 审批项。
+- **五合一控制入口（四层 Web 指挥舱 + 一等公民 `super-work` CLI）**：
+  1. **Attention Inbox（决策收件箱）**：聚合 `observe_proposal`、`plan_approval`、`watchdog_escalation`、`mandate_violation`、`merge_conflict`、`outbox_signoff`、`budget_cap`、`pr_followup`、`arena_tiebreak` 与 `epic_replan` 审批项。
   2. **Mission Board（态势泳道看板）**：五列实时并发泳道，展示引擎徽章、PR 关联、授权作用域、依赖阻塞锁与预算进度条。
-  3. **Metrics & Budget（效能与预算面板）**：追踪今日预算消耗、交付成功率、总花费与按引擎统计的平均耗时/通过率。
-  4. **Deep Dive Drawer（文件树 Diff 台）& `@super-work/cli`**：支持面板下钻流式轨迹、**按文件折叠高亮 Diff 审查台 + 内联审查清单 + 针对单个文件直接注入返修**、**一键安全回滚**、`Chain of Recall` 与 Thread 追问；终端可通过 `bun run cli` / `super-work` 执行 `up -d`、`status`、`dispatch --wait`、`epic --wait`、`inbox`、`logs -f`、`watch`、`revert`、`playbook`。
+  3. **Scheduled Routines（自治巡航）**：支持一键预设模板与 Cron/周期巡检配置，通过 Probe-to-Promote 在静默健康退出与实质修复晋升间自动闭环。
+  4. **Metrics & Budget（效能与预算面板）**：追踪今日预算消耗、交付成功率、总花费与按引擎统计的平均耗时/通过率。
+  5. **Deep Dive Drawer（文件树 Diff 台）& `@super-work/cli`**：支持面板下钻流式轨迹、**按文件折叠高亮 Diff + Arena 双候选切换对比 + 内联审查与定向返修**、**一键安全回滚**、`Chain of Recall` & 历史判例；终端支持 `dispatch --arena --wait`、`routine`、`casebook`、`playbook prune` 等完整指令。
 
 ---
 
@@ -101,7 +102,9 @@ bun run dev:web      # 监听 5173 端口的 Vite 开发服务器（自动代理
 
 - `GET /api/health` — 服务健康状态、当前控制面 LLM 提供者及可用 Worker 引擎列表（`claude`、`codex`、`opencode`、`mock`）
 - `GET /api/repos`、`POST /api/repos`、`PATCH /api/repos/:id`、`POST /api/repos/:id/contract/sync`、`POST /api/repos/:id/contract/export` — 注册仓库、配置预热命令与配额、双向同步/导出 `super-work.json` 契约
-- `GET /api/repos/:id/playbook`、`POST /api/repos/:id/playbook`、`PATCH /api/playbook/:entryId`、`DELETE /api/playbook/:entryId` — 管理仓库级自进化经验库（Playbook）
+- `GET /api/repos/:id/playbook`、`POST /api/repos/:id/playbook`、`PATCH /api/playbook/:entryId`、`DELETE /api/playbook/:entryId`、`POST /api/repos/:id/playbook/prune` — 管理并一键清理陈旧/失效的经验库（Playbook）规则
+- `GET /api/repos/:id/casebook?q=...`、`DELETE /api/casebook/:entryId` — 检索已交付历史判例（Casebook）与回滚警示记录
+- `GET /api/routines`、`POST /api/routines`、`PATCH /api/routines/:id`、`DELETE /api/routines/:id`、`POST /api/routines/:id/run`、`GET /api/routines/runs` — 管理定时自治巡检例程（Probe-to-Promote）与运行健康时间线
 - `GET /api/metrics?repoId=...` — 获取今日预算消耗、交付成功率与各引擎效能耗时统计
 - `POST /api/triggers` — 接入外部或模拟事件触发器（`github_issue`、`github_pr`、`github_ci`、`cli`）
 - `GET /api/tickets`、`POST /api/tickets`、`GET /api/tickets/:id`、`POST /api/tickets/:id/message`、`POST /api/tickets/:id/cancel`、`POST /api/tickets/:id/cleanup-worktree`、`POST /api/tickets/:id/deliver`、`POST /api/tickets/:id/revert` — 派单、3 层 Diff 查看、Thread 追问、本地合入/PR 交付与一键安全 `git revert`

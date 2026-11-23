@@ -1,9 +1,13 @@
 import type {
+  ArenaCandidateResult,
   ArtifactKind,
+  CasebookEntry,
   ChainOfRecall,
   EpicDecompositionPlan,
   EpicDeliveryMode,
+  EpicReplanProposal,
   EpicSubtaskSpec,
+  HandoverDigest,
   InboxItem,
   InboxItemStatus,
   Mandate,
@@ -17,6 +21,8 @@ import type {
   RepoContractFile,
   RepoMetricsSummary,
   RevertResult,
+  RoutineRun,
+  RoutineSpec,
   SmokeCheckConfig,
   SmokeCheckResult,
   SpillArtifact,
@@ -84,6 +90,19 @@ export interface ControlPlaneLLM {
     exportedSymbols?: string[];
     contractSnippets?: string[];
   } | null>;
+  proposeEpicReplan?(input: {
+    repo: RepoConfig;
+    epic: Ticket;
+    completedSubtask: Ticket;
+    digest: HandoverDigest;
+    unstartedSubtasks: Ticket[];
+    allSubtasks: Ticket[];
+  }): Promise<EpicReplanProposal | null>;
+  judgeArenaCandidates?(input: {
+    repo: RepoConfig;
+    ticket: Ticket;
+    candidates: ArenaCandidateResult[];
+  }): Promise<{ winnerCandidateId: string; rationale: string } | null>;
 }
 
 export interface WorkerDriver {
@@ -137,6 +156,7 @@ export interface WorkspaceProvider {
     contract: RepoContractFile,
   ): Promise<{ filePath: string; rawHash: string }>;
   revertPaths(worktreePath: string, paths: string[]): Promise<void>;
+  deleteBranch?(rootRepoPath: string, branchName: string): Promise<void>;
   listWorktreeDirs(): Promise<string[]>;
   cleanupWorkspace(worktreePath: string, rootRepoPath?: string): Promise<void>;
 }
@@ -204,6 +224,23 @@ export interface StateStore {
   getPlaybookEntry(id: string): Promise<PlaybookEntry | null>;
   listPlaybookEntries(repoId: string, options?: { onlyEnabled?: boolean }): Promise<PlaybookEntry[]>;
   deletePlaybookEntry(id: string): Promise<boolean>;
+  recordPlaybookHits(ids: string[], matchedAt: string): Promise<void>;
+
+  // Routines (A.1)
+  saveRoutine(routine: RoutineSpec): Promise<void>;
+  getRoutine(id: string): Promise<RoutineSpec | null>;
+  listRoutines(repoId?: string): Promise<RoutineSpec[]>;
+  deleteRoutine(id: string): Promise<boolean>;
+  saveRoutineRun(run: RoutineRun): Promise<void>;
+  listRoutineRuns(filter?: { repoId?: string; routineId?: string; limit?: number }): Promise<RoutineRun[]>;
+
+  // Casebook (C.2)
+  saveCasebookEntry(entry: CasebookEntry): Promise<void>;
+  getCasebookEntry(id: string): Promise<CasebookEntry | null>;
+  getCasebookEntryByTicket(ticketId: string): Promise<CasebookEntry | null>;
+  listCasebookEntries(repoId: string, options?: { includeReverted?: boolean }): Promise<CasebookEntry[]>;
+  deleteCasebookEntry(id: string): Promise<boolean>;
+  recordCasebookHits(ids: string[], matchedAt: string): Promise<void>;
 
   // System Settings
   getSystemSetting<T>(key: string): Promise<T | null>;
@@ -237,6 +274,8 @@ export interface DirectTicketInput {
   maxCostUsd?: number;
   maxDurationSec?: number;
   preferredEngine?: WorkerEngineId;
+  arenaMode?: boolean;
+  arenaCompetitorEngine?: WorkerEngineId;
   modelOverride?: string;
   effortOverride?: ReasoningEffort;
   acceptanceCriteria?: string[];

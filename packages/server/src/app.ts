@@ -3,6 +3,14 @@ import { join, normalize, resolve } from "node:path";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
+import {
+  ROUTINE_PRESET_TEMPLATES,
+  classifyPlaybookHealth,
+  newId,
+  normalizePlaybookRuleText,
+  normalizeSmokeCheckConfig,
+  nowIso,
+} from "@super-work/core";
 import type {
   ArtifactStore,
   CliScanReport,
@@ -21,6 +29,8 @@ import type {
   PublicSetupStatus,
   ReasoningEffort,
   RepoConfig,
+  RoutineScheduleKind,
+  RoutineSpec,
   SmokeCheckConfig,
   StateStore,
   SuperWorkKernel,
@@ -29,7 +39,6 @@ import type {
   TicketStatus,
   WorkerEngineId,
 } from "@super-work/core";
-import { newId, normalizePlaybookRuleText, normalizeSmokeCheckConfig, nowIso } from "@super-work/core";
 import {
   CliEnvironmentScanner,
   DEFAULT_NOTIFICATION_CONFIG,
@@ -118,6 +127,13 @@ function resolveEventTarget(
       return { repoId: event.repo.id };
     case "playbook_updated":
       return { repoId: event.repoId, ticketId: event.entry?.sourceTicketId };
+    case "routine_updated":
+    case "routine_run_updated":
+      return { repoId: event.repoId };
+    case "casebook_updated":
+      return { repoId: event.repoId, ticketId: event.entry.ticketId };
+    case "epic_replanned":
+      return { repoId: event.repoId, ticketId: event.epicId };
     case "trigger_ingested":
       return { repoId: event.trigger.repoId };
     case "ticket_created":
@@ -175,7 +191,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
   }
 
   app.get("/api/health", async (c) => {
-    const [repos, tickets, pendingInbox, pendingOutbox, availableEngines, worktrees] =
+    const [repos, tickets, pendingInbox, pendingOutbox, availableEngines, worktrees, routines] =
       await Promise.all([
         stateStore.listRepos(),
         stateStore.listTickets(),
@@ -183,6 +199,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         stateStore.listOutboxEntries({ status: "pending" }),
         kernel.getAvailableEngines(),
         kernel.inspectWorktrees(),
+        stateStore.listRoutines(),
       ]);
     return c.json({
       ok: true,
@@ -195,6 +212,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         pendingOutbox: pendingOutbox.length,
         activeWorktrees: worktrees.filter((w) => !w.reclaimable).length,
         reclaimableWorktrees: worktrees.filter((w) => w.reclaimable).length,
+        activeRoutines: routines.filter((r) => r.enabled).length,
       },
       timestamp: nowIso(),
     });
@@ -382,6 +400,9 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       defaultTemplate: body.defaultTemplate ?? "standard",
       preferredImplementEngine: body.preferredImplementEngine ?? "claude",
       preferredReviewEngine: body.preferredReviewEngine ?? "codex",
+      fallbackEngines: Array.isArray(body.fallbackEngines)
+        ? body.fallbackEngines.filter((e): e is WorkerEngineId => Boolean(e))
+        : undefined,
       autoCleanupWorktree: body.autoCleanupWorktree ?? true,
       verificationCommands: Array.isArray(body.verificationCommands)
         ? body.verificationCommands.map((s) => String(s).trim()).filter(Boolean)
@@ -419,18 +440,25 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     }
     const patch = (await c.req.json()) as Omit<
       Partial<RepoConfig>,
-      "maxConcurrentWorkers" | "dailyBudgetUsd" | "conventions" | "smokeCheck"
+      "maxConcurrentWorkers" | "dailyBudgetUsd" | "conventions" | "smokeCheck" | "fallbackEngines"
     > & {
       maxConcurrentWorkers?: number | null;
       dailyBudgetUsd?: number | null;
       conventions?: string | null;
       smokeCheck?: SmokeCheckConfig | null;
+      fallbackEngines?: WorkerEngineId[] | null;
     };
     const updated: RepoConfig = {
       ...existing,
       ...patch,
       name: patch.name?.trim() || existing.name,
       baseBranch: patch.baseBranch?.trim() || existing.baseBranch,
+      fallbackEngines:
+        patch.fallbackEngines !== undefined
+          ? patch.fallbackEngines === null
+            ? undefined
+            : patch.fallbackEngines.filter((e): e is WorkerEngineId => Boolean(e))
+          : existing.fallbackEngines,
       githubRepo:
         patch.githubRepo !== undefined
           ? patch.githubRepo.trim() || undefined
@@ -515,7 +543,75 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       return c.json({ error: "Repository not found" }, 404);
     }
     const entries = await stateStore.listPlaybookEntries(id);
+    const pathExists = (rel: string): boolean => existsSync(join(repo.rootPath, rel));
+    const enriched = entries.map((entry) => {
+      const health = classifyPlaybookHealth(entry, { pathExists });
+      return {
+        ...entry,
+        healthStatus: health.status,
+        prunable: health.prunable,
+      };
+    });
+    return c.json({ entries: enriched });
+  });
+
+  app.post("/api/repos/:id/playbook/prune", async (c) => {
+    const id = c.req.param("id");
+    try {
+      const result = await kernel.prunePlaybookEntries(id);
+      const repo = await stateStore.getRepo(id);
+      const pathExists = repo
+        ? (rel: string): boolean => existsSync(join(repo.rootPath, rel))
+        : undefined;
+      const entries = (await stateStore.listPlaybookEntries(id)).map((entry) => {
+        const health = classifyPlaybookHealth(entry, { pathExists });
+        return {
+          ...entry,
+          healthStatus: health.status,
+          prunable: health.prunable,
+        };
+      });
+      return c.json({ ...result, entries });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("Repository not found") ? 404 : 400);
+    }
+  });
+
+  app.get("/api/repos/:id/casebook", async (c) => {
+    const id = c.req.param("id");
+    const repo = await stateStore.getRepo(id);
+    if (!repo) {
+      return c.json({ error: "Repository not found" }, 404);
+    }
+    const q = (c.req.query("q") ?? "").trim().toLowerCase();
+    const allEntries = await stateStore.listCasebookEntries(id, { includeReverted: true });
+    const entries = q
+      ? allEntries.filter((e) =>
+          [
+            e.title,
+            e.goalSummary,
+            e.solutionSummary,
+            e.pitfallsAndFixes ?? "",
+            ...e.exportedSymbols,
+            ...e.changedFiles,
+            ...e.scopePaths,
+          ]
+            .join(" ")
+            .toLowerCase()
+            .includes(q),
+        )
+      : allEntries;
     return c.json({ entries });
+  });
+
+  app.delete("/api/casebook/:entryId", async (c) => {
+    const entryId = c.req.param("entryId");
+    const deleted = await stateStore.deleteCasebookEntry(entryId);
+    if (!deleted) {
+      return c.json({ error: "Casebook entry not found" }, 404);
+    }
+    return c.json({ ok: true, id: entryId });
   });
 
   app.post("/api/repos/:id/playbook", async (c) => {
@@ -587,6 +683,104 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     return c.json({ ok: true, id: entryId });
   });
 
+  // --- Scheduled Routines (A.1) ---
+  app.get("/api/routines", async (c) => {
+    const repoId = c.req.query("repoId") || undefined;
+    const routines = await stateStore.listRoutines(repoId);
+    return c.json({ routines, presets: ROUTINE_PRESET_TEMPLATES });
+  });
+
+  app.get("/api/routines/runs", async (c) => {
+    const repoId = c.req.query("repoId") || undefined;
+    const routineId = c.req.query("routineId") || undefined;
+    const limitRaw = Number(c.req.query("limit") ?? 50);
+    const runs = await stateStore.listRoutineRuns({
+      repoId,
+      routineId,
+      limit: Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(200, Math.floor(limitRaw)) : 50,
+    });
+    return c.json({ runs });
+  });
+
+  app.post("/api/routines", async (c) => {
+    const body = (await c.req.json()) as {
+      repoId?: string;
+      name?: string;
+      prompt?: string;
+      scheduleKind?: RoutineScheduleKind;
+      intervalMinutes?: number;
+      cronExpr?: string;
+      activeHoursStart?: string;
+      activeHoursEnd?: string;
+      allowedPaths?: string[];
+      template?: PipelineTemplateId;
+      preferredEngine?: WorkerEngineId;
+      maxBudgetUsd?: number;
+      enabled?: boolean;
+      nextRunAt?: string;
+    };
+    if (!body.repoId || !body.name || !body.prompt) {
+      return c.json({ error: "repoId, name, and prompt are required" }, 400);
+    }
+    try {
+      const routine = await kernel.createRoutine({
+        repoId: body.repoId,
+        name: body.name,
+        prompt: body.prompt,
+        scheduleKind: body.scheduleKind ?? "interval",
+        intervalMinutes: body.intervalMinutes,
+        cronExpr: body.cronExpr,
+        activeHoursStart: body.activeHoursStart,
+        activeHoursEnd: body.activeHoursEnd,
+        allowedPaths: body.allowedPaths,
+        template: body.template,
+        preferredEngine: body.preferredEngine,
+        maxBudgetUsd: body.maxBudgetUsd,
+        enabled: body.enabled,
+        nextRunAt: body.nextRunAt,
+      });
+      return c.json({ routine }, 201);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("Repository not found") ? 404 : 400);
+    }
+  });
+
+  app.patch("/api/routines/:id", async (c) => {
+    const id = c.req.param("id");
+    const patch = (await c.req.json()) as Partial<
+      Omit<RoutineSpec, "id" | "repoId" | "createdAt" | "updatedAt">
+    >;
+    try {
+      const routine = await kernel.updateRoutine(id, patch);
+      return c.json({ routine });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("not found") ? 404 : 400);
+    }
+  });
+
+  app.delete("/api/routines/:id", async (c) => {
+    const id = c.req.param("id");
+    const deleted = await kernel.deleteRoutine(id);
+    if (!deleted) {
+      return c.json({ error: "Routine not found" }, 404);
+    }
+    return c.json({ ok: true, id });
+  });
+
+  app.post("/api/routines/:id/run", async (c) => {
+    const id = c.req.param("id");
+    try {
+      const run = await kernel.triggerRoutineNow(id);
+      void kernel.tick();
+      return c.json({ run });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("not found") ? 404 : 400);
+    }
+  });
+
   // --- Metrics & Quota ---
   app.get("/api/metrics", async (c) => {
     const repoId = c.req.query("repoId") || undefined;
@@ -643,6 +837,8 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       dependsOn?: string[];
       maxCostUsd?: number;
       preferredEngine?: RepoConfig["preferredImplementEngine"];
+      arenaMode?: boolean;
+      arenaCompetitorEngine?: RepoConfig["preferredImplementEngine"];
       modelOverride?: string;
       effortOverride?: ReasoningEffort;
       acceptanceCriteria?: string[];
@@ -665,6 +861,8 @@ export function createServerApp(deps: ServerAppDeps): Hono {
           : undefined,
         maxCostUsd: body.maxCostUsd,
         preferredEngine: body.preferredEngine,
+        arenaMode: Boolean(body.arenaMode),
+        arenaCompetitorEngine: body.arenaCompetitorEngine,
         modelOverride: body.modelOverride,
         effortOverride: body.effortOverride,
         acceptanceCriteria: body.acceptanceCriteria,
@@ -749,6 +947,33 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       }
     }
 
+    let arenaCandidateDiffs: Record<string, string> | undefined;
+    if (ticket.arenaCandidates && ticket.arenaCandidates.length > 0) {
+      arenaCandidateDiffs = {};
+      let effectiveBase = repo?.baseBranch ?? "main";
+      if (ticket.parentTicketId) {
+        const parentEpic = await stateStore.getTicket(ticket.parentTicketId);
+        if (parentEpic?.branchName && parentEpic.epicDeliveryMode !== "per_subtask") {
+          effectiveBase = parentEpic.branchName;
+        }
+      }
+      for (const cand of ticket.arenaCandidates) {
+        let candDiff = "";
+        if (cand.worktreePath && existsSync(cand.worktreePath)) {
+          candDiff = await kernel.workspace
+            .getDiff(cand.worktreePath, effectiveBase)
+            .catch(() => "");
+        }
+        if (!candDiff.trim() && cand.diffArtifactId) {
+          const art = await stateStore.getArtifact(cand.diffArtifactId);
+          if (art) {
+            candDiff = await artifactStore.readSpill(art.storageUri).catch(() => "");
+          }
+        }
+        arenaCandidateDiffs[cand.candidateId] = candDiff;
+      }
+    }
+
     return c.json({
       ticket,
       stageRuns,
@@ -758,6 +983,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       diff,
       ...(subtasks ? { subtasks } : {}),
       ...(upstreamDependencies.length > 0 ? { upstreamDependencies } : {}),
+      ...(arenaCandidateDiffs ? { arenaCandidateDiffs } : {}),
     });
   });
 
@@ -905,6 +1131,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       expandMandate?: boolean;
       budgetIncreaseUsd?: number;
       saveToPlaybook?: boolean;
+      arenaWinnerId?: string;
     };
     if (body.decision !== "approved" && body.decision !== "rejected") {
       return c.json({ error: "decision must be 'approved' or 'rejected'" }, 400);
@@ -914,6 +1141,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       expandMandate: body.expandMandate,
       budgetIncreaseUsd: body.budgetIncreaseUsd,
       saveToPlaybook: body.saveToPlaybook,
+      arenaWinnerId: body.arenaWinnerId,
     });
     void kernel.tick();
     void kernel.outbox.processDueEntries();

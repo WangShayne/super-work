@@ -1,3 +1,4 @@
+import { selectRelevantCasesForContext } from "./casebook.ts";
 import { formatUpstreamHandoversForPrompt } from "./handover.ts";
 import type { ArtifactStore, StateStore } from "./ports.ts";
 import type {
@@ -19,6 +20,7 @@ export interface WorkerPromptOptions {
   smokeCheck?: SmokeCheckConfig;
   repoConventions?: string;
   playbookContext?: string;
+  casebookContext?: string;
   upstreamHandovers?: HandoverDigest[];
 }
 
@@ -78,6 +80,10 @@ export class MemoryManager {
 
     if (opts.playbookContext?.trim()) {
       sections.push(`\n## Repository Playbook (Learned Rules & Guardrails)\n${opts.playbookContext.trim()}`);
+    }
+
+    if (opts.casebookContext?.trim()) {
+      sections.push(`\n## Historical Verified Cases & Warnings (Casebook)\n${opts.casebookContext.trim()}`);
     }
 
     if (opts.upstreamHandovers && opts.upstreamHandovers.length > 0) {
@@ -220,6 +226,27 @@ export class MemoryManager {
             snippet: hit.snippet,
           });
         }
+      }
+    }
+
+    const repoCases = await this.stateStore.listCasebookEntries(base.ticket.repoId, {
+      includeReverted: true,
+    });
+    const otherCases = repoCases.filter((c) => c.ticketId !== base.ticket.id);
+    if (otherCases.length > 0) {
+      const ftsHits = await this.stateStore.searchMemory(base.ticket.title, 8, base.ticket.repoId);
+      const ftsTicketIds = new Set(ftsHits.map((h) => h.ticketId));
+      const matched = selectRelevantCasesForContext({
+        cases: otherCases,
+        ftsTicketIds,
+        targetPaths: base.ticket.mandate.allowedPaths,
+        queryText: `${base.ticket.title} ${base.ticket.description}`,
+        maxPositive: 3,
+        maxChars: 1600,
+      });
+      const combined = [...matched.positiveCases, ...matched.revertedWarnings];
+      if (combined.length > 0) {
+        base.matchedCases = combined;
       }
     }
 

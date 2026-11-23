@@ -1,5 +1,5 @@
 import { createDefaultMandate, mandateScopesOverlap, normalizeScopePattern } from "./mandate.ts";
-import type { PlaybookEntry, SharedPlaybookRuleSpec } from "./types.ts";
+import type { PlaybookEntry, PlaybookHealthStatus, SharedPlaybookRuleSpec } from "./types.ts";
 
 export function normalizePlaybookRuleText(rule: string): string {
   const collapsed = rule
@@ -61,11 +61,69 @@ function scopeSpecificityScore(entry: PlaybookEntry, targetPaths: string[]): {
   return { matches: entry.pinned, score: entry.pinned ? 0 : -1 };
 }
 
+function extractStaticDirPrefix(pattern: string): string | null {
+  const norm = normalizeScopePattern(pattern);
+  if (norm === "**" || norm === "*") return null;
+  const parts = norm.split("/");
+  const clean: string[] = [];
+  for (const part of parts) {
+    if (/[*?[{]/.test(part)) break;
+    clean.push(part);
+  }
+  return clean.length > 0 ? clean.join("/") : null;
+}
+
+export function classifyPlaybookHealth(
+  entry: PlaybookEntry,
+  options?: {
+    pathExists?: (relPath: string) => boolean;
+    nowMs?: number;
+    staleDays?: number;
+  },
+): { status: PlaybookHealthStatus; penalty: number; prunable: boolean } {
+  // Human-written, super-work.json contract rules, and pinned rules are always protected.
+  if (entry.source !== "auto_healed" || entry.pinned) {
+    return { status: "healthy", penalty: 0, prunable: false };
+  }
+
+  if (entry.suspect) {
+    return { status: "suspect", penalty: 5, prunable: true };
+  }
+
+  if (options?.pathExists && !isWildcardScope(entry.scopePaths)) {
+    const prefixes = entry.scopePaths
+      .map(extractStaticDirPrefix)
+      .filter((p): p is string => Boolean(p));
+    if (prefixes.length > 0 && prefixes.every((p) => !options.pathExists!(p))) {
+      return { status: "zombie_path", penalty: 4, prunable: true };
+    }
+  }
+
+  const nowMs = options?.nowMs ?? Date.now();
+  const staleDays = options?.staleDays ?? 21;
+  const hitCount = entry.hitCount ?? 0;
+  const refIso = entry.lastMatchedAt ?? entry.updatedAt ?? entry.createdAt;
+  const refMs = Date.parse(refIso);
+  if (Number.isFinite(refMs)) {
+    const ageDays = Math.max(0, (nowMs - refMs) / (1000 * 60 * 60 * 24));
+    if ((hitCount === 0 && ageDays > staleDays) || ageDays > staleDays + 14) {
+      return { status: "stale", penalty: 2, prunable: true };
+    }
+  }
+
+  return { status: "healthy", penalty: 0, prunable: false };
+}
+
 export function selectPlaybookRulesForContext(
   entries: PlaybookEntry[],
   targetPaths: string[],
   maxItems = 8,
   maxChars = 1200,
+  decayOptions?: {
+    pathExists?: (relPath: string) => boolean;
+    nowMs?: number;
+    staleDays?: number;
+  },
 ): PlaybookEntry[] {
   const enabled = entries.filter((e) => e.enabled && e.rule.trim().length > 0);
   const scored: Array<{ entry: PlaybookEntry; specScore: number; sourceWeight: number }> = [];
@@ -73,9 +131,11 @@ export function selectPlaybookRulesForContext(
   for (const entry of enabled) {
     const spec = scopeSpecificityScore(entry, targetPaths);
     if (!spec.matches) continue;
+    const health = classifyPlaybookHealth(entry, decayOptions);
     const sourceWeight =
       entry.source === "human" ? 3 : entry.source === "repo_contract" ? 2 : 1;
-    scored.push({ entry, specScore: spec.score, sourceWeight });
+    const adjustedScore = spec.score - health.penalty + (entry.hitCount ? Math.min(2, entry.hitCount * 0.25) : 0);
+    scored.push({ entry, specScore: adjustedScore, sourceWeight });
   }
 
   scored.sort((a, b) => {
@@ -123,8 +183,13 @@ export function formatPlaybookContext(
   targetPaths: string[],
   maxItems = 8,
   maxChars = 1200,
+  decayOptions?: {
+    pathExists?: (relPath: string) => boolean;
+    nowMs?: number;
+    staleDays?: number;
+  },
 ): string {
-  const selected = selectPlaybookRulesForContext(entries, targetPaths, maxItems, maxChars);
+  const selected = selectPlaybookRulesForContext(entries, targetPaths, maxItems, maxChars, decayOptions);
   if (selected.length === 0) return "";
   return selected.map(formatSinglePlaybookBullet).join("\n");
 }

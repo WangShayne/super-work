@@ -1,7 +1,19 @@
 import { existsSync } from "node:fs";
-import { basename, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
+import {
+  countDiffLines,
+  pickNextFallbackEngine,
+  resolveFallbackChain,
+  scoreArenaCandidates,
+} from "./arena.ts";
+import { buildCasebookEntryFromTicket, selectRelevantCasesForContext } from "./casebook.ts";
+import {
+  classifyEpicReplanApproval,
+  evaluateHeuristicEpicReplan,
+  sanitizeEpicSubtasks,
+} from "./epic.ts";
 import { buildHandoverDigest, extractDiffContracts } from "./handover.ts";
-import { validateChangedFilesAgainstMandate } from "./mandate.ts";
+import { createDefaultMandate, validateChangedFilesAgainstMandate } from "./mandate.ts";
 import { MemoryManager } from "./memory.ts";
 import { OutboxProcessor } from "./outbox.ts";
 import {
@@ -14,18 +26,25 @@ import {
   statusForStage,
 } from "./pipeline.ts";
 import {
+  classifyPlaybookHealth,
   contractRuleDeterministicId,
   distillHumanNoteToRule,
   formatPlaybookContext,
   heuristicDistillPlaybookLesson,
   normalizePlaybookRuleText,
   playbookDedupeKey,
+  selectPlaybookRulesForContext,
 } from "./playbook.ts";
 import {
   formatBlockingFindingsForRework,
   formatNitSummary,
   parseReviewReport,
 } from "./review.ts";
+import {
+  computeNextRoutineRunAt,
+  isWithinActiveHours,
+  parseRoutineProbeVerdict,
+} from "./routine.ts";
 import type {
   ArtifactStore,
   ControlPlaneLLM,
@@ -40,7 +59,10 @@ import type {
 } from "./ports.ts";
 import { EventIntakeRouter, type IngestResult } from "./router.ts";
 import type {
+  ArenaCandidateResult,
+  CasebookEntry,
   EpicDecompositionPlan,
+  EpicReplanProposal,
   HandoverDigest,
   InboxItem,
   KernelEvent,
@@ -52,11 +74,16 @@ import type {
   RepoConfig,
   RepoContractFile,
   ReviewReport,
+  RoutineRun,
+  RoutineScheduleKind,
+  RoutineSpec,
   SpillArtifact,
   StageKind,
   StageRun,
   SystemSetupConfig,
+  Thread,
   Ticket,
+  Trigger,
   VerificationRunResult,
   WatchdogDecision,
   WatchdogSignal,
@@ -110,6 +137,8 @@ export class SuperWorkKernel {
   private readonly drivers = new Map<WorkerEngineId, WorkerDriver>();
   private readonly listeners = new Set<(event: KernelEvent) => void>();
   private readonly activeTicketRuns = new Map<string, Promise<void>>();
+  private readonly activeRoutineRuns = new Set<string>();
+  private readonly repoWorkspaceLocks = new Map<string, Promise<void>>();
   private readonly abortControllers = new Map<string, AbortController>();
   private readonly finalizingEpics = new Set<string>();
   private readonly epicMergeLocks = new Map<string, Promise<void>>();
@@ -117,6 +146,7 @@ export class SuperWorkKernel {
   private schedulerTimer: ReturnType<typeof setInterval> | null = null;
   private outboxTimer: ReturnType<typeof setInterval> | null = null;
   private tickingPromise: Promise<number> | null = null;
+  private outboxFlushPromise: Promise<unknown> | null = null;
   private stopped = false;
 
   constructor(deps: SuperWorkKernelDeps) {
@@ -196,6 +226,29 @@ export class SuperWorkKernel {
         }
 
         currentTicket = await this.generateAndSaveHandoverDigest(currentTicket, repo);
+        await this.recordDeliveredCasebookEntry(currentTicket, repo);
+
+        if (currentTicket.routineId) {
+          const routine = await this.stateStore.getRoutine(currentTicket.routineId);
+          if (routine && routine.activeTicketId === currentTicket.id) {
+            const cleared: RoutineSpec = {
+              ...routine,
+              activeTicketId: undefined,
+              updatedAt: nowIso(),
+            };
+            await this.stateStore.saveRoutine(cleared);
+            this.emitEvent({
+              type: "routine_updated",
+              repoId: routine.repoId,
+              routine: cleared,
+              timestamp: cleared.updatedAt,
+            });
+          }
+        }
+
+        if (currentTicket.parentTicketId) {
+          await this.maybeEvaluateEpicReplan(currentTicket.parentTicketId, currentTicket);
+        }
 
         if (
           currentTicket.worktreePath &&
@@ -247,9 +300,20 @@ export class SuperWorkKernel {
     }
     if (!this.outboxTimer) {
       this.outboxTimer = setInterval(() => {
-        void this.outbox.processDueEntries();
+        void this.flushOutbox();
       }, this.config.outboxIntervalMs);
     }
+  }
+
+  private flushOutbox(): Promise<unknown> {
+    if (this.stopped) return Promise.resolve();
+    if (this.outboxFlushPromise) {
+      return this.outboxFlushPromise;
+    }
+    this.outboxFlushPromise = this.outbox.processDueEntries().finally(() => {
+      this.outboxFlushPromise = null;
+    });
+    return this.outboxFlushPromise;
   }
 
   async recoverInterruptedRuns(): Promise<{ recoveredTickets: number; requeuedOutbox: number }> {
@@ -326,7 +390,17 @@ export class SuperWorkKernel {
     for (const ctrl of this.abortControllers.values()) {
       ctrl.abort("kernel_shutdown");
     }
-    await Promise.allSettled(Array.from(this.activeTicketRuns.values()));
+    if (this.tickingPromise) {
+      await Promise.allSettled([this.tickingPromise]);
+    }
+    for (const ctrl of this.abortControllers.values()) {
+      ctrl.abort("kernel_shutdown");
+    }
+    const pending: Array<Promise<unknown>> = Array.from(this.activeTicketRuns.values());
+    if (this.outboxFlushPromise) {
+      pending.push(this.outboxFlushPromise);
+    }
+    await Promise.allSettled(pending);
   }
 
   async ingestTrigger(input: IngestTriggerInput): Promise<IngestResult> {
@@ -847,6 +921,41 @@ export class SuperWorkKernel {
     };
     await this.stateStore.saveTicket(updated);
     this.emitEvent({ type: "ticket_updated", ticket: updated, timestamp: ts });
+
+    // C.2 Self-Cleansing: flip linked Casebook entry to reverted warning and flag auto_healed Playbook rules as suspect
+    const existingCase = await this.stateStore.getCasebookEntryByTicket(ticket.id);
+    if (existingCase && !existingCase.reverted) {
+      const flaggedCase: CasebookEntry = {
+        ...existingCase,
+        reverted: true,
+        updatedAt: ts,
+      };
+      await this.stateStore.saveCasebookEntry(flaggedCase);
+      this.emitEvent({
+        type: "casebook_updated",
+        repoId: updated.repoId,
+        entry: flaggedCase,
+        timestamp: ts,
+      });
+    }
+    const repoPlaybook = await this.stateStore.listPlaybookEntries(ticket.repoId);
+    for (const pb of repoPlaybook) {
+      if (pb.source === "auto_healed" && pb.sourceTicketId === ticket.id && !pb.suspect) {
+        const suspectEntry: PlaybookEntry = {
+          ...pb,
+          suspect: true,
+          updatedAt: ts,
+        };
+        await this.stateStore.savePlaybookEntry(suspectEntry);
+        this.emitEvent({
+          type: "playbook_updated",
+          repoId: ticket.repoId,
+          entry: suspectEntry,
+          timestamp: ts,
+        });
+      }
+    }
+
     return { ticket: updated, revertCommitSha: res.revertCommitSha };
   }
 
@@ -912,6 +1021,13 @@ export class SuperWorkKernel {
     if (ticket.worktreePath) {
       await this.workspace.cleanupWorkspace(ticket.worktreePath, repo?.rootPath);
     }
+    if (ticket.arenaCandidates) {
+      for (const cand of ticket.arenaCandidates) {
+        if (cand.worktreePath && cand.worktreePath !== ticket.worktreePath) {
+          await this.workspace.cleanupWorkspace(cand.worktreePath, repo?.rootPath).catch(() => {});
+        }
+      }
+    }
 
     const ts = nowIso();
     const updated: Ticket = {
@@ -938,6 +1054,13 @@ export class SuperWorkKernel {
       ticketsById.set(t.id, t);
       if (t.worktreePath) {
         ticketsByPath.set(resolve(t.worktreePath), t);
+      }
+      if (t.arenaCandidates) {
+        for (const cand of t.arenaCandidates) {
+          if (cand.worktreePath) {
+            ticketsByPath.set(resolve(cand.worktreePath), t);
+          }
+        }
       }
     }
 
@@ -1013,6 +1136,7 @@ export class SuperWorkKernel {
       expandMandate?: boolean;
       budgetIncreaseUsd?: number;
       saveToPlaybook?: boolean;
+      arenaWinnerId?: string;
     },
   ): Promise<{ item: InboxItem; ticket: Ticket }> {
     const item = await this.stateStore.getInboxItem(inboxId);
@@ -1322,6 +1446,56 @@ export class SuperWorkKernel {
           errorMessage: undefined,
         };
       }
+    } else if (item.kind === "arena_tiebreak") {
+      const repo = await this.stateStore.getRepo(ticket.repoId);
+      const candidates = ticket.arenaCandidates ?? [];
+      if (decision === "approved" && candidates.length > 0) {
+        const chosenId =
+          options?.arenaWinnerId ??
+          (item.contextPayload.recommendedCandidateId as string | undefined) ??
+          candidates.find((c) => c.recommended)?.candidateId ??
+          candidates[0]!.candidateId;
+        const winner = candidates.find((c) => c.candidateId === chosenId) ?? candidates[0]!;
+        const adopted = await this.adoptArenaCandidateWinner(
+          {
+            ...nextTicket,
+            inlineMemory: {
+              ...nextTicket.inlineMemory,
+              activeHint: note || nextTicket.inlineMemory.activeHint,
+            },
+          },
+          repo ?? undefined,
+          winner,
+          candidates,
+          true,
+        );
+        return { item: resolvedItem, ticket: adopted };
+      } else {
+        await this.cleanupArenaCandidateWorktrees(candidates, repo?.rootPath);
+        nextTicket = {
+          ...nextTicket,
+          worktreePath: undefined,
+          status: "cancelled",
+          errorMessage: note ?? "Arena duel rejected by human reviewer",
+        };
+      }
+    } else if (item.kind === "epic_replan") {
+      const proposal =
+        ticket.pendingEpicReplan ??
+        (item.contextPayload.proposal as EpicReplanProposal | undefined);
+      if (decision === "approved" && proposal) {
+        const appliedEpic = await this.applyEpicReplanProposal(ticket, proposal, {
+          humanApproved: true,
+        });
+        return { item: resolvedItem, ticket: appliedEpic };
+      } else {
+        nextTicket = {
+          ...nextTicket,
+          pendingEpicReplan: undefined,
+          status: ticket.isEpic ? "implementing" : ticket.status,
+          errorMessage: undefined,
+        };
+      }
     } else {
       // watchdog_escalation, merge_conflict
       if (decision === "approved") {
@@ -1357,14 +1531,24 @@ export class SuperWorkKernel {
   }
 
   private async performTick(): Promise<number> {
+    if (this.stopped) return 0;
     let launched = 0;
     const initialRepos = await this.stateStore.listRepos();
+    const epicById = new Map<string, Ticket>();
     for (const r of initialRepos) {
+      if (this.stopped) return 0;
       const synced = (await this.syncRepoContract(r.id).catch(() => r)) ?? r;
+      if (this.stopped) return 0;
       await this.router.resolveDependenciesForWaitingTickets(synced);
       await this.syncEpicStatuses(synced);
     }
+    if (this.stopped) return 0;
+    await this.processDueRoutines();
+    if (this.stopped) return 0;
     const repos = await this.stateStore.listRepos();
+    for (const t of await this.stateStore.listTickets()) {
+      if (t.isEpic) epicById.set(t.id, t);
+    }
 
     const capacity = this.config.maxConcurrentWorkers - this.activeTicketRuns.size;
     if (capacity <= 0) return 0;
@@ -1382,9 +1566,16 @@ export class SuperWorkKernel {
     const todaySpendCache = new Map<string, number>();
 
     const queued = await this.stateStore.listTickets({ status: "queued" });
-    const candidates = queued.filter((t) => !this.activeTicketRuns.has(t.id));
+    const candidates = queued.filter((t) => {
+      if (this.activeTicketRuns.has(t.id)) return false;
+      if (t.parentTicketId && epicById.get(t.parentTicketId)?.pendingEpicReplan) {
+        return false;
+      }
+      return true;
+    });
 
     for (const ticket of candidates) {
+      if (this.stopped) break;
       if (launched >= capacity) break;
       const repo = reposById.get(ticket.repoId);
       const stage = ticket.currentStage || getFirstStage(ticket.template);
@@ -1556,6 +1747,13 @@ export class SuperWorkKernel {
     const stage = ticket.currentStage || getFirstStage(ticket.template);
     const availableEngines = await this.getAvailableEngines();
 
+    if (ticket.arenaMode && stage === "implement" && !ticket.arenaWinnerId) {
+      const arenaHandled = await this.runArenaImplementStage(ticket, repo, availableEngines);
+      if (arenaHandled) {
+        return;
+      }
+    }
+
     let chosenEngine: WorkerEngineId;
     if (stage === "review") {
       const priorRuns = await this.stateStore.listStageRuns(ticket.id);
@@ -1573,11 +1771,28 @@ export class SuperWorkKernel {
     } else {
       const explicitEngine = ticket.activeEngine ?? ticket.preferredEngine;
       chosenEngine = selectEngineForStage(repo, stage, explicitEngine);
+      if (!ticket.activeEngine && (ticket.failedEngines ?? []).includes(chosenEngine)) {
+        chosenEngine =
+          pickNextFallbackEngine({
+            currentEngine: chosenEngine,
+            failedEngines: ticket.failedEngines,
+            repo,
+            availableEngines,
+          }) ?? chosenEngine;
+      }
     }
 
-    const driver =
-      this.drivers.get(chosenEngine) ??
-      (availableEngines[0] ? this.drivers.get(availableEngines[0]) : undefined);
+    let driver = this.drivers.get(chosenEngine);
+    if (!driver) {
+      const chain = resolveFallbackChain({
+        primaryEngine: chosenEngine,
+        repo,
+        availableEngines,
+        failedEngines: ticket.failedEngines,
+      });
+      const alt = chain[0] ?? availableEngines[0];
+      driver = alt ? this.drivers.get(alt) : undefined;
+    }
 
     if (!driver) {
       await this.escalateTicket(ticket, "watchdog_escalation", `No WorkerDriver available for engine '${chosenEngine}'`, {
@@ -1589,11 +1804,14 @@ export class SuperWorkKernel {
     // Prepare isolated worktree workspace (and merge upstream dependency branches on initial creation)
     const { effectiveBaseBranch } = await this.getEffectiveBaseInfo(ticket, repo);
     const hadWorktree = Boolean(ticket.worktreePath);
+    const lockedTicket = ticket;
     let ws: { worktreePath: string; branchName: string };
     try {
-      ws = await this.workspace.prepareWorkspace(ticket, repo, {
-        startPoint: effectiveBaseBranch,
-      });
+      ws = await this.runWithRepoWorkspaceLock(repo.id, () =>
+        this.workspace.prepareWorkspace(lockedTicket, repo, {
+          startPoint: effectiveBaseBranch,
+        }),
+      );
     } catch (err) {
       await this.escalateTicket(
         ticket,
@@ -1649,45 +1867,7 @@ export class SuperWorkKernel {
       return;
     }
 
-    const [relatedMemory, playbookEntries] = await Promise.all([
-      this.stateStore.searchMemory(ticket.title, 4, repo.id),
-      this.stateStore.listPlaybookEntries(repo.id, { onlyEnabled: true }),
-    ]);
-    const upstreamHandovers: HandoverDigest[] = [];
-    if (ticket.dependsOn.length > 0) {
-      const reposById = new Map((await this.stateStore.listRepos()).map((r) => [r.id, r]));
-      for (const depId of ticket.dependsOn) {
-        const dep = await this.stateStore.getTicket(depId);
-        if (!dep) continue;
-        if (dep.handoverDigest) {
-          upstreamHandovers.push(dep.handoverDigest);
-        } else if (dep.status === "delivered") {
-          const depFiles = Array.from(
-            new Set(dep.inlineMemory.stageNotes.flatMap((n) => n.changedFiles)),
-          );
-          upstreamHandovers.push(
-            buildHandoverDigest({
-              ticket: dep,
-              repoName: reposById.get(dep.repoId)?.name,
-              changedFiles: depFiles,
-              diffText: "",
-              stageSummary: dep.inlineMemory.stageNotes.at(-1)?.summary || dep.title,
-            }),
-          );
-        }
-      }
-    }
-    const playbookContext = formatPlaybookContext(
-      playbookEntries,
-      ticket.mandate.allowedPaths,
-    );
-    const prompt = this.memory.buildWorkerPromptContext(ticket, stage, relatedMemory, {
-      verificationCommands: repo.verificationCommands,
-      smokeCheck: repo.smokeCheck,
-      repoConventions: repo.conventions,
-      playbookContext,
-      upstreamHandovers,
-    });
+    const prompt = await this.buildEnrichedWorkerPrompt(ticket, repo, stage);
 
     const setupConfig = await this.stateStore.getSystemSetting<SystemSetupConfig>("setup_config");
     const engineProfile =
@@ -1905,20 +2085,32 @@ export class SuperWorkKernel {
       }
 
       if (dec.action === "SWITCH_ENGINE") {
+        const nextFailed = Array.from(new Set([...(ticket.failedEngines ?? []), driver.engine]));
         const altEngine =
-          dec.targetEngine && dec.targetEngine !== driver.engine
+          dec.targetEngine &&
+          dec.targetEngine !== driver.engine &&
+          !nextFailed.includes(dec.targetEngine) &&
+          availableEngines.includes(dec.targetEngine)
             ? dec.targetEngine
-            : getAlternateEngine(driver.engine, availableEngines);
-        if (altEngine) {
+            : pickNextFallbackEngine({
+                currentEngine: driver.engine,
+                failedEngines: nextFailed,
+                repo,
+                availableEngines,
+              }) ?? getAlternateEngine(driver.engine, availableEngines);
+        if (altEngine && altEngine !== driver.engine && !nextFailed.includes(altEngine)) {
           const nextTicket: Ticket = {
             ...ticket,
             status: "queued",
             activeEngine: altEngine,
+            failedEngines: nextFailed,
             stageRetries: ticket.stageRetries + 1,
             costUsd: ticket.costUsd + stageCostUsd,
             inlineMemory: {
               ...ticket.inlineMemory,
-              activeHint: dec.hint ?? `Switched from ${driver.engine} to ${altEngine} due to: ${dec.reason}`,
+              activeHint:
+                dec.hint ??
+                `[Fallback Engine: ${driver.engine} -> ${altEngine}] Switched due to: ${dec.reason}`,
             },
             updatedAt: nowIso(),
           };
@@ -1939,7 +2131,7 @@ export class SuperWorkKernel {
       return;
     }
 
-    // Check if turn failed without completion
+    // Check if turn failed without completion -> auto fallback to next healthy engine in chain
     const lastErrorEvent = [...collectedEvents].reverse().find((e) => e.type === "error");
     if (!completedEvent && lastErrorEvent && lastErrorEvent.type === "error") {
       const failedRun: StageRun = {
@@ -1960,7 +2152,31 @@ export class SuperWorkKernel {
         verificationPassed: false,
       });
 
-      if (ticket.stageRetries < ticket.mandate.maxStageRetries) {
+      const nextFailed = Array.from(new Set([...(ticket.failedEngines ?? []), driver.engine]));
+      const fallbackEngine = pickNextFallbackEngine({
+        currentEngine: driver.engine,
+        failedEngines: nextFailed,
+        repo,
+        availableEngines,
+      });
+
+      if (fallbackEngine) {
+        const handedOff: Ticket = {
+          ...ticket,
+          status: "queued",
+          activeEngine: fallbackEngine,
+          failedEngines: nextFailed,
+          stageRetries: 0,
+          costUsd: ticket.costUsd + stageCostUsd,
+          inlineMemory: {
+            ...ticket.inlineMemory,
+            activeHint: `[Engine Fallback: ${driver.engine} -> ${fallbackEngine}] Previous engine errored (${lastErrorEvent.message}). Existing worktree state is preserved; continue and finish cleanly.`,
+          },
+          updatedAt: nowIso(),
+        };
+        await this.stateStore.saveTicket(handedOff);
+        this.emitEvent({ type: "ticket_updated", ticket: handedOff, timestamp: handedOff.updatedAt });
+      } else if (ticket.stageRetries < ticket.mandate.maxStageRetries) {
         const retried: Ticket = {
           ...ticket,
           status: "queued",
@@ -1979,7 +2195,7 @@ export class SuperWorkKernel {
           { ...ticket, costUsd: ticket.costUsd + stageCostUsd },
           "watchdog_escalation",
           `Stage ${stage} failed: ${lastErrorEvent.message}`,
-          { stageRunId: stageRun.id },
+          { stageRunId: stageRun.id, failedEngines: nextFailed },
         );
       }
       return;
@@ -2137,7 +2353,7 @@ export class SuperWorkKernel {
             stageRetries: ticket.stageRetries + 1,
             costUsd: ticket.costUsd + stageCostUsd,
             nativeSessions: updatedFailSessions,
-            activeEngine: undefined,
+            activeEngine: driver.engine,
             inlineMemory: updatedFailMemory,
             updatedAt: nowIso(),
           };
@@ -2148,17 +2364,48 @@ export class SuperWorkKernel {
             timestamp: retrying.updatedAt,
           });
         } else {
-          await this.escalateTicket(
-            {
+          const nextFailed = Array.from(new Set([...(ticket.failedEngines ?? []), driver.engine]));
+          const fallbackEngine = pickNextFallbackEngine({
+            currentEngine: driver.engine,
+            failedEngines: nextFailed,
+            repo,
+            availableEngines,
+          });
+          if (fallbackEngine) {
+            const handedOff: Ticket = {
               ...ticket,
+              status: "queued",
+              stageRetries: 0,
               costUsd: ticket.costUsd + stageCostUsd,
               nativeSessions: updatedFailSessions,
-              inlineMemory: updatedFailMemory,
-            },
-            "watchdog_escalation",
-            `Deterministic verification failed after ${ticket.mandate.maxStageRetries} retries: ${gate.result?.failedCommand ?? failedSummary}`,
-            { stageRunId: failedRun.id, failedCommand: gate.result?.failedCommand },
-          );
+              failedEngines: nextFailed,
+              activeEngine: fallbackEngine,
+              inlineMemory: {
+                ...updatedFailMemory,
+                activeHint: `[Engine Fallback: ${driver.engine} -> ${fallbackEngine}] ${driver.engine} exhausted retries on verification gate (${gate.result?.failedCommand ?? "checks"}). Preserved worktree changes; fix and pass verification:\n${failedSummary}`,
+              },
+              updatedAt: nowIso(),
+            };
+            await this.stateStore.saveTicket(handedOff);
+            this.emitEvent({
+              type: "ticket_updated",
+              ticket: handedOff,
+              timestamp: handedOff.updatedAt,
+            });
+          } else {
+            await this.escalateTicket(
+              {
+                ...ticket,
+                costUsd: ticket.costUsd + stageCostUsd,
+                nativeSessions: updatedFailSessions,
+                failedEngines: nextFailed,
+                inlineMemory: updatedFailMemory,
+              },
+              "watchdog_escalation",
+              `Deterministic verification failed after ${ticket.mandate.maxStageRetries} retries: ${gate.result?.failedCommand ?? failedSummary}`,
+              { stageRunId: failedRun.id, failedCommand: gate.result?.failedCommand, failedEngines: nextFailed },
+            );
+          }
         }
         return;
       }
@@ -2318,6 +2565,7 @@ export class SuperWorkKernel {
       costUsd: ticket.costUsd + stageCostUsd,
       nativeSessions: updatedSessions,
       activeEngine: undefined,
+      failedEngines: [],
       inlineMemory: updatedMemory,
       updatedAt: nowIso(),
     };
@@ -2479,6 +2727,8 @@ export class SuperWorkKernel {
         changedFiles,
         diffText,
       });
+      await this.recordDeliveredCasebookEntry(deliveredSubtask, repo);
+      await this.maybeEvaluateEpicReplan(parentEpic.id, deliveredSubtask);
       return;
     }
 
@@ -2629,7 +2879,9 @@ export class SuperWorkKernel {
     await this.maybeDistillClosedLoopLesson(ticket, repo ?? undefined);
     const template = getPipelineTemplate(ticket.template);
     const ts = nowIso();
-    const needsSignoff = template.requireOutboxSignoff;
+    const needsSignoff =
+      template.requireOutboxSignoff ||
+      (Boolean(ticket.routineId) && repo?.mode === "observe");
     const defaultChannel = repo?.defaultDeliveryChannel ?? "auto_pr_or_branch";
     const action: OutboxAction =
       defaultChannel === "local_merge" ? "local_merge" : "push_and_create_pr";
@@ -2817,9 +3069,11 @@ export class SuperWorkKernel {
         continue;
       }
 
-      const allDelivered = children.every((c) => c.status === "delivered");
-      const allCancelled = children.every((c) => c.status === "cancelled");
-      const blockedChild = children.find(
+      const activeChildren = children.filter((c) => c.status !== "cancelled");
+      const allCancelled = activeChildren.length === 0;
+      const allDelivered =
+        activeChildren.length > 0 && activeChildren.every((c) => c.status === "delivered");
+      const blockedChild = activeChildren.find(
         (c) => c.status === "needs_human" || c.status === "failed",
       );
 
@@ -2830,6 +3084,9 @@ export class SuperWorkKernel {
       if (allCancelled) {
         nextStatus = "cancelled";
         nextError = "All Epic subtasks were cancelled";
+      } else if (epic.pendingEpicReplan) {
+        nextStatus = "needs_human";
+        nextError = `Pending adaptive Epic re-plan approval: ${epic.pendingEpicReplan.summary}`;
       } else if (blockedChild) {
         nextStatus = "needs_human";
         nextError = `Subtask ${blockedChild.subtaskKey ?? blockedChild.id} (${blockedChild.title}) requires attention: ${blockedChild.errorMessage ?? blockedChild.status}`;
@@ -3085,5 +3342,1572 @@ export class SuperWorkKernel {
     };
     await this.stateStore.saveInboxItem(inboxItem);
     this.emitEvent({ type: "inbox_created", item: inboxItem, timestamp: ts });
+  }
+
+  private async runWithRepoWorkspaceLock<T>(repoId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.repoWorkspaceLocks.get(repoId) ?? Promise.resolve();
+    let release!: () => void;
+    const next = new Promise<void>((res) => {
+      release = res;
+    });
+    const chained = prev.then(() => next);
+    this.repoWorkspaceLocks.set(repoId, chained);
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.repoWorkspaceLocks.get(repoId) === chained) {
+        this.repoWorkspaceLocks.delete(repoId);
+      }
+    }
+  }
+
+  private async buildEnrichedWorkerPrompt(
+    ticket: Ticket,
+    repo: RepoConfig,
+    stage: StageKind,
+    options?: { skipHitTracking?: boolean },
+  ): Promise<string> {
+    const ts = nowIso();
+    const [relatedMemory, playbookEntries, caseEntries] = await Promise.all([
+      this.stateStore.searchMemory(ticket.title, 6, repo.id),
+      this.stateStore.listPlaybookEntries(repo.id, { onlyEnabled: true }),
+      this.stateStore.listCasebookEntries(repo.id, { includeReverted: true }),
+    ]);
+
+    const upstreamHandovers: HandoverDigest[] = [];
+    if (ticket.dependsOn.length > 0) {
+      const reposById = new Map((await this.stateStore.listRepos()).map((r) => [r.id, r]));
+      for (const depId of ticket.dependsOn) {
+        const dep = await this.stateStore.getTicket(depId);
+        if (!dep) continue;
+        if (dep.handoverDigest) {
+          upstreamHandovers.push(dep.handoverDigest);
+        } else if (dep.status === "delivered") {
+          const depFiles = Array.from(
+            new Set(dep.inlineMemory.stageNotes.flatMap((n) => n.changedFiles)),
+          );
+          upstreamHandovers.push(
+            buildHandoverDigest({
+              ticket: dep,
+              repoName: reposById.get(dep.repoId)?.name,
+              changedFiles: depFiles,
+              diffText: "",
+              stageSummary: dep.inlineMemory.stageNotes.at(-1)?.summary || dep.title,
+            }),
+          );
+        }
+      }
+    }
+
+    const pathExists = (relPath: string): boolean => existsSync(join(repo.rootPath, relPath));
+    const selectedPlaybook = selectPlaybookRulesForContext(
+      playbookEntries,
+      ticket.mandate.allowedPaths,
+      8,
+      1200,
+      { pathExists },
+    );
+    const playbookContext = formatPlaybookContext(
+      playbookEntries,
+      ticket.mandate.allowedPaths,
+      8,
+      1200,
+      { pathExists },
+    );
+
+    const otherCases = caseEntries.filter((c) => c.ticketId !== ticket.id);
+    const ftsTicketIds = new Set(relatedMemory.map((m) => m.ticketId));
+    const caseSelection = selectRelevantCasesForContext({
+      cases: otherCases,
+      ftsTicketIds,
+      targetPaths: ticket.mandate.allowedPaths,
+      queryText: `${ticket.title} ${ticket.description}`,
+      maxPositive: 2,
+      maxChars: 900,
+    });
+
+    if (!options?.skipHitTracking) {
+      if (selectedPlaybook.length > 0) {
+        await this.stateStore.recordPlaybookHits(
+          selectedPlaybook.map((e) => e.id),
+          ts,
+        );
+      }
+      if (caseSelection.positiveCases.length > 0) {
+        await this.stateStore.recordCasebookHits(
+          caseSelection.positiveCases.map((c) => c.id),
+          ts,
+        );
+      }
+    }
+
+    return this.memory.buildWorkerPromptContext(ticket, stage, relatedMemory, {
+      verificationCommands: repo.verificationCommands,
+      smokeCheck: repo.smokeCheck,
+      repoConventions: repo.conventions,
+      playbookContext,
+      casebookContext: caseSelection.formattedMarkdown || undefined,
+      upstreamHandovers,
+    });
+  }
+
+  private async recordDeliveredCasebookEntry(ticket: Ticket, _repo?: RepoConfig): Promise<void> {
+    if (ticket.isEpic && ticket.epicDeliveryMode === "per_subtask") return;
+    const priorCase = await this.stateStore.getCasebookEntryByTicket(ticket.id);
+    const entry = buildCasebookEntryFromTicket({
+      ticket,
+      digest: ticket.handoverDigest,
+      priorCase,
+    });
+    await this.stateStore.saveCasebookEntry(entry);
+    await this.stateStore.indexMemoryDocument({
+      entityType: "casebook",
+      entityId: entry.id,
+      ticketId: ticket.id,
+      repoId: ticket.repoId,
+      title: `Casebook: ${entry.title}`,
+      body: [
+        entry.goalSummary,
+        entry.solutionSummary,
+        entry.pitfallsAndFixes ?? "",
+        entry.exportedSymbols.join(" "),
+        entry.changedFiles.join(" "),
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    });
+    this.emitEvent({
+      type: "casebook_updated",
+      repoId: ticket.repoId,
+      entry,
+      timestamp: entry.updatedAt,
+    });
+  }
+
+  async prunePlaybookEntries(
+    repoId: string,
+  ): Promise<{ prunedIds: string[]; keptCount: number }> {
+    const repo = await this.stateStore.getRepo(repoId);
+    if (!repo) {
+      throw new Error(`Repository not found: ${repoId}`);
+    }
+    const entries = await this.stateStore.listPlaybookEntries(repoId);
+    const pathExists = (relPath: string): boolean => existsSync(join(repo.rootPath, relPath));
+    const prunedIds: string[] = [];
+    let keptCount = 0;
+
+    for (const entry of entries) {
+      const health = classifyPlaybookHealth(entry, { pathExists });
+      if (entry.source === "auto_healed" && !entry.pinned && health.prunable) {
+        await this.stateStore.deletePlaybookEntry(entry.id);
+        prunedIds.push(entry.id);
+        this.emitEvent({
+          type: "playbook_updated",
+          repoId,
+          deletedId: entry.id,
+          timestamp: nowIso(),
+        });
+      } else {
+        keptCount += 1;
+      }
+    }
+    return { prunedIds, keptCount };
+  }
+
+  // --- A.1 Scheduled Routines (Probe -> Promote) ---
+  async createRoutine(input: {
+    repoId: string;
+    name: string;
+    prompt: string;
+    scheduleKind: RoutineScheduleKind;
+    intervalMinutes?: number;
+    cronExpr?: string;
+    activeHoursStart?: string;
+    activeHoursEnd?: string;
+    allowedPaths?: string[];
+    template?: PipelineTemplateId;
+    preferredEngine?: WorkerEngineId;
+    maxBudgetUsd?: number;
+    enabled?: boolean;
+    nextRunAt?: string;
+  }): Promise<RoutineSpec> {
+    const repo = await this.stateStore.getRepo(input.repoId);
+    if (!repo) {
+      throw new Error(`Repository not found: ${input.repoId}`);
+    }
+    const ts = nowIso();
+    const routine: RoutineSpec = {
+      id: newId("rtn"),
+      repoId: repo.id,
+      name: input.name.trim(),
+      prompt: input.prompt.trim(),
+      scheduleKind: input.scheduleKind,
+      intervalMinutes:
+        input.scheduleKind === "interval"
+          ? Math.max(1, Math.floor(input.intervalMinutes ?? 360))
+          : undefined,
+      cronExpr: input.scheduleKind === "cron" ? input.cronExpr?.trim() || "0 2 * * *" : undefined,
+      activeHoursStart: input.activeHoursStart?.trim() || undefined,
+      activeHoursEnd: input.activeHoursEnd?.trim() || undefined,
+      allowedPaths:
+        input.allowedPaths && input.allowedPaths.length > 0
+          ? input.allowedPaths.map((p) => p.trim()).filter(Boolean)
+          : ["**"],
+      template: input.template ?? repo.defaultTemplate,
+      preferredEngine: input.preferredEngine,
+      maxBudgetUsd:
+        typeof input.maxBudgetUsd === "number" && input.maxBudgetUsd > 0 ? input.maxBudgetUsd : 1.5,
+      enabled: input.enabled ?? true,
+      nextRunAt:
+        input.nextRunAt ??
+        computeNextRoutineRunAt({
+          scheduleKind: input.scheduleKind,
+          intervalMinutes: input.intervalMinutes ?? 360,
+          cronExpr: input.cronExpr,
+        }),
+      createdAt: ts,
+      updatedAt: ts,
+    };
+    await this.stateStore.saveRoutine(routine);
+    this.emitEvent({ type: "routine_updated", repoId: repo.id, routine, timestamp: ts });
+    return routine;
+  }
+
+  async updateRoutine(
+    id: string,
+    patch: Partial<
+      Omit<RoutineSpec, "id" | "repoId" | "createdAt" | "updatedAt">
+    >,
+  ): Promise<RoutineSpec> {
+    const existing = await this.stateStore.getRoutine(id);
+    if (!existing) {
+      throw new Error(`Routine not found: ${id}`);
+    }
+    const scheduleKind = patch.scheduleKind ?? existing.scheduleKind;
+    const intervalMinutes =
+      scheduleKind === "interval"
+        ? Math.max(1, Math.floor(patch.intervalMinutes ?? existing.intervalMinutes ?? 360))
+        : undefined;
+    const cronExpr =
+      scheduleKind === "cron" ? (patch.cronExpr ?? existing.cronExpr ?? "0 2 * * *").trim() : undefined;
+    const scheduleChanged =
+      patch.scheduleKind !== undefined ||
+      patch.intervalMinutes !== undefined ||
+      patch.cronExpr !== undefined;
+
+    const updated: RoutineSpec = {
+      ...existing,
+      ...patch,
+      name: patch.name !== undefined ? patch.name.trim() || existing.name : existing.name,
+      prompt: patch.prompt !== undefined ? patch.prompt.trim() || existing.prompt : existing.prompt,
+      scheduleKind,
+      intervalMinutes,
+      cronExpr,
+      activeHoursStart:
+        patch.activeHoursStart !== undefined
+          ? patch.activeHoursStart?.trim() || undefined
+          : existing.activeHoursStart,
+      activeHoursEnd:
+        patch.activeHoursEnd !== undefined
+          ? patch.activeHoursEnd?.trim() || undefined
+          : existing.activeHoursEnd,
+      allowedPaths:
+        patch.allowedPaths !== undefined
+          ? patch.allowedPaths.map((p) => p.trim()).filter(Boolean)
+          : existing.allowedPaths,
+      nextRunAt:
+        patch.nextRunAt ??
+        (scheduleChanged
+          ? computeNextRoutineRunAt({ scheduleKind, intervalMinutes, cronExpr })
+          : existing.nextRunAt),
+      id: existing.id,
+      repoId: existing.repoId,
+      createdAt: existing.createdAt,
+      updatedAt: nowIso(),
+    };
+    await this.stateStore.saveRoutine(updated);
+    this.emitEvent({ type: "routine_updated", repoId: updated.repoId, routine: updated, timestamp: updated.updatedAt });
+    return updated;
+  }
+
+  async deleteRoutine(id: string): Promise<boolean> {
+    const existing = await this.stateStore.getRoutine(id);
+    if (!existing) return false;
+    const ok = await this.stateStore.deleteRoutine(id);
+    if (ok) {
+      this.emitEvent({
+        type: "routine_updated",
+        repoId: existing.repoId,
+        deletedId: id,
+        timestamp: nowIso(),
+      });
+    }
+    return ok;
+  }
+
+  async triggerRoutineNow(routineId: string): Promise<RoutineRun> {
+    const routine = await this.stateStore.getRoutine(routineId);
+    if (!routine) {
+      throw new Error(`Routine not found: ${routineId}`);
+    }
+    const repo = await this.stateStore.getRepo(routine.repoId);
+    if (!repo) {
+      throw new Error(`Repository not found: ${routine.repoId}`);
+    }
+    return this.executeRoutineProbe(routine, repo, { ignoreWindow: true });
+  }
+
+  async processDueRoutines(now = new Date()): Promise<number> {
+    if (this.stopped) return 0;
+    const routines = await this.stateStore.listRoutines();
+    if (routines.length === 0) return 0;
+    let triggered = 0;
+    for (const routine of routines) {
+      if (this.stopped) break;
+      if (!routine.enabled || this.activeRoutineRuns.has(routine.id)) continue;
+      if (routine.nextRunAt && new Date(routine.nextRunAt).getTime() > now.getTime()) {
+        continue;
+      }
+      if (!isWithinActiveHours(now, routine.activeHoursStart, routine.activeHoursEnd)) {
+        continue;
+      }
+      const repo = await this.stateStore.getRepo(routine.repoId);
+      if (!repo || repo.mode === "off") continue;
+      triggered += 1;
+      await this.executeRoutineProbe(routine, repo, { ignoreWindow: false, now });
+    }
+    return triggered;
+  }
+
+  private async executeRoutineProbe(
+    routine: RoutineSpec,
+    repo: RepoConfig,
+    options?: { ignoreWindow?: boolean; now?: Date },
+  ): Promise<RoutineRun> {
+    if (this.activeRoutineRuns.has(routine.id)) {
+      throw new Error(`Routine ${routine.id} is already probing`);
+    }
+    this.activeRoutineRuns.add(routine.id);
+    const now = options?.now ?? new Date();
+    const nextRunAt = computeNextRoutineRunAt(routine, now);
+    const runId = newId("rrun");
+    const startedAt = nowIso();
+
+    try {
+      // 1. Overlap guard: skip if previously promoted ticket is still active
+      if (routine.activeTicketId) {
+        const prevTicket = await this.stateStore.getTicket(routine.activeTicketId);
+        if (prevTicket && !isTerminalTicketStatus(prevTicket.status)) {
+          const skippedRun: RoutineRun = {
+            id: runId,
+            routineId: routine.id,
+            repoId: repo.id,
+            status: "skipped_overlap",
+            summary: `Skipped patrol because promoted ticket ${prevTicket.id} (${prevTicket.status}) is still open.`,
+            changedFiles: [],
+            costUsd: 0,
+            startedAt,
+            completedAt: nowIso(),
+          };
+          await this.stateStore.saveRoutineRun(skippedRun);
+          const nextRoutine: RoutineSpec = {
+            ...routine,
+            lastRunAt: skippedRun.completedAt,
+            lastRunStatus: "skipped_overlap",
+            nextRunAt,
+            updatedAt: nowIso(),
+          };
+          await this.stateStore.saveRoutine(nextRoutine);
+          this.emitEvent({ type: "routine_run_updated", repoId: repo.id, routineId: routine.id, run: skippedRun, timestamp: skippedRun.completedAt! });
+          this.emitEvent({ type: "routine_updated", repoId: repo.id, routine: nextRoutine, timestamp: nextRoutine.updatedAt });
+          return skippedRun;
+        }
+      }
+
+      // 2. Repo daily budget guard
+      const today = utcTodayString();
+      const effectiveBudget = getEffectiveDailyBudget(repo, today);
+      if (effectiveBudget !== undefined && effectiveBudget > 0) {
+        const todaySpend = await this.stateStore.getDailyRepoSpendUsd(repo.id, today);
+        if (todaySpend >= effectiveBudget) {
+          const skippedBudget: RoutineRun = {
+            id: runId,
+            routineId: routine.id,
+            repoId: repo.id,
+            status: "skipped_budget",
+            summary: `Skipped patrol: daily repo budget reached ($${todaySpend.toFixed(2)} / $${effectiveBudget.toFixed(2)}).`,
+            changedFiles: [],
+            costUsd: 0,
+            startedAt,
+            completedAt: nowIso(),
+          };
+          await this.stateStore.saveRoutineRun(skippedBudget);
+          const nextRoutine: RoutineSpec = {
+            ...routine,
+            lastRunAt: skippedBudget.completedAt,
+            lastRunStatus: "skipped_budget",
+            nextRunAt,
+            updatedAt: nowIso(),
+          };
+          await this.stateStore.saveRoutine(nextRoutine);
+          this.emitEvent({ type: "routine_run_updated", repoId: repo.id, routineId: routine.id, run: skippedBudget, timestamp: skippedBudget.completedAt! });
+          this.emitEvent({ type: "routine_updated", repoId: repo.id, routine: nextRoutine, timestamp: nextRoutine.updatedAt });
+          return skippedBudget;
+        }
+      }
+
+      const initialRun: RoutineRun = {
+        id: runId,
+        routineId: routine.id,
+        repoId: repo.id,
+        status: "probing",
+        summary: `Probing ${routine.name}...`,
+        changedFiles: [],
+        costUsd: 0,
+        startedAt,
+      };
+      await this.stateStore.saveRoutineRun(initialRun);
+      this.emitEvent({ type: "routine_run_updated", repoId: repo.id, routineId: routine.id, run: initialRun, timestamp: startedAt });
+
+      const availableEngines = await this.getAvailableEngines();
+      const preferred = routine.preferredEngine ?? repo.preferredImplementEngine;
+      let driver = this.drivers.get(preferred);
+      if (!driver) {
+        const chain = resolveFallbackChain({
+          primaryEngine: preferred,
+          repo,
+          availableEngines,
+        });
+        const alt = chain[0] ?? availableEngines[0];
+        driver = alt ? this.drivers.get(alt) : undefined;
+      }
+      if (!driver) {
+        const failedRun: RoutineRun = {
+          ...initialRun,
+          status: "failed",
+          summary: `No available WorkerDriver for engine '${preferred}'`,
+          completedAt: nowIso(),
+        };
+        await this.stateStore.saveRoutineRun(failedRun);
+        const nextRoutine: RoutineSpec = {
+          ...routine,
+          activeTicketId: undefined,
+          lastRunAt: failedRun.completedAt,
+          lastRunStatus: "failed",
+          nextRunAt,
+          updatedAt: nowIso(),
+        };
+        await this.stateStore.saveRoutine(nextRoutine);
+        this.emitEvent({ type: "routine_run_updated", repoId: repo.id, routineId: routine.id, run: failedRun, timestamp: failedRun.completedAt! });
+        this.emitEvent({ type: "routine_updated", repoId: repo.id, routine: nextRoutine, timestamp: nextRoutine.updatedAt });
+        return failedRun;
+      }
+
+      const probeId = `prb_${runId}`;
+      const probeBranch = `super-work/routine-probe/${runId}`;
+      const mandate = createDefaultMandate({
+        allowedPaths: routine.allowedPaths.length > 0 ? routine.allowedPaths : ["**"],
+        forbiddenPaths: repo.forbiddenPaths ?? [],
+        maxCostUsd: routine.maxBudgetUsd,
+      });
+      const syntheticProbeTicket: Ticket = {
+        id: probeId,
+        repoId: repo.id,
+        threadId: `thr_${probeId}`,
+        sourceTriggerId: `trg_${probeId}`,
+        title: `[Routine Probe] ${routine.name}`,
+        description: `${routine.prompt}\n\nIMPORTANT PROBE RULE: If everything is healthy and no fix is required, make ZERO file edits and end with \`ROUTINE_VERDICT: CLEAN\`. Only modify files inside allowedPaths when applying a concrete minimal fix, or report \`ROUTINE_VERDICT: ISSUE_FOUND - <summary>\`.`,
+        status: "implementing",
+        template: routine.template,
+        currentStage: "implement",
+        stageRetries: 0,
+        mandate,
+        dependsOn: [],
+        branchName: probeBranch,
+        nativeSessions: {},
+        inlineMemory: {
+          goal: routine.prompt,
+          acceptanceCriteria: ["Exit cleanly with no changes if healthy; apply minimal scoped fix if regression found."],
+          stageNotes: [],
+          threadUpdates: [],
+        },
+        costUsd: 0,
+        priority: 0,
+        createdAt: startedAt,
+        updatedAt: startedAt,
+      };
+
+      const ws = await this.runWithRepoWorkspaceLock(repo.id, () =>
+        this.workspace.prepareWorkspace(syntheticProbeTicket, repo, { startPoint: repo.baseBranch }),
+      );
+
+      const prompt = await this.buildEnrichedWorkerPrompt(syntheticProbeTicket, repo, "implement", {
+        skipHitTracking: true,
+      });
+
+      const collectedEvents: WorkerStreamEvent[] = [];
+      let completedEvent: Extract<WorkerStreamEvent, { type: "completed" }> | null = null;
+      let stageCostUsd = 0;
+      const ac = new AbortController();
+
+      try {
+        for await (const ev of driver.runTurn(
+          {
+            ticketId: probeId,
+            stageRunId: runId,
+            stage: "implement",
+            worktreePath: ws.worktreePath,
+            prompt,
+            mandate,
+            isResume: false,
+          },
+          ac.signal,
+        )) {
+          collectedEvents.push(ev);
+          if (ev.type === "usage") {
+            stageCostUsd = Math.max(stageCostUsd, ev.costUsd);
+          } else if (ev.type === "completed") {
+            completedEvent = ev;
+            if (typeof ev.costUsd === "number") {
+              stageCostUsd = Math.max(stageCostUsd, ev.costUsd);
+            }
+          }
+        }
+      } catch (err) {
+        await this.workspace.cleanupWorkspace(ws.worktreePath, repo.rootPath).catch(() => {});
+        await this.workspace.deleteBranch?.(repo.rootPath, ws.branchName).catch(() => {});
+        const failedRun: RoutineRun = {
+          ...initialRun,
+          status: "failed",
+          summary: err instanceof Error ? err.message : String(err),
+          costUsd: stageCostUsd,
+          completedAt: nowIso(),
+        };
+        await this.stateStore.saveRoutineRun(failedRun);
+        const nextRoutine: RoutineSpec = {
+          ...routine,
+          activeTicketId: undefined,
+          lastRunAt: failedRun.completedAt,
+          lastRunStatus: "failed",
+          nextRunAt,
+          updatedAt: nowIso(),
+        };
+        await this.stateStore.saveRoutine(nextRoutine);
+        this.emitEvent({ type: "routine_run_updated", repoId: repo.id, routineId: routine.id, run: failedRun, timestamp: failedRun.completedAt! });
+        this.emitEvent({ type: "routine_updated", repoId: repo.id, routine: nextRoutine, timestamp: nextRoutine.updatedAt });
+        return failedRun;
+      }
+
+      const rawChangedFiles = await this.workspace.getChangedFiles(ws.worktreePath, repo.baseBranch);
+      const mandateCheck = validateChangedFilesAgainstMandate(rawChangedFiles, mandate);
+      if (!mandateCheck.ok && mandateCheck.forbiddenViolations.length > 0) {
+        await this.workspace.revertPaths(ws.worktreePath, mandateCheck.forbiddenViolations);
+      }
+      const changedFiles = await this.workspace.getChangedFiles(ws.worktreePath, repo.baseBranch);
+
+      const textChunks = collectedEvents
+        .filter((e): e is Extract<WorkerStreamEvent, { type: "text" }> => e.type === "text")
+        .map((e) => e.text)
+        .join("\n");
+      const outputText = [completedEvent?.summary, textChunks].filter(Boolean).join("\n");
+      const verdict = parseRoutineProbeVerdict(outputText, changedFiles);
+
+      // Clean Fast Exit -> destroy probe workspace & branch silently, 0 tickets, 0 inbox noise
+      if (verdict.action === "clean") {
+        await this.workspace.cleanupWorkspace(ws.worktreePath, repo.rootPath).catch(() => {});
+        await this.workspace.deleteBranch?.(repo.rootPath, ws.branchName).catch(() => {});
+
+        const cleanRun: RoutineRun = {
+          ...initialRun,
+          status: "clean",
+          summary: verdict.summary,
+          changedFiles: [],
+          costUsd: stageCostUsd,
+          completedAt: nowIso(),
+        };
+        await this.stateStore.saveRoutineRun(cleanRun);
+        const nextRoutine: RoutineSpec = {
+          ...routine,
+          activeTicketId: undefined,
+          lastRunAt: cleanRun.completedAt,
+          lastRunStatus: "clean",
+          nextRunAt,
+          updatedAt: nowIso(),
+        };
+        await this.stateStore.saveRoutine(nextRoutine);
+        this.emitEvent({ type: "routine_run_updated", repoId: repo.id, routineId: routine.id, run: cleanRun, timestamp: cleanRun.completedAt! });
+        this.emitEvent({ type: "routine_updated", repoId: repo.id, routine: nextRoutine, timestamp: nextRoutine.updatedAt });
+        return cleanRun;
+      }
+
+      // Promote Phase -> convert probe finding/fix into a real Ticket
+      const promoteTs = nowIso();
+      const trigger: Trigger = {
+        id: newId("trg"),
+        repoId: repo.id,
+        source: "cli",
+        threadKey: `routine:${routine.id}:${runId}`,
+        title: `[Routine] ${routine.name}`,
+        payload: { routineId: routine.id, routineRunId: runId },
+        rawText: `${routine.prompt}\n\nProbe findings: ${verdict.summary}`,
+        createdAt: promoteTs,
+      };
+      await this.stateStore.saveTrigger(trigger);
+
+      const thread: Thread = {
+        id: newId("thr"),
+        repoId: repo.id,
+        threadKey: trigger.threadKey,
+        metadata: { source: "routine", routineId: routine.id },
+        createdAt: promoteTs,
+        updatedAt: promoteTs,
+      };
+      await this.stateStore.upsertThread(thread);
+
+      const ticketId = newId("tkt");
+
+      if (verdict.isIssueReportOnly) {
+        // Report-only patrol alert -> cleanup empty temp worktree and queue proposal in Inbox
+        await this.workspace.cleanupWorkspace(ws.worktreePath, repo.rootPath).catch(() => {});
+        await this.workspace.deleteBranch?.(repo.rootPath, ws.branchName).catch(() => {});
+
+        const ticket: Ticket = {
+          id: ticketId,
+          repoId: repo.id,
+          threadId: thread.id,
+          sourceTriggerId: trigger.id,
+          title: `[Routine Fix] ${routine.name}`,
+          description: `${routine.prompt}\n\nDetected Issue:\n${verdict.summary}`,
+          status: repo.mode === "auto" ? "queued" : "proposed",
+          template: routine.template,
+          currentStage: getFirstStage(routine.template),
+          stageRetries: 0,
+          mandate,
+          dependsOn: [],
+          nativeSessions: {},
+          preferredEngine: routine.preferredEngine,
+          routineId: routine.id,
+          inlineMemory: {
+            goal: `${routine.name}: ${verdict.summary}`,
+            acceptanceCriteria: ["Resolve issue surfaced by scheduled patrol and pass verification"],
+            stageNotes: [],
+            threadUpdates: [],
+          },
+          costUsd: stageCostUsd,
+          priority: 1,
+          createdAt: promoteTs,
+          updatedAt: promoteTs,
+        };
+        await this.stateStore.saveTicket(ticket);
+        await this.stateStore.upsertThread({ ...thread, subscribedTicketId: ticket.id, updatedAt: promoteTs });
+        this.emitEvent({ type: "ticket_created", ticket, timestamp: promoteTs });
+
+        if (ticket.status === "proposed") {
+          const proposalInbox: InboxItem = {
+            id: newId("inb"),
+            repoId: repo.id,
+            ticketId: ticket.id,
+            kind: "observe_proposal",
+            status: "pending",
+            title: `Routine Alert: ${routine.name}`,
+            summary: verdict.summary,
+            contextPayload: { routineId: routine.id, routineRunId: runId },
+            createdAt: promoteTs,
+          };
+          await this.stateStore.saveInboxItem(proposalInbox);
+          this.emitEvent({ type: "inbox_created", item: proposalInbox, timestamp: promoteTs });
+        }
+
+        const promotedRun: RoutineRun = {
+          id: runId,
+          routineId: routine.id,
+          repoId: repo.id,
+          status: "promoted",
+          summary: `Promoted patrol finding to ${ticket.id}`,
+          changedFiles: [],
+          promotedTicketId: ticket.id,
+          costUsd: stageCostUsd,
+          startedAt,
+          completedAt: nowIso(),
+        };
+        await this.stateStore.saveRoutineRun(promotedRun);
+        const nextRoutine: RoutineSpec = {
+          ...routine,
+          activeTicketId: ticket.id,
+          lastRunAt: promotedRun.completedAt,
+          lastRunStatus: "promoted",
+          nextRunAt,
+          updatedAt: nowIso(),
+        };
+        await this.stateStore.saveRoutine(nextRoutine);
+        this.emitEvent({ type: "routine_run_updated", repoId: repo.id, routineId: routine.id, run: promotedRun, timestamp: promotedRun.completedAt! });
+        this.emitEvent({ type: "routine_updated", repoId: repo.id, routine: nextRoutine, timestamp: nextRoutine.updatedAt });
+        return promotedRun;
+      }
+
+      // Probe produced concrete code changes inside allowedPaths -> keep probe worktree on the promoted ticket!
+      const diffText = await this.workspace.getDiff(ws.worktreePath, repo.baseBranch);
+      await this.workspace.commitAll(ws.worktreePath, `super-work(routine:${routine.id}): ${routine.name}`);
+
+      const probeStageRun: StageRun = {
+        id: newId("run"),
+        ticketId,
+        stage: "implement",
+        engine: driver.engine,
+        status: "running",
+        costUsd: stageCostUsd,
+        startedAt,
+      };
+      let promotedTicket: Ticket = {
+        id: ticketId,
+        repoId: repo.id,
+        threadId: thread.id,
+        sourceTriggerId: trigger.id,
+        title: `[Routine Fix] ${routine.name}`,
+        description: routine.prompt,
+        status: "implementing",
+        template: routine.template,
+        currentStage: "implement",
+        stageRetries: 0,
+        mandate,
+        dependsOn: [],
+        worktreePath: ws.worktreePath,
+        branchName: ws.branchName,
+        nativeSessions: {},
+        preferredEngine: routine.preferredEngine,
+        activeEngine: driver.engine,
+        routineId: routine.id,
+        inlineMemory: {
+          goal: routine.prompt,
+          acceptanceCriteria: ["Scheduled patrol fix passes verification and review"],
+          stageNotes: [],
+          threadUpdates: [],
+        },
+        costUsd: stageCostUsd,
+        priority: 1,
+        createdAt: promoteTs,
+        updatedAt: promoteTs,
+      };
+      await this.stateStore.saveTicket(promotedTicket);
+      await this.stateStore.upsertThread({ ...thread, subscribedTicketId: promotedTicket.id, updatedAt: promoteTs });
+      this.emitEvent({ type: "ticket_created", ticket: promotedTicket, timestamp: promoteTs });
+
+      const gate = await this.runRepoVerificationGate(promotedTicket, repo, probeStageRun, ws.worktreePath, {
+        isFinalDeliveryGate: false,
+      });
+
+      const finishedRun: StageRun = {
+        ...probeStageRun,
+        status: gate.passed ? "completed" : "failed",
+        completedAt: nowIso(),
+        summary: gate.passed
+          ? verdict.summary
+          : gate.result?.summary ?? "Routine fix failed verification gate",
+      };
+      const { note } = await this.memory.recordStageSpillAndNote({
+        ticket: promotedTicket,
+        stageRun: finishedRun,
+        events: collectedEvents,
+        changedFiles,
+        diffText,
+        summary: finishedRun.summary!,
+        verificationPassed: gate.passed,
+        extraArtifacts: gate.artifacts.length > 0 ? gate.artifacts : undefined,
+      });
+      finishedRun.spillTranscriptId = note.spillArtifactIds[0];
+      await this.stateStore.saveStageRun(finishedRun);
+
+      const postProbeMemory = {
+        ...promotedTicket.inlineMemory,
+        stageNotes: [note],
+        activeHint: gate.passed
+          ? undefined
+          : `Routine probe changes need verification fix: ${finishedRun.summary}`,
+      };
+
+      const nextStageAfterImpl = getNextStage(promotedTicket.template, "implement");
+      if (!gate.passed) {
+        promotedTicket = {
+          ...promotedTicket,
+          status: "queued",
+          currentStage: "implement",
+          inlineMemory: postProbeMemory,
+          updatedAt: nowIso(),
+        };
+        await this.stateStore.saveTicket(promotedTicket);
+        this.emitEvent({ type: "ticket_updated", ticket: promotedTicket, timestamp: promotedTicket.updatedAt });
+      } else if (!nextStageAfterImpl) {
+        await this.enqueueDeliveryOutbox(
+          {
+            ...promotedTicket,
+            inlineMemory: postProbeMemory,
+          },
+          repo,
+        );
+      } else {
+        promotedTicket = {
+          ...promotedTicket,
+          status: "queued",
+          currentStage: nextStageAfterImpl,
+          activeEngine: undefined,
+          inlineMemory: postProbeMemory,
+          updatedAt: nowIso(),
+        };
+        await this.stateStore.saveTicket(promotedTicket);
+        this.emitEvent({ type: "ticket_updated", ticket: promotedTicket, timestamp: promotedTicket.updatedAt });
+      }
+
+      const promotedRun: RoutineRun = {
+        id: runId,
+        routineId: routine.id,
+        repoId: repo.id,
+        status: "promoted",
+        summary: `Promoted edits in ${changedFiles.join(", ")} -> ticket ${promotedTicket.id}`,
+        changedFiles,
+        promotedTicketId: promotedTicket.id,
+        costUsd: stageCostUsd,
+        startedAt,
+        completedAt: nowIso(),
+      };
+      await this.stateStore.saveRoutineRun(promotedRun);
+      const nextRoutine: RoutineSpec = {
+        ...routine,
+        activeTicketId: promotedTicket.id,
+        lastRunAt: promotedRun.completedAt,
+        lastRunStatus: "promoted",
+        nextRunAt,
+        updatedAt: nowIso(),
+      };
+      await this.stateStore.saveRoutine(nextRoutine);
+      this.emitEvent({ type: "routine_run_updated", repoId: repo.id, routineId: routine.id, run: promotedRun, timestamp: promotedRun.completedAt! });
+      this.emitEvent({ type: "routine_updated", repoId: repo.id, routine: nextRoutine, timestamp: nextRoutine.updatedAt });
+      return promotedRun;
+    } finally {
+      this.activeRoutineRuns.delete(routine.id);
+    }
+  }
+
+  // --- B.1 Arena Duel ---
+  private async cleanupArenaCandidateWorktrees(
+    candidates: ArenaCandidateResult[],
+    rootRepoPath?: string,
+    keepCandidateId?: string,
+  ): Promise<void> {
+    for (const cand of candidates) {
+      if (keepCandidateId && cand.candidateId === keepCandidateId) continue;
+      if (cand.worktreePath) {
+        await this.workspace.cleanupWorkspace(cand.worktreePath, rootRepoPath).catch(() => {});
+      }
+      if (rootRepoPath && cand.branchName) {
+        await this.workspace.deleteBranch?.(rootRepoPath, cand.branchName).catch(() => {});
+      }
+    }
+  }
+
+  private async adoptArenaCandidateWinner(
+    ticket: Ticket,
+    repo: RepoConfig | undefined,
+    winner: ArenaCandidateResult,
+    candidates: ArenaCandidateResult[],
+    fromTiebreakInbox = false,
+  ): Promise<Ticket> {
+    if (repo) {
+      await this.cleanupArenaCandidateWorktrees(candidates, repo.rootPath, winner.candidateId);
+    }
+    if (winner.worktreePath && existsSync(winner.worktreePath)) {
+      await this.workspace.commitAll(
+        winner.worktreePath,
+        `super-work(${ticket.id}/arena:${winner.engine}): ${ticket.title}`,
+      );
+    }
+
+    const updatedCandidates = candidates.map((c) => ({
+      ...c,
+      worktreePath: c.candidateId === winner.candidateId ? winner.worktreePath : undefined,
+      recommended: c.candidateId === winner.candidateId,
+    }));
+
+    const note = {
+      stageRunId: winner.stageRunId,
+      stage: "implement" as const,
+      engine: winner.engine,
+      summary: `[Arena Winner: ${winner.engine}, score ${winner.score}] ${winner.summary}`,
+      changedFiles: winner.changedFiles,
+      verificationPassed: winner.verificationPassed,
+      spillArtifactIds: winner.diffArtifactId ? [winner.diffArtifactId] : [],
+      createdAt: nowIso(),
+    };
+
+    const nextStage = ticket.prNumber ? "rebase" : getNextStage(ticket.template, "implement");
+    const nextMemory = {
+      ...ticket.inlineMemory,
+      stageNotes: [...ticket.inlineMemory.stageNotes, note],
+      ...(fromTiebreakInbox ? {} : { activeHint: undefined }),
+    };
+
+    if (!nextStage) {
+      const preDelivery: Ticket = {
+        ...ticket,
+        worktreePath: winner.worktreePath,
+        branchName: winner.branchName,
+        activeEngine: undefined,
+        failedEngines: [],
+        arenaWinnerId: winner.candidateId,
+        arenaCandidates: updatedCandidates,
+        inlineMemory: nextMemory,
+        updatedAt: nowIso(),
+      };
+      await this.enqueueDeliveryOutbox(preDelivery, repo);
+      return (await this.stateStore.getTicket(ticket.id)) ?? preDelivery;
+    }
+
+    const nextTicket: Ticket = {
+      ...ticket,
+      status: "queued",
+      currentStage: nextStage,
+      stageRetries: 0,
+      worktreePath: winner.worktreePath,
+      branchName: winner.branchName,
+      activeEngine: undefined,
+      failedEngines: [],
+      arenaWinnerId: winner.candidateId,
+      arenaCandidates: updatedCandidates,
+      inlineMemory: nextMemory,
+      errorMessage: undefined,
+      updatedAt: nowIso(),
+    };
+    await this.stateStore.saveTicket(nextTicket);
+    this.emitEvent({ type: "ticket_updated", ticket: nextTicket, timestamp: nextTicket.updatedAt });
+    return nextTicket;
+  }
+
+  private async runArenaImplementStage(
+    ticket: Ticket,
+    repo: RepoConfig,
+    availableEngines: WorkerEngineId[],
+  ): Promise<boolean> {
+    const engineA = selectEngineForStage(repo, "implement", ticket.preferredEngine);
+    const preferredOpponent = ticket.arenaCompetitorEngine;
+    const engineB =
+      preferredOpponent &&
+      preferredOpponent !== engineA &&
+      availableEngines.includes(preferredOpponent) &&
+      this.drivers.has(preferredOpponent)
+        ? preferredOpponent
+        : pickNextFallbackEngine({
+            currentEngine: engineA,
+            repo,
+            availableEngines,
+          });
+
+    const driverA = this.drivers.get(engineA);
+    const driverB = engineB ? this.drivers.get(engineB) : undefined;
+    if (!driverA || !driverB || engineA === engineB) {
+      return false;
+    }
+
+    const { effectiveBaseBranch } = await this.getEffectiveBaseInfo(ticket, repo);
+    const sameRepoDepBranches: string[] = [];
+    for (const depId of ticket.dependsOn) {
+      const dep = await this.stateStore.getTicket(depId);
+      if (dep?.branchName && dep.repoId === ticket.repoId) {
+        sameRepoDepBranches.push(dep.branchName);
+      }
+    }
+
+    const candSpec = [
+      { id: "cand_a", engine: driverA.engine, driver: driverA, branch: `super-work/${ticket.id}-cand-a` },
+      { id: "cand_b", engine: driverB.engine, driver: driverB, branch: `super-work/${ticket.id}-cand-b` },
+    ];
+
+    const workspaces: Array<{ worktreePath: string; branchName: string }> = [];
+    for (const spec of candSpec) {
+      const ws = await this.runWithRepoWorkspaceLock(repo.id, async () => {
+        const prepared = await this.workspace.prepareWorkspace(
+          { ...ticket, id: `${ticket.id}_${spec.id}`, worktreePath: undefined, branchName: spec.branch },
+          repo,
+          { startPoint: effectiveBaseBranch },
+        );
+        if (sameRepoDepBranches.length > 0) {
+          await this.workspace.integrateDependencyBranches(prepared.worktreePath, sameRepoDepBranches);
+        }
+        return prepared;
+      });
+      workspaces.push(ws);
+    }
+
+    const prompt = await this.buildEnrichedWorkerPrompt(ticket, repo, "implement");
+    const implementingTicket: Ticket = {
+      ...ticket,
+      status: "implementing",
+      currentStage: "implement",
+      activeEngine: engineA,
+      updatedAt: nowIso(),
+    };
+    await this.stateStore.saveTicket(implementingTicket);
+    this.emitEvent({ type: "ticket_updated", ticket: implementingTicket, timestamp: implementingTicket.updatedAt });
+
+    const abortController = new AbortController();
+    this.abortControllers.set(ticket.id, abortController);
+
+    const runSingleCandidate = async (
+      idx: number,
+    ): Promise<Omit<ArenaCandidateResult, "score" | "recommended">> => {
+      const spec = candSpec[idx]!;
+      const ws = workspaces[idx]!;
+      const startedMs = Date.now();
+      const stageRun: StageRun = {
+        id: newId("run"),
+        ticketId: ticket.id,
+        stage: "implement",
+        engine: spec.engine,
+        status: "running",
+        costUsd: 0,
+        startedAt: nowIso(),
+      };
+      await this.stateStore.saveStageRun(stageRun);
+      this.emitEvent({
+        type: "stage_started",
+        ticketId: ticket.id,
+        stageRun,
+        timestamp: stageRun.startedAt,
+      });
+
+      const events: WorkerStreamEvent[] = [];
+      let completed: Extract<WorkerStreamEvent, { type: "completed" }> | null = null;
+      let costUsd = 0;
+
+      try {
+        for await (const ev of spec.driver.runTurn(
+          {
+            ticketId: ticket.id,
+            stageRunId: stageRun.id,
+            stage: "implement",
+            worktreePath: ws.worktreePath,
+            prompt,
+            mandate: ticket.mandate,
+            isResume: false,
+          },
+          abortController.signal,
+        )) {
+          events.push(ev);
+          this.emitEvent({
+            type: "worker_event",
+            ticketId: ticket.id,
+            stageRunId: stageRun.id,
+            engine: spec.engine,
+            event: ev,
+            timestamp: ev.timestamp,
+          });
+          if (ev.type === "usage") costUsd = Math.max(costUsd, ev.costUsd);
+          if (ev.type === "completed") {
+            completed = ev;
+            if (typeof ev.costUsd === "number") costUsd = Math.max(costUsd, ev.costUsd);
+          }
+        }
+      } catch (err) {
+        events.push({
+          type: "error",
+          message: err instanceof Error ? err.message : String(err),
+          fatal: true,
+          timestamp: nowIso(),
+        });
+      }
+
+      const rawChanged = await this.workspace.getChangedFiles(ws.worktreePath, effectiveBaseBranch);
+      const mandateCheck = validateChangedFilesAgainstMandate(rawChanged, ticket.mandate);
+      if (!mandateCheck.ok) {
+        await this.workspace.revertPaths(ws.worktreePath, mandateCheck.violations);
+      }
+
+      const changedFiles = await this.workspace.getChangedFiles(ws.worktreePath, effectiveBaseBranch);
+      const diffText = await this.workspace.getDiff(ws.worktreePath, effectiveBaseBranch);
+      const { addedLines, deletedLines } = countDiffLines(diffText);
+
+      const gate = mandateCheck.ok
+        ? await this.runRepoVerificationGate(ticket, repo, stageRun, ws.worktreePath, {
+            isFinalDeliveryGate: false,
+          })
+        : { passed: false, artifacts: [] as SpillArtifact[], result: undefined };
+
+      const lastErr = [...events].reverse().find((e) => e.type === "error");
+      const verificationPassed = mandateCheck.ok && !lastErr && gate.passed;
+      const verificationSummary = !mandateCheck.ok
+        ? `Mandate violation: ${mandateCheck.violations.join(", ")}`
+        : lastErr && lastErr.type === "error"
+          ? `Turn error: ${lastErr.message}`
+          : gate.result?.summary ?? (gate.passed ? "Verification passed" : "Verification failed");
+
+      const textSummary =
+        completed?.summary ||
+        events
+          .filter((e): e is Extract<WorkerStreamEvent, { type: "text" }> => e.type === "text")
+          .map((e) => e.text)
+          .join("\n") ||
+        `${spec.engine} candidate`;
+
+      const finishedRun: StageRun = {
+        ...stageRun,
+        status: verificationPassed ? "completed" : "failed",
+        costUsd,
+        completedAt: nowIso(),
+        summary: `[Arena ${spec.id}] ${verificationSummary}`,
+      };
+
+      const { note } = await this.memory.recordStageSpillAndNote({
+        ticket,
+        stageRun: finishedRun,
+        events,
+        changedFiles,
+        diffText,
+        summary: textSummary,
+        verificationPassed,
+        extraArtifacts: gate.artifacts.length > 0 ? gate.artifacts : undefined,
+      });
+      finishedRun.spillTranscriptId = note.spillArtifactIds[0];
+      await this.stateStore.saveStageRun(finishedRun);
+      this.emitEvent({
+        type: "stage_completed",
+        ticketId: ticket.id,
+        stageRun: finishedRun,
+        note,
+        timestamp: finishedRun.completedAt!,
+      });
+
+      const diffArtifactId = note.spillArtifactIds.find((aid, i) => i > 0 && aid);
+      let recordedDiffId = diffArtifactId;
+      if (!recordedDiffId && diffText.trim()) {
+        const diffArt = await this.artifactStore.writeSpill(
+          {
+            ticketId: ticket.id,
+            stageRunId: stageRun.id,
+            kind: "diff",
+            summary: `Arena ${spec.engine} candidate diff`,
+            ext: "patch",
+          },
+          diffText,
+        );
+        await this.stateStore.saveArtifact(diffArt, changedFiles.join(" "));
+        recordedDiffId = diffArt.id;
+      }
+
+      return {
+        candidateId: spec.id,
+        engine: spec.engine,
+        branchName: ws.branchName,
+        worktreePath: ws.worktreePath,
+        stageRunId: stageRun.id,
+        verificationPassed,
+        verificationSummary,
+        changedFiles,
+        addedLines,
+        deletedLines,
+        durationMs: Math.max(1, Date.now() - startedMs),
+        costUsd,
+        summary: textSummary.slice(0, 400),
+        diffArtifactId: recordedDiffId,
+      };
+    };
+
+    const [rawA, rawB] = await Promise.all([runSingleCandidate(0), runSingleCandidate(1)]);
+    const totalArenaCost = rawA.costUsd + rawB.costUsd;
+    let scored = scoreArenaCandidates(rawA, rawB);
+
+    if (scored[0].verificationPassed && scored[1].verificationPassed && this.llm.judgeArenaCandidates) {
+      try {
+        const judgment = await this.llm.judgeArenaCandidates({
+          repo,
+          ticket: implementingTicket,
+          candidates: scored,
+        });
+        if (judgment && (judgment.winnerCandidateId === "cand_a" || judgment.winnerCandidateId === "cand_b")) {
+          scored = scored.map((c) => ({
+            ...c,
+            recommended: c.candidateId === judgment.winnerCandidateId,
+            rationale:
+              c.candidateId === judgment.winnerCandidateId
+                ? `${judgment.rationale} (${c.rationale ?? ""})`.trim()
+                : c.rationale,
+          })) as [ArenaCandidateResult, ArenaCandidateResult];
+        }
+      } catch {
+        // Keep deterministic score winner
+      }
+    }
+
+    const updatedWithCost: Ticket = {
+      ...implementingTicket,
+      costUsd: ticket.costUsd + totalArenaCost,
+      arenaCandidates: scored,
+      updatedAt: nowIso(),
+    };
+
+    const passCount = scored.filter((c) => c.verificationPassed).length;
+    const recommended = scored.find((c) => c.recommended) ?? scored[0];
+
+    if (passCount === 1 || (passCount === 2 && repo.mode === "auto")) {
+      await this.adoptArenaCandidateWinner(updatedWithCost, repo, recommended, scored, false);
+      return true;
+    }
+
+    if (passCount === 2 && repo.mode === "observe") {
+      await this.stateStore.saveTicket({
+        ...updatedWithCost,
+        status: "needs_human",
+        activeEngine: undefined,
+        errorMessage: "Arena duel finished with two passing candidates; choose winner in Inbox.",
+      });
+      this.emitEvent({
+        type: "ticket_updated",
+        ticket: { ...updatedWithCost, status: "needs_human", activeEngine: undefined },
+        timestamp: nowIso(),
+      });
+      const inboxItem: InboxItem = {
+        id: newId("inb"),
+        repoId: repo.id,
+        ticketId: ticket.id,
+        kind: "arena_tiebreak",
+        status: "pending",
+        title: `Arena Duel Ready: ${ticket.title}`,
+        summary: `Both ${scored[0].engine} (score ${scored[0].score}) and ${scored[1].engine} (score ${scored[1].score}) passed all verification gates. Compare diffs and adopt the winning branch.`,
+        contextPayload: {
+          recommendedCandidateId: recommended.candidateId,
+          candidates: scored,
+        },
+        createdAt: nowIso(),
+      };
+      await this.stateStore.saveInboxItem(inboxItem);
+      this.emitEvent({ type: "inbox_created", item: inboxItem, timestamp: inboxItem.createdAt });
+      return true;
+    }
+
+    // Both candidates failed: retain higher-scored workspace for inspection and escalate
+    await this.cleanupArenaCandidateWorktrees(scored, repo.rootPath, recommended.candidateId);
+    await this.escalateTicket(
+      {
+        ...updatedWithCost,
+        worktreePath: recommended.worktreePath,
+        branchName: recommended.branchName,
+      },
+      "watchdog_escalation",
+      `Both Arena candidates failed verification:\n- ${scored[0].engine}: ${scored[0].verificationSummary}\n- ${scored[1].engine}: ${scored[1].verificationSummary}`,
+      { candidates: scored },
+    );
+    return true;
+  }
+
+  // --- C.1 Adaptive Epic Re-planning ---
+  private async maybeEvaluateEpicReplan(epicId: string, completedSubtask: Ticket): Promise<void> {
+    const epic = await this.stateStore.getTicket(epicId);
+    if (!epic || !epic.isEpic) return;
+    if ((epic.epicReplanCount ?? 0) >= 2 || epic.pendingEpicReplan) return;
+    const repo = await this.stateStore.getRepo(epic.repoId);
+    if (!repo) return;
+
+    const digest = completedSubtask.handoverDigest;
+    if (!digest) return;
+
+    const allTickets = await this.stateStore.listTickets();
+    const allSubtasks = allTickets.filter((t) => t.parentTicketId === epic.id);
+    const unstartedSubtasks = allSubtasks.filter((t) => t.status === "waiting_deps");
+    if (unstartedSubtasks.length === 0) return;
+
+    let proposal: EpicReplanProposal | null = null;
+    if (this.llm.proposeEpicReplan) {
+      try {
+        proposal = await this.llm.proposeEpicReplan({
+          repo,
+          epic,
+          completedSubtask,
+          digest,
+          unstartedSubtasks,
+          allSubtasks,
+        });
+      } catch {
+        proposal = null;
+      }
+    }
+    if (!proposal) {
+      proposal = evaluateHeuristicEpicReplan({
+        epic,
+        completedSubtask,
+        digest,
+        unstartedSubtasks,
+        allSubtasks,
+      });
+    }
+
+    if (!proposal.shouldReplan || proposal.mutations.length === 0) {
+      return;
+    }
+
+    // Hard enforce graded permission boundary deterministically in kernel
+    const classification = classifyEpicReplanApproval({
+      epic,
+      repo,
+      mutations: proposal.mutations,
+    });
+    const enforcedProposal: EpicReplanProposal = {
+      ...proposal,
+      requiresHumanApproval: classification.requiresHumanApproval,
+      triggeredByTicketId: completedSubtask.id,
+      createdAt: proposal.createdAt || nowIso(),
+    };
+
+    if (!enforcedProposal.requiresHumanApproval) {
+      await this.applyEpicReplanProposal(epic, enforcedProposal, { humanApproved: false });
+      return;
+    }
+
+    const ts = nowIso();
+    const pausedEpic: Ticket = {
+      ...epic,
+      status: "needs_human",
+      pendingEpicReplan: enforcedProposal,
+      errorMessage: `Pending adaptive Epic re-plan approval: ${enforcedProposal.summary}`,
+      updatedAt: ts,
+    };
+    await this.stateStore.saveTicket(pausedEpic);
+    this.emitEvent({ type: "ticket_updated", ticket: pausedEpic, timestamp: ts });
+
+    const inboxItem: InboxItem = {
+      id: newId("inb"),
+      repoId: epic.repoId,
+      ticketId: epic.id,
+      kind: "epic_replan",
+      status: "pending",
+      title: `Epic Re-Plan Approval: ${epic.title}`,
+      summary: enforcedProposal.summary,
+      contextPayload: {
+        proposal: enforcedProposal,
+        reasons: classification.reasons,
+      },
+      createdAt: ts,
+    };
+    await this.stateStore.saveInboxItem(inboxItem);
+    this.emitEvent({ type: "inbox_created", item: inboxItem, timestamp: ts });
+  }
+
+  private async applyEpicReplanProposal(
+    epic: Ticket,
+    proposal: EpicReplanProposal,
+    options: { humanApproved: boolean },
+  ): Promise<Ticket> {
+    const repo = await this.stateStore.getRepo(epic.repoId);
+    const allRepos = await this.stateStore.listRepos();
+    const reposById = new Map(allRepos.map((r) => [r.id, r]));
+    const allTickets = await this.stateStore.listTickets();
+    let children = allTickets.filter((t) => t.parentTicketId === epic.id);
+
+    const byKey = new Map<string, Ticket>();
+    const byId = new Map<string, Ticket>();
+    for (const c of children) {
+      byId.set(c.id, c);
+      if (c.subtaskKey) byKey.set(c.subtaskKey, c);
+    }
+
+    const ts = nowIso();
+    let addedCount = 0;
+    const addedMax = 3;
+    const expandedEpicAllowed = new Set(epic.mandate.allowedPaths);
+
+    for (const mut of proposal.mutations) {
+      if (mut.kind === "update_subtask") {
+        const target =
+          (mut.targetTicketId ? byId.get(mut.targetTicketId) : undefined) ??
+          (mut.targetSubtaskKey ? byKey.get(mut.targetSubtaskKey) : undefined);
+        if (!target || (target.status !== "waiting_deps" && target.status !== "queued")) continue;
+
+        const nextAllowed =
+          mut.allowedPaths && mut.allowedPaths.length > 0
+            ? mut.allowedPaths
+            : target.mandate.allowedPaths;
+        if (options.humanApproved) {
+          for (const p of nextAllowed) expandedEpicAllowed.add(p);
+        }
+        const updatedChild: Ticket = {
+          ...target,
+          title: mut.title?.trim() || target.title,
+          description: mut.description?.trim() || target.description,
+          mandate: {
+            ...target.mandate,
+            allowedPaths: nextAllowed,
+          },
+          inlineMemory: {
+            ...target.inlineMemory,
+            goal: mut.description?.trim() || target.inlineMemory.goal,
+            acceptanceCriteria:
+              mut.acceptanceCriteria && mut.acceptanceCriteria.length > 0
+                ? mut.acceptanceCriteria
+                : target.inlineMemory.acceptanceCriteria,
+          },
+          updatedAt: ts,
+        };
+        await this.stateStore.saveTicket(updatedChild);
+        this.emitEvent({ type: "ticket_updated", ticket: updatedChild, timestamp: ts });
+        byId.set(updatedChild.id, updatedChild);
+        if (updatedChild.subtaskKey) byKey.set(updatedChild.subtaskKey, updatedChild);
+      } else if (mut.kind === "skip_subtask") {
+        const target =
+          (mut.targetTicketId ? byId.get(mut.targetTicketId) : undefined) ??
+          (mut.targetSubtaskKey ? byKey.get(mut.targetSubtaskKey) : undefined);
+        if (!target || target.status !== "waiting_deps") continue;
+
+        const skipped: Ticket = {
+          ...target,
+          status: "cancelled",
+          errorMessage: `Skipped by Adaptive Epic Re-plan: ${mut.reason}`,
+          updatedAt: ts,
+        };
+        await this.stateStore.saveTicket(skipped);
+        this.emitEvent({ type: "ticket_updated", ticket: skipped, timestamp: ts });
+        byId.set(skipped.id, skipped);
+
+        // Rewire every remaining sibling that depended on `skipped.id` so DAG stays connected and deadlock-free
+        for (const sib of children) {
+          if (sib.id === skipped.id || !sib.dependsOn.includes(skipped.id)) continue;
+          const rewiredDeps = Array.from(
+            new Set([
+              ...sib.dependsOn.filter((d) => d !== skipped.id),
+              ...skipped.dependsOn,
+            ]),
+          );
+          const updatedSib: Ticket = {
+            ...sib,
+            dependsOn: rewiredDeps,
+            updatedAt: ts,
+          };
+          await this.stateStore.saveTicket(updatedSib);
+          this.emitEvent({ type: "ticket_updated", ticket: updatedSib, timestamp: ts });
+          byId.set(updatedSib.id, updatedSib);
+        }
+      } else if (mut.kind === "add_subtask" && addedCount < addedMax && children.length < 10) {
+        const targetRepo =
+          (mut.repoId ? reposById.get(mut.repoId) : undefined) ?? repo;
+        if (!targetRepo) continue;
+        addedCount += 1;
+
+        const [sanitizedSpec] = sanitizeEpicSubtasks(
+          [
+            {
+              key: mut.targetSubtaskKey ?? `replan_${(epic.epicReplanCount ?? 0) + 1}_${addedCount}`,
+              repoId: targetRepo.id,
+              title: mut.title ?? `Adaptive step ${addedCount}`,
+              description: mut.description ?? mut.reason,
+              template: mut.template ?? epic.template,
+              allowedPaths: mut.allowedPaths ?? ["**"],
+              dependsOnKeys: mut.dependsOnKeys ?? [],
+              acceptanceCriteria: mut.acceptanceCriteria ?? [mut.reason],
+            },
+          ],
+          epic.template,
+          { defaultRepoId: targetRepo.id },
+        );
+        if (!sanitizedSpec) continue;
+
+        let subKey = sanitizedSpec.key;
+        let suffix = 2;
+        while (byKey.has(subKey)) {
+          subKey = `${sanitizedSpec.key}_${suffix++}`;
+        }
+
+        const depIds = (mut.dependsOnKeys ?? [])
+          .map((k) => byKey.get(k)?.id ?? byId.get(k)?.id)
+          .filter((id): id is string => Boolean(id));
+        if (depIds.length === 0 && byId.has(proposal.triggeredByTicketId)) {
+          depIds.push(proposal.triggeredByTicketId);
+        }
+
+        const subThreadKey = `epic:${epic.id}:${subKey}`;
+        const subThread: Thread = {
+          id: newId("thr"),
+          repoId: targetRepo.id,
+          threadKey: subThreadKey,
+          metadata: { source: "epic_replan", epicId: epic.id, subtaskKey: subKey },
+          createdAt: ts,
+          updatedAt: ts,
+        };
+        await this.stateStore.upsertThread(subThread);
+
+        const newChildId = newId("tkt");
+        const childMandate = createDefaultMandate({
+          allowedPaths: sanitizedSpec.allowedPaths,
+          forbiddenPaths: targetRepo.forbiddenPaths ?? [],
+          maxCostUsd: 2.0,
+        });
+        if (options.humanApproved) {
+          for (const p of childMandate.allowedPaths) expandedEpicAllowed.add(p);
+        }
+
+        let allDepsDelivered = depIds.length === 0;
+        if (depIds.length > 0) {
+          allDepsDelivered = depIds.every((id) => byId.get(id)?.status === "delivered");
+        }
+
+        const newChild: Ticket = {
+          id: newChildId,
+          repoId: targetRepo.id,
+          threadId: subThread.id,
+          sourceTriggerId: epic.sourceTriggerId,
+          title: sanitizedSpec.title,
+          description: sanitizedSpec.description,
+          status: allDepsDelivered ? "queued" : "waiting_deps",
+          template: sanitizedSpec.template,
+          currentStage: getFirstStage(sanitizedSpec.template),
+          stageRetries: 0,
+          mandate: childMandate,
+          dependsOn: depIds,
+          parentTicketId: epic.id,
+          isEpic: false,
+          subtaskKey: subKey,
+          nativeSessions: {},
+          preferredEngine: epic.preferredEngine,
+          activeEngine: epic.preferredEngine,
+          inlineMemory: {
+            goal: sanitizedSpec.description,
+            acceptanceCriteria: sanitizedSpec.acceptanceCriteria,
+            stageNotes: [],
+            threadUpdates: [],
+          },
+          costUsd: 0,
+          priority: 1,
+          createdAt: ts,
+          updatedAt: ts,
+        };
+        await this.stateStore.saveTicket(newChild);
+        await this.stateStore.upsertThread({ ...subThread, subscribedTicketId: newChild.id, updatedAt: ts });
+        this.emitEvent({ type: "ticket_created", ticket: newChild, timestamp: ts });
+        children.push(newChild);
+        byId.set(newChild.id, newChild);
+        byKey.set(subKey, newChild);
+      }
+    }
+
+    const updatedEpic: Ticket = {
+      ...epic,
+      status: "implementing",
+      pendingEpicReplan: undefined,
+      epicReplanCount: (epic.epicReplanCount ?? 0) + 1,
+      epicReplanHistory: [...(epic.epicReplanHistory ?? []), proposal],
+      mandate: {
+        ...epic.mandate,
+        allowedPaths: Array.from(expandedEpicAllowed),
+      },
+      errorMessage: undefined,
+      updatedAt: ts,
+    };
+    await this.stateStore.saveTicket(updatedEpic);
+    this.emitEvent({ type: "ticket_updated", ticket: updatedEpic, timestamp: ts });
+    this.emitEvent({
+      type: "epic_replanned",
+      repoId: updatedEpic.repoId,
+      epicId: updatedEpic.id,
+      proposal,
+      autoApplied: !options.humanApproved,
+      timestamp: ts,
+    });
+    return updatedEpic;
   }
 }

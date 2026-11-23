@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { BarChart3, Inbox, Kanban } from "lucide-react";
+import { BarChart3, Clock, Inbox, Kanban } from "lucide-react";
 import { api, getAuthToken } from "./api.ts";
 import { DeepDiveDrawer } from "./components/DeepDiveDrawer.tsx";
 import { HeaderBar } from "./components/HeaderBar.tsx";
@@ -25,8 +25,9 @@ import type {
 import { BoardView } from "./views/BoardView.tsx";
 import { InboxView } from "./views/InboxView.tsx";
 import { MetricsView } from "./views/MetricsView.tsx";
+import { RoutinesView } from "./views/RoutinesView.tsx";
 
-type MainTab = "inbox" | "board" | "metrics";
+type MainTab = "inbox" | "board" | "routines" | "metrics";
 
 export function App() {
   const { t } = useI18n();
@@ -47,7 +48,7 @@ export function App() {
   const [addRepoOpen, setAddRepoOpen] = useState(false);
   const [repoSettingsOpen, setRepoSettingsOpen] = useState(false);
   const [repoSettingsInitialTab, setRepoSettingsInitialTab] = useState<
-    "runtime" | "contract" | "playbook"
+    "runtime" | "contract" | "playbook" | "casebook"
   >("runtime");
   const [worktreesOpen, setWorktreesOpen] = useState(false);
   const [setupStatus, setSetupStatus] = useState<PublicSetupStatus | null>(null);
@@ -124,6 +125,10 @@ export function App() {
     const eventNames = [
       "repo_updated",
       "playbook_updated",
+      "routine_updated",
+      "routine_run_updated",
+      "casebook_updated",
+      "epic_replanned",
       "ticket_created",
       "ticket_updated",
       "stage_started",
@@ -220,7 +225,7 @@ export function App() {
     decision: "approved" | "rejected",
     note?: string,
     deliveryAction?: "local_merge" | "push_and_create_pr",
-    options?: { expandMandate?: boolean; budgetIncreaseUsd?: number },
+    options?: { expandMandate?: boolean; budgetIncreaseUsd?: number; arenaWinnerId?: string },
   ) => {
     await api.resolveInbox(id, decision, note, deliveryAction, options);
     await refreshAll(selectedRepoId || undefined);
@@ -248,6 +253,7 @@ export function App() {
           setRepoSettingsInitialTab("contract");
           setRepoSettingsOpen(true);
         }}
+        onOpenRoutines={() => setActiveTab("routines")}
         onOpenWorktrees={() => setWorktreesOpen(true)}
         onOpenSetup={() => setSetupOpen(true)}
       />
@@ -284,6 +290,23 @@ export function App() {
           <span className="px-1.5 py-0.2 rounded-full bg-zinc-800 text-zinc-400 text-[10px] font-mono">
             {tickets.length}
           </span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab("routines")}
+          className={`inline-flex items-center gap-2 px-3 py-2.5 text-xs font-medium border-b-2 transition ${
+            activeTab === "routines"
+              ? "border-indigo-500 text-zinc-100"
+              : "border-transparent text-zinc-500 hover:text-zinc-300"
+          }`}
+        >
+          <Clock className="w-3.5 h-3.5" />
+          {t("nav.routines")}
+          {(health?.counts.activeRoutines ?? 0) > 0 && (
+            <span className="px-1.5 py-0.2 rounded-full bg-teal-500/20 text-teal-300 border border-teal-500/30 text-[10px] font-mono">
+              {health?.counts.activeRoutines}
+            </span>
+          )}
         </button>
 
         <button
@@ -329,6 +352,13 @@ export function App() {
             repos={repos}
             selectedRepoId={selectedRepoId}
             onSelectTicket={(id) => setInspectedTicketId(id)}
+          />
+        ) : activeTab === "routines" ? (
+          <RoutinesView
+            repo={activeRepo}
+            availableEngines={health?.availableEngines ?? ["mock"]}
+            onInspectTicket={(id) => setInspectedTicketId(id)}
+            onRefreshParent={() => void refreshAll(selectedRepoId || undefined)}
           />
         ) : (
           <MetricsView metrics={metrics} repo={activeRepo} />

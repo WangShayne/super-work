@@ -1,10 +1,15 @@
-import { createDefaultMandate, mandateScopesOverlap } from "./mandate.ts";
+import { createDefaultMandate, mandateScopesOverlap, normalizeScopePattern } from "./mandate.ts";
 import type {
   EpicDecompositionPlan,
+  EpicReplanMutation,
+  EpicReplanProposal,
   EpicSubtaskSpec,
+  HandoverDigest,
   PipelineTemplateId,
   RepoConfig,
+  Ticket,
 } from "./types.ts";
+import { nowIso } from "./utils.ts";
 
 function sanitizeKey(raw: string | undefined, idx: number, used: Set<string>): string {
   const base = (raw ?? "")
@@ -463,5 +468,201 @@ export function heuristicDecomposeEpic(input: {
     epicTitle: input.title,
     summary: "Default 3-stage vertical Epic DAG (contracts -> backend -> UI & verification).",
     subtasks: sanitizeEpicSubtasks(defaultSpecs, input.defaultTemplate, sanitizeOpts),
+  };
+}
+
+function patternStaticPrefix(pattern: string): { prefix: string; isWildcard: boolean } {
+  const norm = normalizeScopePattern(pattern);
+  if (norm === "**" || norm === "*") {
+    return { prefix: "", isWildcard: true };
+  }
+  const segs = norm.split("/");
+  const clean: string[] = [];
+  for (const s of segs) {
+    if (/[*?[{]/.test(s)) break;
+    clean.push(s);
+  }
+  return { prefix: clean.join("/"), isWildcard: false };
+}
+
+export function isSubtaskScopeWithinEpic(
+  subtaskAllowedPaths: string[],
+  epicAllowedPaths: string[],
+): boolean {
+  const epicPats = epicAllowedPaths.length > 0 ? epicAllowedPaths : ["**"];
+  if (epicPats.some((p) => {
+    const n = normalizeScopePattern(p);
+    return n === "**" || n === "*";
+  })) {
+    return true;
+  }
+  const targetPats = subtaskAllowedPaths.length > 0 ? subtaskAllowedPaths : ["**"];
+  if (targetPats.some((p) => {
+    const n = normalizeScopePattern(p);
+    return n === "**" || n === "*";
+  })) {
+    return false;
+  }
+
+  for (const subPat of targetPats) {
+    const subNorm = normalizeScopePattern(subPat);
+    const subInfo = patternStaticPrefix(subNorm);
+    const covered = epicPats.some((epicPat) => {
+      const epicNorm = normalizeScopePattern(epicPat);
+      if (epicNorm === subNorm) return true;
+      const epicInfo = patternStaticPrefix(epicNorm);
+      if (epicInfo.isWildcard) return true;
+      if (!epicInfo.prefix || !subInfo.prefix) return false;
+      return (
+        subInfo.prefix === epicInfo.prefix ||
+        subInfo.prefix.startsWith(`${epicInfo.prefix}/`)
+      );
+    });
+    if (!covered) return false;
+  }
+  return true;
+}
+
+export function classifyEpicReplanApproval(input: {
+  epic: Ticket;
+  repo: RepoConfig;
+  mutations: EpicReplanMutation[];
+}): { requiresHumanApproval: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  for (const mut of input.mutations) {
+    if (mut.kind === "add_subtask") {
+      reasons.push(`Adds subtask '${mut.title ?? mut.targetSubtaskKey ?? "new"}'`);
+    } else if (mut.kind === "skip_subtask") {
+      reasons.push(`Skips subtask '${mut.targetSubtaskKey ?? mut.targetTicketId ?? "?"}'`);
+    } else if (mut.kind === "update_subtask" && mut.allowedPaths && mut.allowedPaths.length > 0) {
+      if (!isSubtaskScopeWithinEpic(mut.allowedPaths, input.epic.mandate.allowedPaths)) {
+        reasons.push(
+          `Expands allowedPaths (${mut.allowedPaths.join(", ")}) beyond Epic mandate (${input.epic.mandate.allowedPaths.join(", ")})`,
+        );
+      }
+    }
+  }
+  return {
+    requiresHumanApproval: reasons.length > 0,
+    reasons,
+  };
+}
+
+export function evaluateHeuristicEpicReplan(input: {
+  epic: Ticket;
+  completedSubtask: Ticket;
+  digest: HandoverDigest;
+  unstartedSubtasks: Ticket[];
+  allSubtasks: Ticket[];
+}): EpicReplanProposal {
+  const createdAt = nowIso();
+  const empty: EpicReplanProposal = {
+    shouldReplan: false,
+    requiresHumanApproval: false,
+    summary: "No downstream DAG adjustment needed.",
+    triggeredByTicketId: input.completedSubtask.id,
+    mutations: [],
+    createdAt,
+  };
+
+  if (input.unstartedSubtasks.length === 0) {
+    return empty;
+  }
+
+  const mutations: EpicReplanMutation[] = [];
+  const fullText = `${input.digest.summary}\n${input.digest.contractSnippets.join("\n")}\n${input.digest.formattedMarkdown}`;
+
+  // 1. Honor explicit directive markers if present in digest summary/contract snippets
+  const addMatch = fullText.match(/\[EPIC_REPLAN_ADD:\s*([^|\]]+?)(?:\s*\|\s*scope:([^\]]+))?\]/i);
+  if (addMatch && input.allSubtasks.length < 10) {
+    const newTitle = addMatch[1]!.trim();
+    const rawScope = addMatch[2]?.split(",").map((s) => s.trim()).filter(Boolean) ?? ["**"];
+    mutations.push({
+      kind: "add_subtask",
+      title: newTitle,
+      description: `Adaptive integration step triggered by handover from ${input.completedSubtask.title}: ${newTitle}`,
+      allowedPaths: rawScope,
+      dependsOnKeys: input.completedSubtask.subtaskKey ? [input.completedSubtask.subtaskKey] : [],
+      reason: `Handover from ${input.completedSubtask.title} requested an additional follow-up subtask`,
+    });
+  }
+
+  const skipMatch = fullText.match(/\[EPIC_REPLAN_SKIP:\s*([a-zA-Z0-9_-]+)\]/i);
+  if (skipMatch) {
+    const keyToSkip = skipMatch[1]!.trim();
+    const target = input.unstartedSubtasks.find(
+      (s) => s.subtaskKey === keyToSkip || s.id === keyToSkip,
+    );
+    if (target) {
+      mutations.push({
+        kind: "skip_subtask",
+        targetSubtaskKey: target.subtaskKey,
+        targetTicketId: target.id,
+        reason: `Upstream handover marked '${target.subtaskKey ?? target.title}' redundant`,
+      });
+    }
+  }
+
+  // 2. If completed subtask exported new concrete symbols/contracts not yet noted in a direct waiting dependent,
+  // refine the downstream subtask's description/acceptanceCriteria inside its authorized scope.
+  if (mutations.length === 0 && (input.digest.exportedSymbols.length > 0 || input.digest.contractSnippets.length > 0)) {
+    const directDependents = input.unstartedSubtasks.filter((sub) =>
+      sub.dependsOn.includes(input.completedSubtask.id),
+    );
+    for (const child of directDependents.slice(0, 2)) {
+      const marker = `[Synced from ${input.completedSubtask.subtaskKey ?? input.completedSubtask.id}]`;
+      if (child.description.includes(marker)) continue;
+      const symSummary = input.digest.exportedSymbols.slice(0, 6).join(", ");
+      const contractPart = input.digest.contractSnippets.slice(0, 2).join("; ");
+      const addendumParts = [
+        symSummary ? `Symbols: ${symSummary}` : "",
+        contractPart ? `Contracts: ${contractPart}` : "",
+      ].filter(Boolean);
+      if (addendumParts.length === 0) continue;
+
+      mutations.push({
+        kind: "update_subtask",
+        targetSubtaskKey: child.subtaskKey,
+        targetTicketId: child.id,
+        description: `${child.description}\n\n${marker} Align with upstream ${input.completedSubtask.title} — ${addendumParts.join(" | ")}`,
+        acceptanceCriteria: symSummary
+          ? [...child.inlineMemory.acceptanceCriteria, `Consume upstream exports (${symSummary})`]
+          : undefined,
+        reason: `Propagate newly finalized exports/contracts from ${input.completedSubtask.title}`,
+      });
+    }
+  }
+
+  if (mutations.length === 0) {
+    return empty;
+  }
+
+  const { requiresHumanApproval, reasons } = classifyEpicReplanApproval({
+    epic: input.epic,
+    repo: {
+      id: input.epic.repoId,
+      name: "",
+      rootPath: "",
+      baseBranch: "main",
+      mode: "observe",
+      defaultTemplate: input.epic.template,
+      preferredImplementEngine: "claude",
+      preferredReviewEngine: "codex",
+      createdAt,
+      updatedAt: createdAt,
+    },
+    mutations,
+  });
+
+  return {
+    shouldReplan: true,
+    requiresHumanApproval,
+    summary:
+      reasons.length > 0
+        ? `Adaptive DAG re-plan (${mutations.length} change(s)): ${reasons.join("; ")}`
+        : `Refined ${mutations.length} downstream subtask specification(s) from ${input.completedSubtask.title} handover.`,
+    triggeredByTicketId: input.completedSubtask.id,
+    mutations: mutations.slice(0, 4),
+    createdAt,
   };
 }

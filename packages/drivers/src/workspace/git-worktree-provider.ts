@@ -907,6 +907,11 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     }
   }
 
+  async deleteBranch(rootRepoPath: string, branchName: string): Promise<void> {
+    if (!branchName.trim()) return;
+    await runGit(["branch", "-D", branchName], rootRepoPath);
+  }
+
   async listWorktreeDirs(): Promise<string[]> {
     try {
       const entries = await readdir(this.worktreesDir, { withFileTypes: true });

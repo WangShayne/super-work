@@ -3,6 +3,7 @@ import {
   Activity,
   Bot,
   BrainCircuit,
+  Clock,
   Cpu,
   FileJson2,
   FolderGit2,
@@ -35,6 +36,7 @@ interface HeaderBarProps {
   onOpenAddRepo: () => void;
   onOpenRepoSettings: () => void;
   onOpenContractSettings?: () => void;
+  onOpenRoutines?: () => void;
   onOpenWorktrees: () => void;
   onOpenSetup: () => void;
 }
@@ -136,6 +138,7 @@ export function HeaderBar({
   onOpenAddRepo,
   onOpenRepoSettings,
   onOpenContractSettings,
+  onOpenRoutines,
   onOpenWorktrees,
   onOpenSetup,
 }: HeaderBarProps) {
@@ -179,7 +182,7 @@ export function HeaderBar({
               <div className="flex items-center gap-2">
                 <span className="font-semibold tracking-tight text-zinc-100 text-sm">super-work</span>
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
-                  v0.6
+                  v0.7
                 </span>
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700/60">
                   {t("brand.badge")}
@@ -395,6 +398,27 @@ export function HeaderBar({
           align="right"
           tooltipTitle={t("strip.outbox.label")}
           tooltipBody={t("strip.outbox.desc")}
+        />
+
+        <StatusCapsule
+          icon={
+            <Clock
+              className={`w-3 h-3 ${
+                (health?.counts.activeRoutines ?? 0) > 0 ? "text-teal-400" : "text-zinc-400"
+              }`}
+            />
+          }
+          label={t("strip.routines.label")}
+          value={
+            (health?.counts.activeRoutines ?? 0) > 0
+              ? `${health?.counts.activeRoutines} ${t("strip.routines.activeSuffix")}`
+              : t("strip.routines.none")
+          }
+          tone={(health?.counts.activeRoutines ?? 0) > 0 ? "good" : "neutral"}
+          align="right"
+          onClick={onOpenRoutines}
+          tooltipTitle={t("strip.routines.label")}
+          tooltipBody={t("strip.routines.desc")}
         />
 
         <StatusCapsule

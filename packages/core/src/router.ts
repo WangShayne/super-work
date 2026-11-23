@@ -508,6 +508,8 @@ export class EventIntakeRouter {
       nativeSessions: {},
       preferredEngine: input.preferredEngine,
       activeEngine: input.preferredEngine,
+      arenaMode: input.arenaMode || undefined,
+      arenaCompetitorEngine: input.arenaCompetitorEngine,
       modelOverride: input.modelOverride?.trim() || undefined,
       effortOverride: input.effortOverride,
       inlineMemory: {
@@ -823,6 +825,13 @@ export class EventIntakeRouter {
     const unblocked: Ticket[] = [];
 
     for (const ticket of waiting) {
+      if (ticket.parentTicketId) {
+        const parentEpic = await this.stateStore.getTicket(ticket.parentTicketId);
+        if (parentEpic?.pendingEpicReplan) {
+          continue;
+        }
+      }
+
       if (ticket.dependsOn.length === 0) {
         const next = { ...ticket, status: "queued" as const, updatedAt: nowIso() };
         await this.stateStore.saveTicket(next);

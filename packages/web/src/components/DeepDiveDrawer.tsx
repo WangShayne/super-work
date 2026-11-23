@@ -205,6 +205,11 @@ export function DeepDiveDrawer({
   const [artifactContent, setArtifactContent] = useState<{ id: string; text: string } | null>(null);
   const [searchQ, setSearchQ] = useState("");
   const [searchHits, setSearchHits] = useState<MemorySearchHit[] | null>(null);
+  const [selectedArenaCandId, setSelectedArenaCandId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSelectedArenaCandId(null);
+  }, [ticketId]);
 
   useEffect(() => {
     if (!ticketId) {
@@ -556,6 +561,25 @@ export function DeepDiveDrawer({
                 </div>
               )}
 
+              {ticket?.isEpic && (ticket.epicReplanHistory?.length || ticket.pendingEpicReplan) && (
+                <div className="rounded-lg border border-purple-500/30 bg-purple-500/5 p-3 text-xs space-y-1.5">
+                  <div className="font-semibold text-purple-300 flex items-center gap-1.5">
+                    <Layers className="w-3.5 h-3.5" />
+                    {t("drawer.epicReplanSection")} ({ticket.epicReplanHistory?.length ?? 0}/2)
+                  </div>
+                  {ticket.pendingEpicReplan && (
+                    <p className="text-amber-300 text-[11px]">
+                      ⏳ {ticket.pendingEpicReplan.summary}
+                    </p>
+                  )}
+                  {ticket.epicReplanHistory?.map((rep, idx) => (
+                    <p key={idx} className="text-zinc-300 text-[11px]">
+                      #{idx + 1} · {rep.summary}
+                    </p>
+                  ))}
+                </div>
+              )}
+
               {ticket?.isEpic && childSubtasks.length > 0 && (
                 <div className="space-y-2">
                   <h3 className="text-xs font-semibold uppercase tracking-wider text-purple-300 flex items-center gap-1.5">
@@ -763,12 +787,64 @@ export function DeepDiveDrawer({
                 </div>
               </div>
 
+              {ticket.arenaCandidates && ticket.arenaCandidates.length > 0 && (
+                <div className="rounded-lg border border-teal-500/30 bg-teal-500/5 p-3 space-y-2 text-xs">
+                  <div className="text-[11px] font-semibold text-teal-300">
+                    {t("drawer.arenaDiffTitle")}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {ticket.arenaCandidates.map((cand) => {
+                      const activeCandId =
+                        selectedArenaCandId ??
+                        ticket.arenaWinnerId ??
+                        ticket.arenaCandidates!.find((c) => c.recommended)?.candidateId ??
+                        ticket.arenaCandidates![0]!.candidateId;
+                      const selected = activeCandId === cand.candidateId;
+                      const isWinner = ticket.arenaWinnerId === cand.candidateId;
+                      return (
+                        <button
+                          key={cand.candidateId}
+                          type="button"
+                          onClick={() => setSelectedArenaCandId(cand.candidateId)}
+                          className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border font-mono text-[11px] transition ${
+                            selected
+                              ? "border-teal-400 bg-teal-500/20 text-teal-100"
+                              : "border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200"
+                          }`}
+                        >
+                          <span>{cand.engine}</span>
+                          <span className="text-zinc-400">({cand.score}pts)</span>
+                          <span>
+                            +{cand.addedLines}/-{cand.deletedLines}
+                          </span>
+                          {isWinner && (
+                            <span className="px-1 rounded bg-emerald-500/20 text-emerald-300 text-[10px]">
+                              {t("drawer.arenaWinnerTag")}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               <div className="space-y-2">
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
                   {t("drawer.diffTitle")}
                 </h3>
                 <DiffStudio
-                  diff={detail?.diff ?? ""}
+                  diff={(() => {
+                    if (ticket.arenaCandidates && ticket.arenaCandidates.length > 0 && detail?.arenaCandidateDiffs) {
+                      const activeCandId =
+                        selectedArenaCandId ??
+                        ticket.arenaWinnerId ??
+                        ticket.arenaCandidates.find((c) => c.recommended)?.candidateId ??
+                        ticket.arenaCandidates[0]!.candidateId;
+                      return detail.arenaCandidateDiffs[activeCandId] ?? detail?.diff ?? "";
+                    }
+                    return detail?.diff ?? "";
+                  })()}
                   stageNotes={ticket.inlineMemory.stageNotes}
                   onSendFileFeedback={handleSendFileFeedback}
                 />
@@ -810,6 +886,45 @@ export function DeepDiveDrawer({
                       <p className="text-zinc-400 text-[11px] mt-0.5">{hit.snippet}</p>
                     </div>
                   ))}
+                </div>
+              )}
+
+              {recall.matchedCases && recall.matchedCases.length > 0 && (
+                <div className="space-y-2 text-xs">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-teal-300">
+                    {t("drawer.recallCasebookTitle")} ({recall.matchedCases.length})
+                  </h3>
+                  <div className="space-y-2">
+                    {recall.matchedCases.map((c) => (
+                      <div
+                        key={c.id}
+                        className={`rounded-lg border p-3 space-y-1 ${
+                          c.reverted
+                            ? "border-rose-500/35 bg-rose-500/5"
+                            : "border-teal-500/25 bg-teal-500/5"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium text-zinc-100">{c.title}</span>
+                          <span
+                            className={`px-1.5 py-0.2 rounded font-mono text-[10px] ${
+                              c.reverted
+                                ? "bg-rose-500/20 text-rose-300"
+                                : "bg-emerald-500/15 text-emerald-300"
+                            }`}
+                          >
+                            {c.reverted
+                              ? t("modal.repoSettings.casebookRevertedBadge")
+                              : t("modal.repoSettings.casebookVerifiedBadge")}
+                          </span>
+                        </div>
+                        <p className="text-zinc-300 text-[11px]">{c.solutionSummary}</p>
+                        {c.pitfallsAndFixes && (
+                          <p className="text-amber-300 text-[11px]">{c.pitfallsAndFixes}</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
 

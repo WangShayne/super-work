@@ -1,4 +1,5 @@
 import type {
+  CasebookEntry,
   ChainOfRecall,
   CliScanReport,
   DeliveryChannel,
@@ -22,6 +23,10 @@ import type {
   RepoConfig,
   RepoContractFile,
   RepoMetricsSummary,
+  RoutinePresetTemplate,
+  RoutineRun,
+  RoutineScheduleKind,
+  RoutineSpec,
   SmokeCheckConfig,
   SpillArtifact,
   Ticket,
@@ -84,12 +89,13 @@ export const api = {
     id: string,
     patch: Omit<
       Partial<RepoConfig>,
-      "maxConcurrentWorkers" | "dailyBudgetUsd" | "conventions" | "smokeCheck"
+      "maxConcurrentWorkers" | "dailyBudgetUsd" | "conventions" | "smokeCheck" | "fallbackEngines"
     > & {
       maxConcurrentWorkers?: number | null;
       dailyBudgetUsd?: number | null;
       conventions?: string | null;
       smokeCheck?: SmokeCheckConfig | null;
+      fallbackEngines?: WorkerEngineId[] | null;
     },
   ) =>
     request<{ repo: RepoConfig }>(`/api/repos/${id}`, {
@@ -138,6 +144,78 @@ export const api = {
       method: "DELETE",
     }),
 
+  prunePlaybook: (repoId: string) =>
+    request<{ prunedIds: string[]; keptCount: number; entries: PlaybookEntry[] }>(
+      `/api/repos/${repoId}/playbook/prune`,
+      { method: "POST", body: "{}" },
+    ),
+
+  listCasebook: (repoId: string, q?: string) =>
+    request<{ entries: CasebookEntry[] }>(
+      q
+        ? `/api/repos/${repoId}/casebook?q=${encodeURIComponent(q)}`
+        : `/api/repos/${repoId}/casebook`,
+    ),
+
+  deleteCasebookEntry: (entryId: string) =>
+    request<{ ok: boolean; id: string }>(`/api/casebook/${entryId}`, {
+      method: "DELETE",
+    }),
+
+  listRoutines: (repoId?: string) =>
+    request<{ routines: RoutineSpec[]; presets: RoutinePresetTemplate[] }>(
+      repoId ? `/api/routines?repoId=${encodeURIComponent(repoId)}` : "/api/routines",
+    ),
+
+  listRoutineRuns: (filter?: { repoId?: string; routineId?: string; limit?: number }) => {
+    const params = new URLSearchParams();
+    if (filter?.repoId) params.set("repoId", filter.repoId);
+    if (filter?.routineId) params.set("routineId", filter.routineId);
+    if (filter?.limit) params.set("limit", String(filter.limit));
+    const qs = params.toString();
+    return request<{ runs: RoutineRun[] }>(qs ? `/api/routines/runs?${qs}` : "/api/routines/runs");
+  },
+
+  createRoutine: (payload: {
+    repoId: string;
+    name: string;
+    prompt: string;
+    scheduleKind: RoutineScheduleKind;
+    intervalMinutes?: number;
+    cronExpr?: string;
+    activeHoursStart?: string;
+    activeHoursEnd?: string;
+    allowedPaths?: string[];
+    template?: PipelineTemplateId;
+    preferredEngine?: WorkerEngineId;
+    maxBudgetUsd?: number;
+    enabled?: boolean;
+  }) =>
+    request<{ routine: RoutineSpec }>("/api/routines", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  patchRoutine: (
+    id: string,
+    patch: Partial<Omit<RoutineSpec, "id" | "repoId" | "createdAt" | "updatedAt">>,
+  ) =>
+    request<{ routine: RoutineSpec }>(`/api/routines/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+
+  deleteRoutine: (id: string) =>
+    request<{ ok: boolean; id: string }>(`/api/routines/${id}`, {
+      method: "DELETE",
+    }),
+
+  runRoutineNow: (id: string) =>
+    request<{ run: RoutineRun }>(`/api/routines/${id}/run`, {
+      method: "POST",
+      body: "{}",
+    }),
+
   getMetrics: (repoId?: string) =>
     request<{ metrics: RepoMetricsSummary }>(
       repoId ? `/api/metrics?repoId=${encodeURIComponent(repoId)}` : "/api/metrics",
@@ -155,6 +233,8 @@ export const api = {
     dependsOn?: string[];
     maxCostUsd?: number;
     preferredEngine?: WorkerEngineId;
+    arenaMode?: boolean;
+    arenaCompetitorEngine?: WorkerEngineId;
     modelOverride?: string;
     effortOverride?: ReasoningEffort;
   }) => request<{ ticket: Ticket }>("/api/tickets", { method: "POST", body: JSON.stringify(payload) }),
@@ -251,6 +331,7 @@ export const api = {
     options?: {
       expandMandate?: boolean;
       budgetIncreaseUsd?: number;
+      arenaWinnerId?: string;
     },
   ) =>
     request<{ item: InboxItem; ticket: Ticket }>(`/api/inbox/${id}/resolve`, {
@@ -261,6 +342,7 @@ export const api = {
         deliveryAction,
         expandMandate: options?.expandMandate,
         budgetIncreaseUsd: options?.budgetIncreaseUsd,
+        arenaWinnerId: options?.arenaWinnerId,
       }),
     }),
 

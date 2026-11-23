@@ -1,7 +1,10 @@
 import { Database } from "bun:sqlite";
 import type {
+  ArenaCandidateResult,
+  CasebookEntry,
   ChainOfRecall,
   EngineMetricRow,
+  EpicReplanProposal,
   HandoverDigest,
   InboxItem,
   InboxItemStatus,
@@ -11,6 +14,8 @@ import type {
   PlaybookEntry,
   RepoConfig,
   RepoMetricsSummary,
+  RoutineRun,
+  RoutineSpec,
   SmokeCheckConfig,
   SpillArtifact,
   StageRun,
@@ -225,11 +230,74 @@ export class SqliteStateStore implements StateStore {
         source_ticket_id TEXT,
         enabled INTEGER NOT NULL DEFAULT 1,
         pinned INTEGER NOT NULL DEFAULT 0,
+        hit_count INTEGER NOT NULL DEFAULT 0,
+        last_matched_at TEXT,
+        suspect INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_playbook_repo
         ON playbook_entries(repo_id, enabled, pinned, updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS routines (
+        id TEXT PRIMARY KEY,
+        repo_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        schedule_kind TEXT NOT NULL,
+        interval_minutes INTEGER,
+        cron_expr TEXT,
+        active_hours_start TEXT,
+        active_hours_end TEXT,
+        allowed_paths_json TEXT NOT NULL DEFAULT '["**"]',
+        template TEXT NOT NULL,
+        preferred_engine TEXT,
+        max_budget_usd REAL NOT NULL DEFAULT 1.5,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        active_ticket_id TEXT,
+        last_run_at TEXT,
+        last_run_status TEXT,
+        next_run_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_routines_repo
+        ON routines(repo_id, enabled, next_run_at);
+
+      CREATE TABLE IF NOT EXISTS routine_runs (
+        id TEXT PRIMARY KEY,
+        routine_id TEXT NOT NULL,
+        repo_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        changed_files_json TEXT NOT NULL DEFAULT '[]',
+        promoted_ticket_id TEXT,
+        cost_usd REAL NOT NULL DEFAULT 0,
+        started_at TEXT NOT NULL,
+        completed_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_routine_runs_routine
+        ON routine_runs(routine_id, started_at DESC);
+
+      CREATE TABLE IF NOT EXISTS casebook_entries (
+        id TEXT PRIMARY KEY,
+        repo_id TEXT NOT NULL,
+        ticket_id TEXT NOT NULL UNIQUE,
+        title TEXT NOT NULL,
+        goal_summary TEXT NOT NULL,
+        solution_summary TEXT NOT NULL,
+        pitfalls_and_fixes TEXT,
+        changed_files_json TEXT NOT NULL DEFAULT '[]',
+        scope_paths_json TEXT NOT NULL DEFAULT '["**"]',
+        exported_symbols_json TEXT NOT NULL DEFAULT '[]',
+        reverted INTEGER NOT NULL DEFAULT 0,
+        hit_count INTEGER NOT NULL DEFAULT 0,
+        last_matched_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_casebook_repo
+        ON casebook_entries(repo_id, reverted, updated_at DESC);
 
       CREATE TABLE IF NOT EXISTS system_settings (
         key TEXT PRIMARY KEY,
@@ -284,6 +352,9 @@ export class SqliteStateStore implements StateStore {
     }
     if (!existingRepoCols.has("smoke_check_json")) {
       this.db.run("ALTER TABLE repos ADD COLUMN smoke_check_json TEXT;");
+    }
+    if (!existingRepoCols.has("fallback_engines_json")) {
+      this.db.run("ALTER TABLE repos ADD COLUMN fallback_engines_json TEXT;");
     }
 
     const cols = this.db
@@ -340,6 +411,47 @@ export class SqliteStateStore implements StateStore {
     if (!existingCols.has("handover_digest_json")) {
       this.db.run("ALTER TABLE tickets ADD COLUMN handover_digest_json TEXT;");
     }
+    if (!existingCols.has("routine_id")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN routine_id TEXT;");
+    }
+    if (!existingCols.has("failed_engines_json")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN failed_engines_json TEXT;");
+    }
+    if (!existingCols.has("arena_mode")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN arena_mode INTEGER NOT NULL DEFAULT 0;");
+    }
+    if (!existingCols.has("arena_competitor_engine")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN arena_competitor_engine TEXT;");
+    }
+    if (!existingCols.has("arena_candidates_json")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN arena_candidates_json TEXT;");
+    }
+    if (!existingCols.has("arena_winner_id")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN arena_winner_id TEXT;");
+    }
+    if (!existingCols.has("epic_replan_count")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN epic_replan_count INTEGER NOT NULL DEFAULT 0;");
+    }
+    if (!existingCols.has("epic_replan_history_json")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN epic_replan_history_json TEXT;");
+    }
+    if (!existingCols.has("pending_epic_replan_json")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN pending_epic_replan_json TEXT;");
+    }
+
+    const playbookCols = this.db
+      .query("PRAGMA table_info(playbook_entries)")
+      .all() as Array<{ name: string }>;
+    const existingPlaybookCols = new Set(playbookCols.map((c) => c.name));
+    if (!existingPlaybookCols.has("hit_count")) {
+      this.db.run("ALTER TABLE playbook_entries ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0;");
+    }
+    if (!existingPlaybookCols.has("last_matched_at")) {
+      this.db.run("ALTER TABLE playbook_entries ADD COLUMN last_matched_at TEXT;");
+    }
+    if (!existingPlaybookCols.has("suspect")) {
+      this.db.run("ALTER TABLE playbook_entries ADD COLUMN suspect INTEGER NOT NULL DEFAULT 0;");
+    }
   }
 
   // --- Repos ---
@@ -348,13 +460,13 @@ export class SqliteStateStore implements StateStore {
       .query(
         `INSERT INTO repos (
           id, name, root_path, base_branch, mode, github_repo, default_template,
-          preferred_implement_engine, preferred_review_engine, auto_cleanup_worktree,
+          preferred_implement_engine, preferred_review_engine, fallback_engines_json, auto_cleanup_worktree,
           verification_commands_json, setup_commands_json, smoke_check_json, forbidden_paths_json,
           conventions, contract_synced_hash, contract_synced_at,
           default_delivery_channel,
           max_concurrent_workers, daily_budget_usd, daily_budget_override_usd, daily_budget_override_date,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           root_path = excluded.root_path,
@@ -364,6 +476,7 @@ export class SqliteStateStore implements StateStore {
           default_template = excluded.default_template,
           preferred_implement_engine = excluded.preferred_implement_engine,
           preferred_review_engine = excluded.preferred_review_engine,
+          fallback_engines_json = excluded.fallback_engines_json,
           auto_cleanup_worktree = excluded.auto_cleanup_worktree,
           verification_commands_json = excluded.verification_commands_json,
           setup_commands_json = excluded.setup_commands_json,
@@ -389,6 +502,7 @@ export class SqliteStateStore implements StateStore {
         repo.defaultTemplate,
         repo.preferredImplementEngine,
         repo.preferredReviewEngine,
+        repo.fallbackEngines ? JSON.stringify(repo.fallbackEngines) : null,
         repo.autoCleanupWorktree === false ? 0 : 1,
         JSON.stringify(repo.verificationCommands ?? []),
         JSON.stringify(repo.setupCommands ?? []),
@@ -504,10 +618,15 @@ export class SqliteStateStore implements StateStore {
           epic_delivery_mode, pr_number, pr_url, pr_auto_followup_count, pending_violation_paths_json,
           merged_commit_sha, reverted_at, revert_commit_sha,
           worktree_path, branch_name, worktree_cleaned_at,
-          native_sessions_json, preferred_engine, active_engine, model_override, effort_override,
+          native_sessions_json, preferred_engine, active_engine, failed_engines_json,
+          arena_mode, arena_competitor_engine, arena_candidates_json, arena_winner_id,
+          routine_id, epic_replan_count, epic_replan_history_json, pending_epic_replan_json,
+          model_override, effort_override,
           inline_memory_json, handover_digest_json, cost_usd, priority, error_message, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
+          title = excluded.title,
+          description = excluded.description,
           status = excluded.status,
           template = excluded.template,
           current_stage = excluded.current_stage,
@@ -531,6 +650,15 @@ export class SqliteStateStore implements StateStore {
           native_sessions_json = excluded.native_sessions_json,
           preferred_engine = excluded.preferred_engine,
           active_engine = excluded.active_engine,
+          failed_engines_json = excluded.failed_engines_json,
+          arena_mode = excluded.arena_mode,
+          arena_competitor_engine = excluded.arena_competitor_engine,
+          arena_candidates_json = excluded.arena_candidates_json,
+          arena_winner_id = excluded.arena_winner_id,
+          routine_id = excluded.routine_id,
+          epic_replan_count = excluded.epic_replan_count,
+          epic_replan_history_json = excluded.epic_replan_history_json,
+          pending_epic_replan_json = excluded.pending_epic_replan_json,
           model_override = excluded.model_override,
           effort_override = excluded.effort_override,
           inline_memory_json = excluded.inline_memory_json,
@@ -570,6 +698,15 @@ export class SqliteStateStore implements StateStore {
         JSON.stringify(ticket.nativeSessions),
         ticket.preferredEngine ?? null,
         ticket.activeEngine ?? null,
+        ticket.failedEngines ? JSON.stringify(ticket.failedEngines) : null,
+        ticket.arenaMode ? 1 : 0,
+        ticket.arenaCompetitorEngine ?? null,
+        ticket.arenaCandidates ? JSON.stringify(ticket.arenaCandidates) : null,
+        ticket.arenaWinnerId ?? null,
+        ticket.routineId ?? null,
+        ticket.epicReplanCount ?? 0,
+        ticket.epicReplanHistory ? JSON.stringify(ticket.epicReplanHistory) : null,
+        ticket.pendingEpicReplan ? JSON.stringify(ticket.pendingEpicReplan) : null,
         ticket.modelOverride ?? null,
         ticket.effortOverride ?? null,
         JSON.stringify(ticket.inlineMemory),
@@ -882,12 +1019,22 @@ export class SqliteStateStore implements StateStore {
   async getDailyRepoSpendUsd(repoId: string, utcDatePrefix: string): Promise<number> {
     const row = this.db
       .query(
-        `SELECT COALESCE(SUM(sr.cost_usd), 0) AS total
-         FROM stage_runs sr
-         JOIN tickets t ON t.id = sr.ticket_id
-         WHERE t.repo_id = ? AND sr.started_at LIKE ?`,
+        `SELECT (
+           COALESCE((
+             SELECT SUM(sr.cost_usd)
+             FROM stage_runs sr
+             JOIN tickets t ON t.id = sr.ticket_id
+             WHERE t.repo_id = ? AND sr.started_at LIKE ?
+           ), 0)
+           +
+           COALESCE((
+             SELECT SUM(rr.cost_usd)
+             FROM routine_runs rr
+             WHERE rr.repo_id = ? AND rr.started_at LIKE ?
+           ), 0)
+         ) AS total`,
       )
-      .get(repoId, `${utcDatePrefix}%`) as { total: number } | null;
+      .get(repoId, `${utcDatePrefix}%`, repoId, `${utcDatePrefix}%`) as { total: number } | null;
     return Number(row?.total ?? 0);
   }
 
@@ -907,8 +1054,13 @@ export class SqliteStateStore implements StateStore {
           : repo?.dailyBudgetUsd;
     } else {
       const todayRow = this.db
-        .query("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM stage_runs WHERE started_at LIKE ?")
-        .get(`${todayDate}%`) as { total: number } | null;
+        .query(
+          `SELECT (
+             COALESCE((SELECT SUM(cost_usd) FROM stage_runs WHERE started_at LIKE ?), 0)
+             + COALESCE((SELECT SUM(cost_usd) FROM routine_runs WHERE started_at LIKE ?), 0)
+           ) AS total`,
+        )
+        .get(`${todayDate}%`, `${todayDate}%`) as { total: number } | null;
       todayCostUsd = Number(todayRow?.total ?? 0);
     }
 
@@ -1128,8 +1280,8 @@ export class SqliteStateStore implements StateStore {
       .query(
         `INSERT INTO playbook_entries (
           id, repo_id, rule, scope_paths_json, source, source_ticket_id,
-          enabled, pinned, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          enabled, pinned, hit_count, last_matched_at, suspect, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           rule = excluded.rule,
           scope_paths_json = excluded.scope_paths_json,
@@ -1137,6 +1289,9 @@ export class SqliteStateStore implements StateStore {
           source_ticket_id = excluded.source_ticket_id,
           enabled = excluded.enabled,
           pinned = excluded.pinned,
+          hit_count = excluded.hit_count,
+          last_matched_at = excluded.last_matched_at,
+          suspect = excluded.suspect,
           updated_at = excluded.updated_at`,
       )
       .run(
@@ -1148,6 +1303,9 @@ export class SqliteStateStore implements StateStore {
         entry.sourceTicketId ?? null,
         entry.enabled ? 1 : 0,
         entry.pinned ? 1 : 0,
+        entry.hitCount ?? 0,
+        entry.lastMatchedAt ?? null,
+        entry.suspect ? 1 : 0,
         entry.createdAt,
         entry.updatedAt,
       );
@@ -1174,6 +1332,234 @@ export class SqliteStateStore implements StateStore {
   async deletePlaybookEntry(id: string): Promise<boolean> {
     const res = this.db.query("DELETE FROM playbook_entries WHERE id = ?").run(id);
     return Number(res.changes ?? 0) > 0;
+  }
+
+  async recordPlaybookHits(ids: string[], matchedAt: string): Promise<void> {
+    if (ids.length === 0) return;
+    const tx = this.db.transaction(() => {
+      const stmt = this.db.query(
+        "UPDATE playbook_entries SET hit_count = COALESCE(hit_count, 0) + 1, last_matched_at = ? WHERE id = ?",
+      );
+      for (const id of ids) {
+        stmt.run(matchedAt, id);
+      }
+    });
+    tx();
+  }
+
+  // --- Routines (A.1) ---
+  async saveRoutine(routine: RoutineSpec): Promise<void> {
+    this.db
+      .query(
+        `INSERT INTO routines (
+          id, repo_id, name, prompt, schedule_kind, interval_minutes, cron_expr,
+          active_hours_start, active_hours_end, allowed_paths_json, template, preferred_engine,
+          max_budget_usd, enabled, active_ticket_id, last_run_at, last_run_status, next_run_at,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          prompt = excluded.prompt,
+          schedule_kind = excluded.schedule_kind,
+          interval_minutes = excluded.interval_minutes,
+          cron_expr = excluded.cron_expr,
+          active_hours_start = excluded.active_hours_start,
+          active_hours_end = excluded.active_hours_end,
+          allowed_paths_json = excluded.allowed_paths_json,
+          template = excluded.template,
+          preferred_engine = excluded.preferred_engine,
+          max_budget_usd = excluded.max_budget_usd,
+          enabled = excluded.enabled,
+          active_ticket_id = excluded.active_ticket_id,
+          last_run_at = excluded.last_run_at,
+          last_run_status = excluded.last_run_status,
+          next_run_at = excluded.next_run_at,
+          updated_at = excluded.updated_at`,
+      )
+      .run(
+        routine.id,
+        routine.repoId,
+        routine.name,
+        routine.prompt,
+        routine.scheduleKind,
+        routine.intervalMinutes ?? null,
+        routine.cronExpr ?? null,
+        routine.activeHoursStart ?? null,
+        routine.activeHoursEnd ?? null,
+        JSON.stringify(routine.allowedPaths ?? ["**"]),
+        routine.template,
+        routine.preferredEngine ?? null,
+        routine.maxBudgetUsd,
+        routine.enabled ? 1 : 0,
+        routine.activeTicketId ?? null,
+        routine.lastRunAt ?? null,
+        routine.lastRunStatus ?? null,
+        routine.nextRunAt ?? null,
+        routine.createdAt,
+        routine.updatedAt,
+      );
+  }
+
+  async getRoutine(id: string): Promise<RoutineSpec | null> {
+    const row = this.db
+      .query("SELECT * FROM routines WHERE id = ?")
+      .get(id) as Record<string, unknown> | null;
+    return row ? mapRoutineRow(row) : null;
+  }
+
+  async listRoutines(repoId?: string): Promise<RoutineSpec[]> {
+    const rows = (
+      repoId
+        ? this.db.query("SELECT * FROM routines WHERE repo_id = ? ORDER BY created_at DESC").all(repoId)
+        : this.db.query("SELECT * FROM routines ORDER BY created_at DESC").all()
+    ) as Record<string, unknown>[];
+    return rows.map(mapRoutineRow);
+  }
+
+  async deleteRoutine(id: string): Promise<boolean> {
+    const tx = this.db.transaction(() => {
+      this.db.query("DELETE FROM routine_runs WHERE routine_id = ?").run(id);
+      return this.db.query("DELETE FROM routines WHERE id = ?").run(id);
+    });
+    const res = tx();
+    return Number(res.changes ?? 0) > 0;
+  }
+
+  async saveRoutineRun(run: RoutineRun): Promise<void> {
+    this.db
+      .query(
+        `INSERT INTO routine_runs (
+          id, routine_id, repo_id, status, summary, changed_files_json,
+          promoted_ticket_id, cost_usd, started_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          status = excluded.status,
+          summary = excluded.summary,
+          changed_files_json = excluded.changed_files_json,
+          promoted_ticket_id = excluded.promoted_ticket_id,
+          cost_usd = excluded.cost_usd,
+          completed_at = excluded.completed_at`,
+      )
+      .run(
+        run.id,
+        run.routineId,
+        run.repoId,
+        run.status,
+        run.summary,
+        JSON.stringify(run.changedFiles ?? []),
+        run.promotedTicketId ?? null,
+        run.costUsd,
+        run.startedAt,
+        run.completedAt ?? null,
+      );
+  }
+
+  async listRoutineRuns(filter?: {
+    repoId?: string;
+    routineId?: string;
+    limit?: number;
+  }): Promise<RoutineRun[]> {
+    const conditions: string[] = [];
+    const params: Array<string | number> = [];
+    if (filter?.repoId) {
+      conditions.push("repo_id = ?");
+      params.push(filter.repoId);
+    }
+    if (filter?.routineId) {
+      conditions.push("routine_id = ?");
+      params.push(filter.routineId);
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const limit = filter?.limit ?? 50;
+    const rows = this.db
+      .query(`SELECT * FROM routine_runs ${where} ORDER BY started_at DESC LIMIT ?`)
+      .all(...params, limit) as Record<string, unknown>[];
+    return rows.map(mapRoutineRunRow);
+  }
+
+  // --- Casebook (C.2) ---
+  async saveCasebookEntry(entry: CasebookEntry): Promise<void> {
+    this.db
+      .query(
+        `INSERT INTO casebook_entries (
+          id, repo_id, ticket_id, title, goal_summary, solution_summary, pitfalls_and_fixes,
+          changed_files_json, scope_paths_json, exported_symbols_json,
+          reverted, hit_count, last_matched_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(ticket_id) DO UPDATE SET
+          title = excluded.title,
+          goal_summary = excluded.goal_summary,
+          solution_summary = excluded.solution_summary,
+          pitfalls_and_fixes = excluded.pitfalls_and_fixes,
+          changed_files_json = excluded.changed_files_json,
+          scope_paths_json = excluded.scope_paths_json,
+          exported_symbols_json = excluded.exported_symbols_json,
+          reverted = excluded.reverted,
+          hit_count = excluded.hit_count,
+          last_matched_at = excluded.last_matched_at,
+          updated_at = excluded.updated_at`,
+      )
+      .run(
+        entry.id,
+        entry.repoId,
+        entry.ticketId,
+        entry.title,
+        entry.goalSummary,
+        entry.solutionSummary,
+        entry.pitfallsAndFixes ?? null,
+        JSON.stringify(entry.changedFiles ?? []),
+        JSON.stringify(entry.scopePaths ?? ["**"]),
+        JSON.stringify(entry.exportedSymbols ?? []),
+        entry.reverted ? 1 : 0,
+        entry.hitCount ?? 0,
+        entry.lastMatchedAt ?? null,
+        entry.createdAt,
+        entry.updatedAt,
+      );
+  }
+
+  async getCasebookEntry(id: string): Promise<CasebookEntry | null> {
+    const row = this.db
+      .query("SELECT * FROM casebook_entries WHERE id = ?")
+      .get(id) as Record<string, unknown> | null;
+    return row ? mapCasebookRow(row) : null;
+  }
+
+  async getCasebookEntryByTicket(ticketId: string): Promise<CasebookEntry | null> {
+    const row = this.db
+      .query("SELECT * FROM casebook_entries WHERE ticket_id = ?")
+      .get(ticketId) as Record<string, unknown> | null;
+    return row ? mapCasebookRow(row) : null;
+  }
+
+  async listCasebookEntries(
+    repoId: string,
+    options?: { includeReverted?: boolean },
+  ): Promise<CasebookEntry[]> {
+    const sql =
+      options?.includeReverted === false
+        ? "SELECT * FROM casebook_entries WHERE repo_id = ? AND COALESCE(reverted, 0) = 0 ORDER BY updated_at DESC"
+        : "SELECT * FROM casebook_entries WHERE repo_id = ? ORDER BY updated_at DESC";
+    const rows = this.db.query(sql).all(repoId) as Record<string, unknown>[];
+    return rows.map(mapCasebookRow);
+  }
+
+  async deleteCasebookEntry(id: string): Promise<boolean> {
+    const res = this.db.query("DELETE FROM casebook_entries WHERE id = ?").run(id);
+    return Number(res.changes ?? 0) > 0;
+  }
+
+  async recordCasebookHits(ids: string[], matchedAt: string): Promise<void> {
+    if (ids.length === 0) return;
+    const tx = this.db.transaction(() => {
+      const stmt = this.db.query(
+        "UPDATE casebook_entries SET hit_count = COALESCE(hit_count, 0) + 1, last_matched_at = ? WHERE id = ?",
+      );
+      for (const id of ids) {
+        stmt.run(matchedAt, id);
+      }
+    });
+    tx();
   }
 
   // --- System Settings ---
@@ -1213,6 +1599,9 @@ function mapRepoRow(r: Record<string, unknown>): RepoConfig {
     defaultTemplate: r.default_template as RepoConfig["defaultTemplate"],
     preferredImplementEngine: r.preferred_implement_engine as RepoConfig["preferredImplementEngine"],
     preferredReviewEngine: r.preferred_review_engine as RepoConfig["preferredReviewEngine"],
+    fallbackEngines: r.fallback_engines_json
+      ? (JSON.parse(String(r.fallback_engines_json)) as WorkerEngineId[])
+      : undefined,
     autoCleanupWorktree:
       r.auto_cleanup_worktree === undefined || r.auto_cleanup_worktree === null
         ? true
@@ -1322,6 +1711,28 @@ function mapTicketRow(r: Record<string, unknown>): Ticket {
       ? (String(r.preferred_engine) as Ticket["preferredEngine"])
       : undefined,
     activeEngine: r.active_engine ? (String(r.active_engine) as Ticket["activeEngine"]) : undefined,
+    failedEngines: r.failed_engines_json
+      ? (JSON.parse(String(r.failed_engines_json)) as WorkerEngineId[])
+      : undefined,
+    arenaMode: r.arena_mode ? Boolean(r.arena_mode) : undefined,
+    arenaCompetitorEngine: r.arena_competitor_engine
+      ? (String(r.arena_competitor_engine) as WorkerEngineId)
+      : undefined,
+    arenaCandidates: r.arena_candidates_json
+      ? (JSON.parse(String(r.arena_candidates_json)) as ArenaCandidateResult[])
+      : undefined,
+    arenaWinnerId: r.arena_winner_id ? String(r.arena_winner_id) : undefined,
+    routineId: r.routine_id ? String(r.routine_id) : undefined,
+    epicReplanCount:
+      r.epic_replan_count !== null && r.epic_replan_count !== undefined
+        ? Number(r.epic_replan_count)
+        : undefined,
+    epicReplanHistory: r.epic_replan_history_json
+      ? (JSON.parse(String(r.epic_replan_history_json)) as EpicReplanProposal[])
+      : undefined,
+    pendingEpicReplan: r.pending_epic_replan_json
+      ? (JSON.parse(String(r.pending_epic_replan_json)) as EpicReplanProposal)
+      : undefined,
     modelOverride: r.model_override ? String(r.model_override) : undefined,
     effortOverride: r.effort_override
       ? (String(r.effort_override) as Ticket["effortOverride"])
@@ -1411,6 +1822,87 @@ function mapPlaybookRow(r: Record<string, unknown>): PlaybookEntry {
     sourceTicketId: r.source_ticket_id ? String(r.source_ticket_id) : undefined,
     enabled: Boolean(r.enabled),
     pinned: Boolean(r.pinned),
+    hitCount:
+      r.hit_count !== null && r.hit_count !== undefined ? Number(r.hit_count) : 0,
+    lastMatchedAt: r.last_matched_at ? String(r.last_matched_at) : undefined,
+    suspect: Boolean(r.suspect),
+    createdAt: String(r.created_at),
+    updatedAt: String(r.updated_at),
+  };
+}
+
+function mapRoutineRow(r: Record<string, unknown>): RoutineSpec {
+  return {
+    id: String(r.id),
+    repoId: String(r.repo_id),
+    name: String(r.name),
+    prompt: String(r.prompt),
+    scheduleKind: String(r.schedule_kind) as RoutineSpec["scheduleKind"],
+    intervalMinutes:
+      r.interval_minutes !== null && r.interval_minutes !== undefined
+        ? Number(r.interval_minutes)
+        : undefined,
+    cronExpr: r.cron_expr ? String(r.cron_expr) : undefined,
+    activeHoursStart: r.active_hours_start ? String(r.active_hours_start) : undefined,
+    activeHoursEnd: r.active_hours_end ? String(r.active_hours_end) : undefined,
+    allowedPaths: r.allowed_paths_json
+      ? (JSON.parse(String(r.allowed_paths_json)) as string[])
+      : ["**"],
+    template: String(r.template) as RoutineSpec["template"],
+    preferredEngine: r.preferred_engine
+      ? (String(r.preferred_engine) as WorkerEngineId)
+      : undefined,
+    maxBudgetUsd: Number(r.max_budget_usd ?? 1.5),
+    enabled: Boolean(r.enabled),
+    activeTicketId: r.active_ticket_id ? String(r.active_ticket_id) : undefined,
+    lastRunAt: r.last_run_at ? String(r.last_run_at) : undefined,
+    lastRunStatus: r.last_run_status
+      ? (String(r.last_run_status) as RoutineRun["status"])
+      : undefined,
+    nextRunAt: r.next_run_at ? String(r.next_run_at) : undefined,
+    createdAt: String(r.created_at),
+    updatedAt: String(r.updated_at),
+  };
+}
+
+function mapRoutineRunRow(r: Record<string, unknown>): RoutineRun {
+  return {
+    id: String(r.id),
+    routineId: String(r.routine_id),
+    repoId: String(r.repo_id),
+    status: String(r.status) as RoutineRun["status"],
+    summary: String(r.summary),
+    changedFiles: r.changed_files_json
+      ? (JSON.parse(String(r.changed_files_json)) as string[])
+      : [],
+    promotedTicketId: r.promoted_ticket_id ? String(r.promoted_ticket_id) : undefined,
+    costUsd: Number(r.cost_usd ?? 0),
+    startedAt: String(r.started_at),
+    completedAt: r.completed_at ? String(r.completed_at) : undefined,
+  };
+}
+
+function mapCasebookRow(r: Record<string, unknown>): CasebookEntry {
+  return {
+    id: String(r.id),
+    repoId: String(r.repo_id),
+    ticketId: String(r.ticket_id),
+    title: String(r.title),
+    goalSummary: String(r.goal_summary),
+    solutionSummary: String(r.solution_summary),
+    pitfallsAndFixes: r.pitfalls_and_fixes ? String(r.pitfalls_and_fixes) : undefined,
+    changedFiles: r.changed_files_json
+      ? (JSON.parse(String(r.changed_files_json)) as string[])
+      : [],
+    scopePaths: r.scope_paths_json
+      ? (JSON.parse(String(r.scope_paths_json)) as string[])
+      : ["**"],
+    exportedSymbols: r.exported_symbols_json
+      ? (JSON.parse(String(r.exported_symbols_json)) as string[])
+      : [],
+    reverted: Boolean(r.reverted),
+    hitCount: Number(r.hit_count ?? 0),
+    lastMatchedAt: r.last_matched_at ? String(r.last_matched_at) : undefined,
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
   };
