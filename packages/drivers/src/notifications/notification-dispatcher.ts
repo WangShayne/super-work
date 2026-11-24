@@ -1,11 +1,12 @@
 import type {
+  InboxItemKind,
   KernelEvent,
   NotificationConfig,
   StateStore,
   SuperWorkKernel,
   SystemSetupConfig,
 } from "@super-work/core";
-import { nowIso } from "@super-work/core";
+import { nowIso, signActionToken } from "@super-work/core";
 
 export interface NotificationPayload {
   eventType: "inbox_pending" | "delivery_complete" | "ticket_failed" | "test";
@@ -14,7 +15,9 @@ export interface NotificationPayload {
   repoId?: string;
   ticketId?: string;
   inboxId?: string;
+  kind?: InboxItemKind;
   prUrl?: string;
+  actionUrl?: string;
   timestamp: string;
 }
 
@@ -50,18 +53,71 @@ export function buildWebhookRequest(
   secret?: string,
 ): { body: string; headers: Record<string, string>; platform: "feishu" | "slack" | "discord" | "generic" } {
   const platform = detectWebhookPlatform(url);
-  const formattedText = `[super-work] ${payload.title}\n${payload.body}${payload.prUrl ? `\nPR: ${payload.prUrl}` : ""}`;
+  const formattedText = `[super-work] ${payload.title}\n${payload.body}${payload.prUrl ? `\nPR: ${payload.prUrl}` : ""}${payload.actionUrl ? `\nAction: ${payload.actionUrl}` : ""}`;
 
   let rawPayload: unknown;
   if (platform === "feishu") {
-    rawPayload = {
-      msg_type: "text",
-      content: { text: formattedText },
-    };
+    if (payload.actionUrl) {
+      rawPayload = {
+        msg_type: "interactive",
+        card: {
+          header: {
+            template: payload.eventType === "ticket_failed" ? "red" : "indigo",
+            title: { tag: "plain_text", content: `[super-work] ${payload.title}` },
+          },
+          elements: [
+            { tag: "markdown", content: payload.body },
+            {
+              tag: "action",
+              actions: [
+                {
+                  tag: "button",
+                  text: { tag: "plain_text", content: "前往远程拍板 / Review & Decide" },
+                  type: "primary",
+                  url: payload.actionUrl,
+                },
+              ],
+            },
+          ],
+        },
+      };
+    } else {
+      rawPayload = {
+        msg_type: "text",
+        content: { text: formattedText },
+      };
+    }
   } else if (platform === "slack") {
-    rawPayload = { text: formattedText };
+    if (payload.actionUrl) {
+      rawPayload = {
+        text: formattedText,
+        blocks: [
+          {
+            type: "section",
+            text: { type: "mrkdwn", text: `*[super-work] ${payload.title}*\n${payload.body}` },
+          },
+          {
+            type: "actions",
+            elements: [
+              {
+                type: "button",
+                style: "primary",
+                text: { type: "plain_text", text: "Open Approval Card" },
+                url: payload.actionUrl,
+              },
+            ],
+          },
+        ],
+      };
+    } else {
+      rawPayload = { text: formattedText };
+    }
   } else if (platform === "discord") {
-    rawPayload = { content: formattedText };
+    rawPayload = {
+      content: payload.actionUrl
+        ? `**[super-work] ${payload.title}**\n${payload.body}\n[Open Approval Card](${payload.actionUrl})`
+        : formattedText,
+    };
   } else {
     rawPayload = payload;
   }
@@ -155,6 +211,21 @@ export class NotificationDispatcher {
     let payload: NotificationPayload | null = null;
 
     if (event.type === "inbox_created" && cfg.notifyOnInbox) {
+      let actionUrl: string | undefined;
+      if (cfg.publicBaseUrl?.trim() && cfg.actionSecret?.trim()) {
+        const ttlMin = Math.max(5, Math.min(24 * 60, cfg.actionTtlMinutes ?? 120));
+        const token = signActionToken(
+          {
+            inboxId: event.item.id,
+            ticketId: event.item.ticketId,
+            repoId: event.item.repoId,
+            kind: event.item.kind,
+            exp: Date.now() + ttlMin * 60_000,
+          },
+          cfg.actionSecret.trim(),
+        );
+        actionUrl = `${cfg.publicBaseUrl.trim().replace(/\/+$/, "")}/api/webhooks/action?token=${encodeURIComponent(token)}`;
+      }
       payload = {
         eventType: "inbox_pending",
         title: `Action Needed (${event.item.kind})`,
@@ -162,6 +233,8 @@ export class NotificationDispatcher {
         repoId: event.item.repoId,
         ticketId: event.item.ticketId,
         inboxId: event.item.id,
+        kind: event.item.kind,
+        actionUrl,
         timestamp: event.timestamp,
       };
     } else if (event.type === "outbox_sent" && cfg.notifyOnDelivery) {

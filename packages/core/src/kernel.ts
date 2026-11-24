@@ -45,6 +45,10 @@ import {
   isWithinActiveHours,
   parseRoutineProbeVerdict,
 } from "./routine.ts";
+import {
+  applyClarificationAnswers,
+  buildHeuristicSpecClarification,
+} from "./spec-studio.ts";
 import type {
   ArtifactStore,
   ControlPlaneLLM,
@@ -53,6 +57,7 @@ import type {
   IngestTriggerInput,
   KernelConfig,
   OutboxExecutor,
+  PreviewProvider,
   StateStore,
   WorkerDriver,
   WorkspaceProvider,
@@ -71,12 +76,15 @@ import type {
   OutboxEntry,
   PipelineTemplateId,
   PlaybookEntry,
+  PreviewSession,
   RepoConfig,
   RepoContractFile,
   ReviewReport,
   RoutineRun,
   RoutineScheduleKind,
   RoutineSpec,
+  SpecClarificationInput,
+  SpecClarificationResult,
   SpillArtifact,
   StageKind,
   StageRun,
@@ -109,6 +117,7 @@ export interface SuperWorkKernelDeps {
   llm: ControlPlaneLLM;
   drivers: WorkerDriver[];
   outboxExecutor: OutboxExecutor;
+  previewProvider?: PreviewProvider;
   config?: Partial<KernelConfig>;
 }
 
@@ -133,6 +142,7 @@ export class SuperWorkKernel {
   readonly router: EventIntakeRouter;
   readonly watchdog: TwoTierWatchdog;
   readonly outbox: OutboxProcessor;
+  readonly previewProvider?: PreviewProvider;
 
   private readonly drivers = new Map<WorkerEngineId, WorkerDriver>();
   private readonly listeners = new Set<(event: KernelEvent) => void>();
@@ -159,6 +169,10 @@ export class SuperWorkKernel {
     this.artifactStore = deps.artifactStore;
     this.workspace = deps.workspace;
     this.llm = deps.llm;
+    this.previewProvider = deps.previewProvider;
+    this.previewProvider?.subscribe?.((preview) => {
+      this.emitEvent({ type: "preview_updated", preview, timestamp: nowIso() });
+    });
 
     for (const driver of deps.drivers) {
       this.drivers.set(driver.engine, driver);
@@ -401,6 +415,7 @@ export class SuperWorkKernel {
       pending.push(this.outboxFlushPromise);
     }
     await Promise.allSettled(pending);
+    await this.previewProvider?.stopAll().catch(() => {});
   }
 
   async ingestTrigger(input: IngestTriggerInput): Promise<IngestResult> {
@@ -463,6 +478,14 @@ export class SuperWorkKernel {
         contract.smokeCheck !== undefined
           ? normalizeSmokeCheckConfig(contract.smokeCheck)
           : repo.smokeCheck,
+      previewCommand:
+        contract.previewCommand !== undefined
+          ? contract.previewCommand.trim() || undefined
+          : repo.previewCommand,
+      sandboxMode:
+        contract.sandboxMode !== undefined
+          ? contract.sandboxMode
+          : repo.sandboxMode,
       forbiddenPaths:
         contract.forbiddenPaths !== undefined
           ? contract.forbiddenPaths.map((s) => String(s).trim()).filter(Boolean)
@@ -541,6 +564,8 @@ export class SuperWorkKernel {
       verificationCommands: repo.verificationCommands ?? [],
       setupCommands: repo.setupCommands ?? [],
       ...(repo.smokeCheck ? { smokeCheck: repo.smokeCheck } : {}),
+      ...(repo.previewCommand?.trim() ? { previewCommand: repo.previewCommand.trim() } : {}),
+      ...(repo.sandboxMode ? { sandboxMode: repo.sandboxMode } : {}),
       forbiddenPaths: repo.forbiddenPaths ?? [],
       ...(repo.conventions?.trim() ? { conventions: repo.conventions.trim() } : {}),
       playbook: entries.map((e) => ({
@@ -921,6 +946,7 @@ export class SuperWorkKernel {
     };
     await this.stateStore.saveTicket(updated);
     this.emitEvent({ type: "ticket_updated", ticket: updated, timestamp: ts });
+    await this.previewProvider?.stopPreviewsForTicket(ticket.id).catch(() => {});
 
     // C.2 Self-Cleansing: flip linked Casebook entry to reverted warning and flag auto_healed Playbook rules as suspect
     const existingCase = await this.stateStore.getCasebookEntryByTicket(ticket.id);
@@ -999,6 +1025,7 @@ export class SuperWorkKernel {
     };
     await this.stateStore.saveTicket(updated);
     this.emitEvent({ type: "ticket_updated", ticket: updated, timestamp: updated.updatedAt });
+    await this.previewProvider?.stopPreviewsForTicket(ticketId).catch(() => {});
 
     const repo = await this.stateStore.getRepo(updated.repoId);
     if (repo?.autoCleanupWorktree !== false && updated.worktreePath) {
@@ -1017,6 +1044,7 @@ export class SuperWorkKernel {
       );
     }
 
+    await this.previewProvider?.stopPreviewsForTicket(ticketId).catch(() => {});
     const repo = await this.stateStore.getRepo(ticket.repoId);
     if (ticket.worktreePath) {
       await this.workspace.cleanupWorkspace(ticket.worktreePath, repo?.rootPath);
@@ -1042,11 +1070,16 @@ export class SuperWorkKernel {
   }
 
   async inspectWorktrees(repoId?: string): Promise<ManagedWorktreeItem[]> {
-    const [dirs, tickets, repos] = await Promise.all([
+    const [dirs, tickets, repos, previews] = await Promise.all([
       this.workspace.listWorktreeDirs(),
       this.stateStore.listTickets(),
       this.stateStore.listRepos(),
+      this.previewProvider ? this.previewProvider.listPreviews(repoId) : Promise.resolve([]),
     ]);
+    const previewByPath = new Map<string, PreviewSession>();
+    for (const p of previews) {
+      previewByPath.set(resolve(p.worktreePath), p);
+    }
     const reposById = new Map(repos.map((r) => [r.id, r]));
     const ticketsByPath = new Map<string, Ticket>();
     const ticketsById = new Map<string, Ticket>();
@@ -1068,6 +1101,7 @@ export class SuperWorkKernel {
     for (const dir of dirs) {
       const resolvedDir = resolve(dir);
       const matched = ticketsByPath.get(resolvedDir) ?? ticketsById.get(basename(resolvedDir));
+      const activePreview = previewByPath.get(resolvedDir);
       if (matched) {
         const repo = reposById.get(matched.repoId);
         const item: ManagedWorktreeItem = {
@@ -1081,6 +1115,7 @@ export class SuperWorkKernel {
           reclaimable:
             isTerminalTicketStatus(matched.status) && !this.activeTicketRuns.has(matched.id),
           isOrphan: false,
+          ...(activePreview ? { activePreview } : {}),
         };
         if (!repoId || item.repoId === repoId) {
           items.push(item);
@@ -1090,10 +1125,135 @@ export class SuperWorkKernel {
           path: dir,
           reclaimable: true,
           isOrphan: true,
+          ...(activePreview ? { activePreview } : {}),
         });
       }
     }
     return items;
+  }
+
+  // --- D.1 Pre-Flight Spec Clarification ---
+  async clarifySpec(input: SpecClarificationInput): Promise<SpecClarificationResult> {
+    const repo =
+      (await this.syncRepoContract(input.repoId).catch(() => null)) ??
+      (await this.stateStore.getRepo(input.repoId));
+    if (!repo) {
+      throw new Error(`Repository not found: ${input.repoId}`);
+    }
+    const [repoStructure, playbookEntries, casebookEntries] = await Promise.all([
+      this.workspace.getRepoStructureSummary
+        ? this.workspace.getRepoStructureSummary(repo.rootPath).catch(() => undefined)
+        : Promise.resolve(undefined),
+      this.stateStore.listPlaybookEntries(repo.id, { onlyEnabled: true }),
+      this.stateStore.listCasebookEntries(repo.id),
+    ]);
+
+    const playbookText = formatPlaybookContext(playbookEntries, ["**"], 8, 1200);
+    const caseSelection = selectRelevantCasesForContext({
+      cases: casebookEntries,
+      targetPaths: ["**"],
+      queryText: `${input.title} ${input.description}`,
+    });
+    const caseText = caseSelection.formattedMarkdown;
+
+    let spec: SpecClarificationResult;
+    if (this.llm.clarifySpec) {
+      spec = await this.llm.clarifySpec({
+        repo,
+        title: input.title,
+        description: input.description,
+        defaultTemplate: input.template ?? repo.defaultTemplate,
+        repoStructure,
+        playbookRules: playbookText || undefined,
+        casebookContext: caseText || undefined,
+        conventions: repo.conventions,
+      });
+      spec = {
+        ...spec,
+        matchedCaseTitles:
+          spec.matchedCaseTitles.length > 0
+            ? spec.matchedCaseTitles
+            : caseSelection.positiveCases.map((c) => c.title),
+      };
+    } else {
+      spec = buildHeuristicSpecClarification({
+        repo,
+        title: input.title,
+        description: input.description,
+        defaultTemplate: input.template ?? repo.defaultTemplate,
+        repoStructure,
+        casebookEntries,
+        playbookEntries,
+      });
+    }
+
+    return applyClarificationAnswers(spec, input.answers);
+  }
+
+  // --- B.2 Live Worktree Preview Lifecycle ---
+  async listPreviews(repoId?: string): Promise<PreviewSession[]> {
+    if (!this.previewProvider) return [];
+    return this.previewProvider.listPreviews(repoId);
+  }
+
+  async startTicketPreview(
+    ticketId: string,
+    candidateId?: string,
+    ttlMinutes?: number,
+  ): Promise<PreviewSession> {
+    if (!this.previewProvider) {
+      throw new Error("Live preview provider is not configured in this kernel.");
+    }
+    const ticket = await this.stateStore.getTicket(ticketId);
+    if (!ticket) {
+      throw new Error(`Ticket not found: ${ticketId}`);
+    }
+    const repo = await this.stateStore.getRepo(ticket.repoId);
+    if (!repo) {
+      throw new Error(`Repository not found: ${ticket.repoId}`);
+    }
+
+    let worktreePath = ticket.worktreePath;
+    let label = `${ticket.title}`;
+    if (candidateId && ticket.arenaCandidates) {
+      const cand = ticket.arenaCandidates.find((c) => c.candidateId === candidateId);
+      if (!cand || !cand.worktreePath) {
+        throw new Error(`Arena candidate '${candidateId}' has no active worktree.`);
+      }
+      worktreePath = cand.worktreePath;
+      label = `${ticket.title} [${cand.engine} · ${cand.candidateId}]`;
+    }
+    if (!worktreePath || !existsSync(worktreePath)) {
+      throw new Error(`No active worktree directory exists on disk for ticket ${ticketId}.`);
+    }
+
+    const command =
+      repo.previewCommand?.trim() || repo.smokeCheck?.startCommand?.trim() || "";
+    if (!command) {
+      throw new Error(
+        `Repository '${repo.name}' has neither previewCommand nor smokeCheck.startCommand configured.`,
+      );
+    }
+
+    return this.previewProvider.startPreview({
+      repoId: repo.id,
+      ticketId: ticket.id,
+      candidateId,
+      label,
+      worktreePath,
+      command,
+      ttlMinutes,
+    });
+  }
+
+  async renewPreview(previewId: string, ttlMinutes?: number): Promise<PreviewSession | null> {
+    if (!this.previewProvider) return null;
+    return this.previewProvider.renewPreview(previewId, ttlMinutes);
+  }
+
+  async stopPreview(previewId: string): Promise<PreviewSession | null> {
+    if (!this.previewProvider) return null;
+    return this.previewProvider.stopPreview(previewId);
   }
 
   async gcWorktrees(options?: { repoId?: string }): Promise<WorktreeGcResult> {
@@ -1471,6 +1631,7 @@ export class SuperWorkKernel {
         );
         return { item: resolvedItem, ticket: adopted };
       } else {
+        await this.previewProvider?.stopPreviewsForTicket(nextTicket.id).catch(() => {});
         await this.cleanupArenaCandidateWorktrees(candidates, repo?.rootPath);
         nextTicket = {
           ...nextTicket,
@@ -1951,6 +2112,8 @@ export class SuperWorkKernel {
           isResume: Boolean(existingSessionId),
           model: effectiveModel,
           effort: effectiveEffort,
+          sandboxMode: repo.sandboxMode ?? "balanced",
+          rootRepoPath: repo.rootPath,
         },
         abortController.signal,
       );
@@ -2760,6 +2923,12 @@ export class SuperWorkKernel {
         worktreePath,
         commands,
         ticket.mandate.maxDurationSec,
+        {
+          sandboxMode: repo.sandboxMode ?? "balanced",
+          forbiddenPaths: ticket.mandate.forbiddenPaths,
+          allowNetwork: ticket.mandate.allowNetwork,
+          rootRepoPath: repo.rootPath,
+        },
       );
 
       const logBody = staticResult.results
@@ -2817,23 +2986,64 @@ export class SuperWorkKernel {
     }
 
     const smokeRes = await this.workspace.runSmokeCheck!(worktreePath, smokeCfg!);
+
+    if (
+      smokeRes.rawScreenshots &&
+      smokeRes.rawScreenshots.length > 0 &&
+      this.artifactStore.writeBinarySpill
+    ) {
+      for (const shot of smokeRes.rawScreenshots) {
+        try {
+          const shotArt = await this.artifactStore.writeBinarySpill(
+            {
+              ticketId: ticket.id,
+              stageRunId: stageRun.id,
+              kind: "screenshot",
+              summary: `Browser gate screenshot (${shot.path})`,
+              ext: "png",
+            },
+            shot.bytes,
+          );
+          await this.stateStore.saveArtifact(
+            shotArt,
+            `screenshot ${shot.path} ${smokeRes.browserResult?.summary ?? ""}`,
+          );
+          artifacts.push(shotArt);
+          const routeObj = smokeRes.browserResult?.routes?.[shot.routeIndex];
+          if (routeObj) {
+            routeObj.screenshotArtifactId = shotArt.id;
+          }
+        } catch {
+          // Do not fail pipeline solely on screenshot persistence I/O error
+        }
+      }
+    }
+    const sanitizedSmokeRes = {
+      ...smokeRes,
+      rawScreenshots: undefined,
+    };
+    delete sanitizedSmokeRes.rawScreenshots;
+
     const smokeLogLines = [
       `Start Command: ${smokeCfg!.startCommand}`,
-      `Ready URL: ${smokeRes.readyUrl}`,
-      `Port: ${smokeRes.port}`,
-      `Startup Duration: ${smokeRes.startupDurationMs}ms`,
-      smokeRes.probeStatus !== undefined ? `Probe Status: ${smokeRes.probeStatus}` : "",
-      `Result: ${smokeRes.ok ? "PASS" : "FAIL"} — ${smokeRes.summary}`,
-      smokeRes.checkResults.length > 0
+      `Ready URL: ${sanitizedSmokeRes.readyUrl}`,
+      `Port: ${sanitizedSmokeRes.port}`,
+      `Startup Duration: ${sanitizedSmokeRes.startupDurationMs}ms`,
+      sanitizedSmokeRes.probeStatus !== undefined ? `Probe Status: ${sanitizedSmokeRes.probeStatus}` : "",
+      `Result: ${sanitizedSmokeRes.ok ? "PASS" : "FAIL"} — ${sanitizedSmokeRes.summary}`,
+      sanitizedSmokeRes.browserResult
+        ? `Browser Check: ${sanitizedSmokeRes.browserResult.summary}`
+        : "",
+      sanitizedSmokeRes.checkResults.length > 0
         ? "\nCheck Commands:\n" +
-          smokeRes.checkResults
+          sanitizedSmokeRes.checkResults
             .map(
               (r) =>
                 `$ ${r.command}\n[exit=${r.exitCode}, duration=${r.durationMs}ms]\n${r.output || "(no output)"}`,
             )
             .join("\n---\n")
         : "",
-      smokeRes.serverOutputTail ? `\nServer Output Tail:\n${smokeRes.serverOutputTail}` : "",
+      sanitizedSmokeRes.serverOutputTail ? `\nServer Output Tail:\n${sanitizedSmokeRes.serverOutputTail}` : "",
     ]
       .filter(Boolean)
       .join("\n");
@@ -2843,7 +3053,7 @@ export class SuperWorkKernel {
         ticketId: ticket.id,
         stageRunId: stageRun.id,
         kind: "smoke_log",
-        summary: `${smokeRes.ok ? "PASS" : "FAIL"} smoke check (${smokeRes.readyUrl})`,
+        summary: `${sanitizedSmokeRes.ok ? "PASS" : "FAIL"} smoke check (${sanitizedSmokeRes.readyUrl})`,
         ext: "log",
       },
       smokeLogLines,
@@ -2852,15 +3062,15 @@ export class SuperWorkKernel {
     artifacts.push(smokeArtifact);
 
     const combinedResult: VerificationRunResult = {
-      ok: smokeRes.ok,
-      results: [...(staticResult?.results ?? []), ...smokeRes.checkResults],
-      failedCommand: smokeRes.ok
+      ok: sanitizedSmokeRes.ok,
+      results: [...(staticResult?.results ?? []), ...sanitizedSmokeRes.checkResults],
+      failedCommand: sanitizedSmokeRes.ok
         ? undefined
-        : (smokeRes.failedStep ?? `smoke:${smokeCfg!.startCommand}`),
-      summary: smokeRes.ok
-        ? [staticResult?.summary, smokeRes.summary].filter(Boolean).join("\n")
-        : `Smoke check failed (${smokeRes.failedStep ?? smokeCfg!.startCommand}): ${smokeRes.summary}`,
-      smokeResult: smokeRes,
+        : (sanitizedSmokeRes.failedStep ?? `smoke:${smokeCfg!.startCommand}`),
+      summary: sanitizedSmokeRes.ok
+        ? [staticResult?.summary, sanitizedSmokeRes.summary].filter(Boolean).join("\n")
+        : `Smoke check failed (${sanitizedSmokeRes.failedStep ?? smokeCfg!.startCommand}): ${sanitizedSmokeRes.summary}`,
+      smokeResult: sanitizedSmokeRes,
     };
 
     this.emitEvent({
@@ -2871,7 +3081,7 @@ export class SuperWorkKernel {
       timestamp: nowIso(),
     });
 
-    return { passed: smokeRes.ok, artifacts, result: combinedResult };
+    return { passed: sanitizedSmokeRes.ok, artifacts, result: combinedResult };
   }
 
   private async enqueueDeliveryOutbox(ticket: Ticket, repoArg?: RepoConfig): Promise<void> {
@@ -3862,6 +4072,8 @@ export class SuperWorkKernel {
             prompt,
             mandate,
             isResume: false,
+            sandboxMode: repo.sandboxMode ?? "balanced",
+            rootRepoPath: repo.rootPath,
           },
           ac.signal,
         )) {
@@ -4213,6 +4425,7 @@ export class SuperWorkKernel {
     candidates: ArenaCandidateResult[],
     fromTiebreakInbox = false,
   ): Promise<Ticket> {
+    await this.previewProvider?.stopPreviewsForTicket(ticket.id).catch(() => {});
     if (repo) {
       await this.cleanupArenaCandidateWorktrees(candidates, repo.rootPath, winner.candidateId);
     }
@@ -4236,7 +4449,10 @@ export class SuperWorkKernel {
       summary: `[Arena Winner: ${winner.engine}, score ${winner.score}] ${winner.summary}`,
       changedFiles: winner.changedFiles,
       verificationPassed: winner.verificationPassed,
-      spillArtifactIds: winner.diffArtifactId ? [winner.diffArtifactId] : [],
+      spillArtifactIds: [
+        ...(winner.diffArtifactId ? [winner.diffArtifactId] : []),
+        ...(winner.screenshotArtifactIds ?? []),
+      ],
       createdAt: nowIso(),
     };
 
@@ -4389,6 +4605,8 @@ export class SuperWorkKernel {
             prompt,
             mandate: ticket.mandate,
             isResume: false,
+            sandboxMode: repo.sandboxMode ?? "balanced",
+            rootRepoPath: repo.rootPath,
           },
           abortController.signal,
         )) {
@@ -4493,6 +4711,10 @@ export class SuperWorkKernel {
         recordedDiffId = diffArt.id;
       }
 
+      const screenshotArtifactIds = gate.artifacts
+        .filter((a) => a.kind === "screenshot")
+        .map((a) => a.id);
+
       return {
         candidateId: spec.id,
         engine: spec.engine,
@@ -4508,6 +4730,7 @@ export class SuperWorkKernel {
         costUsd,
         summary: textSummary.slice(0, 400),
         diffArtifactId: recordedDiffId,
+        ...(screenshotArtifactIds.length > 0 ? { screenshotArtifactIds } : {}),
       };
     };
 

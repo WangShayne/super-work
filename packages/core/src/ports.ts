@@ -16,6 +16,7 @@ import type {
   OutboxStatus,
   PipelineTemplateId,
   PlaybookEntry,
+  PreviewSession,
   ReasoningEffort,
   RepoConfig,
   RepoContractFile,
@@ -23,8 +24,10 @@ import type {
   RevertResult,
   RoutineRun,
   RoutineSpec,
+  SandboxMode,
   SmokeCheckConfig,
   SmokeCheckResult,
+  SpecClarificationResult,
   SpillArtifact,
   StageKind,
   StageRun,
@@ -103,6 +106,16 @@ export interface ControlPlaneLLM {
     ticket: Ticket;
     candidates: ArenaCandidateResult[];
   }): Promise<{ winnerCandidateId: string; rationale: string } | null>;
+  clarifySpec?(input: {
+    repo: RepoConfig;
+    title: string;
+    description: string;
+    defaultTemplate: PipelineTemplateId;
+    repoStructure?: string;
+    playbookRules?: string;
+    casebookContext?: string;
+    conventions?: string;
+  }): Promise<SpecClarificationResult>;
 }
 
 export interface WorkerDriver {
@@ -127,6 +140,13 @@ export interface WorkspaceProvider {
     worktreePath: string,
     commands: string[],
     timeoutSec?: number,
+    options?: {
+      env?: NodeJS.ProcessEnv;
+      sandboxMode?: SandboxMode;
+      forbiddenPaths?: string[];
+      allowNetwork?: boolean;
+      rootRepoPath?: string;
+    },
   ): Promise<VerificationRunResult>;
   runSmokeCheck?(
     worktreePath: string,
@@ -253,6 +273,29 @@ export interface ArtifactStore {
     content: string,
   ): Promise<SpillArtifact>;
   readSpill(storageUri: string): Promise<string>;
+  writeBinarySpill?(
+    meta: { ticketId: string; stageRunId?: string; kind: ArtifactKind; summary: string; ext?: string },
+    data: Uint8Array,
+  ): Promise<SpillArtifact>;
+  readBinarySpill?(storageUri: string): Promise<Uint8Array>;
+}
+
+export interface PreviewProvider {
+  subscribe?(listener: (session: PreviewSession) => void): () => void;
+  startPreview(input: {
+    repoId: string;
+    ticketId: string;
+    candidateId?: string;
+    label: string;
+    worktreePath: string;
+    command: string;
+    ttlMinutes?: number;
+  }): Promise<PreviewSession>;
+  stopPreview(previewId: string): Promise<PreviewSession | null>;
+  stopPreviewsForTicket(ticketId: string): Promise<number>;
+  renewPreview(previewId: string, ttlMinutes?: number): Promise<PreviewSession | null>;
+  listPreviews(repoId?: string): Promise<PreviewSession[]>;
+  stopAll(): Promise<void>;
 }
 
 export interface OutboxExecutor {

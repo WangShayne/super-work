@@ -129,6 +129,7 @@ export function App() {
       "routine_run_updated",
       "casebook_updated",
       "epic_replanned",
+      "preview_updated",
       "ticket_created",
       "ticket_updated",
       "stage_started",

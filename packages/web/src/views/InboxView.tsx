@@ -4,6 +4,7 @@ import {
   Check,
   CheckCircle2,
   DollarSign,
+  ExternalLink,
   Eye,
   FileCode2,
   FileJson2,
@@ -11,15 +12,24 @@ import {
   GitPullRequest,
   Kanban,
   Layers,
+  Play,
   Plus,
   Send,
   ShieldAlert,
   ShieldPlus,
   Sparkles,
+  Square,
   X,
 } from "lucide-react";
+import { api } from "../api.ts";
 import { formatInboxKind, formatInboxStatus, useI18n } from "../i18n.tsx";
-import type { ArenaCandidateResult, EpicReplanProposal, InboxItem, Ticket } from "../types.ts";
+import type {
+  ArenaCandidateResult,
+  EpicReplanProposal,
+  InboxItem,
+  PreviewSession,
+  Ticket,
+} from "../types.ts";
 
 interface InboxViewProps {
   items: InboxItem[];
@@ -96,9 +106,60 @@ export function InboxView({
   const { locale, t } = useI18n();
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [previewBusyKey, setPreviewBusyKey] = useState<string | null>(null);
+  const [previewsByKey, setPreviewsByKey] = useState<Record<string, PreviewSession>>({});
+  const [previewErrors, setPreviewErrors] = useState<Record<string, string>>({});
 
   const pending = items.filter((i) => i.status === "pending");
   const resolved = items.filter((i) => i.status !== "pending").slice(0, 10);
+
+  const handleLaunchPreview = async (
+    pKey: string,
+    ticketId: string,
+    candidateId?: string,
+  ) => {
+    setPreviewBusyKey(pKey);
+    setPreviewErrors((prev) => {
+      const next = { ...prev };
+      delete next[pKey];
+      return next;
+    });
+    try {
+      const res = await api.startPreview({ ticketId, candidateId });
+      setPreviewsByKey((prev) => ({ ...prev, [pKey]: res.preview }));
+    } catch (err) {
+      setPreviewErrors((prev) => ({
+        ...prev,
+        [pKey]: err instanceof Error ? err.message : String(err),
+      }));
+    } finally {
+      setPreviewBusyKey(null);
+    }
+  };
+
+  const handleStopPreview = async (pKey: string, previewId: string) => {
+    setPreviewBusyKey(pKey);
+    setPreviewErrors((prev) => {
+      const next = { ...prev };
+      delete next[pKey];
+      return next;
+    });
+    try {
+      await api.stopPreview(previewId);
+      setPreviewsByKey((prev) => {
+        const next = { ...prev };
+        delete next[pKey];
+        return next;
+      });
+    } catch (err) {
+      setPreviewErrors((prev) => ({
+        ...prev,
+        [pKey]: err instanceof Error ? err.message : String(err),
+      }));
+    } finally {
+      setPreviewBusyKey(null);
+    }
+  };
 
   const handleAction = async (
     id: string,
@@ -265,6 +326,71 @@ export function InboxView({
                             {cand.rationale && (
                               <p className="text-[11px] text-zinc-300">{cand.rationale}</p>
                             )}
+                            {cand.screenshotArtifactIds && cand.screenshotArtifactIds.length > 0 && (
+                              <div className="grid grid-cols-1 gap-1.5 pt-1">
+                                {cand.screenshotArtifactIds.slice(0, 2).map((aid) => (
+                                  <a
+                                    key={aid}
+                                    href={api.getArtifactRawUrl(aid)}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="block rounded border border-zinc-800 overflow-hidden bg-zinc-900 hover:border-indigo-500/50 transition"
+                                  >
+                                    <img
+                                      src={api.getArtifactRawUrl(aid)}
+                                      alt={`${cand.engine} screenshot`}
+                                      className="w-full max-h-36 object-cover object-top"
+                                    />
+                                  </a>
+                                ))}
+                              </div>
+                            )}
+                            {cand.worktreePath && (() => {
+                              const pKey = `${item.ticketId}:${cand.candidateId}`;
+                              const activePrv = previewsByKey[pKey];
+                              const pErr = previewErrors[pKey];
+                              return (
+                                <div className="pt-1 space-y-1">
+                                  {activePrv ? (
+                                    <div className="flex items-center justify-between gap-2 rounded bg-zinc-900 border border-sky-500/30 px-2 py-1 text-[10px]">
+                                      <a
+                                        href={activePrv.url}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="inline-flex items-center gap-1 font-mono text-sky-300 hover:underline truncate"
+                                      >
+                                        {activePrv.url}
+                                        <ExternalLink className="w-2.5 h-2.5" />
+                                      </a>
+                                      <button
+                                        type="button"
+                                        disabled={previewBusyKey === pKey}
+                                        onClick={() => void handleStopPreview(pKey, activePrv.id)}
+                                        className="inline-flex items-center gap-1 text-rose-300 hover:text-rose-200 shrink-0"
+                                      >
+                                        <Square className="w-2.5 h-2.5" />
+                                        {t("preview.stopBtn")}
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      disabled={previewBusyKey === pKey}
+                                      onClick={() =>
+                                        void handleLaunchPreview(pKey, item.ticketId, cand.candidateId)
+                                      }
+                                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-[10px] text-sky-300 disabled:opacity-50"
+                                    >
+                                      <Play className="w-2.5 h-2.5" />
+                                      {previewBusyKey === pKey
+                                        ? t("preview.starting")
+                                        : t("preview.startBtn")}
+                                    </button>
+                                  )}
+                                  {pErr && <div className="text-[10px] text-rose-400">{pErr}</div>}
+                                </div>
+                              );
+                            })()}
                           </div>
                         ))}
                       </div>

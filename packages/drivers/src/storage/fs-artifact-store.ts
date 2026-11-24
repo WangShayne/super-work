@@ -38,4 +38,33 @@ export class FsArtifactStore implements ArtifactStore {
   async readSpill(storageUri: string): Promise<string> {
     return readFile(storageUri, "utf8");
   }
+
+  async writeBinarySpill(
+    meta: { ticketId: string; stageRunId?: string; kind: ArtifactKind; summary: string; ext?: string },
+    data: Uint8Array,
+  ): Promise<SpillArtifact> {
+    const id = newId("art");
+    const ext = meta.ext ?? "bin";
+    const dir = join(this.baseDir, meta.ticketId);
+    await mkdir(dir, { recursive: true });
+
+    const filePath = join(dir, `${id}.${ext}`);
+    await writeFile(filePath, data);
+
+    return {
+      id,
+      ticketId: meta.ticketId,
+      stageRunId: meta.stageRunId,
+      kind: meta.kind,
+      summary: meta.summary,
+      storageUri: filePath,
+      byteSize: data.byteLength,
+      createdAt: nowIso(),
+    };
+  }
+
+  async readBinarySpill(storageUri: string): Promise<Uint8Array> {
+    const buf = await readFile(storageUri);
+    return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+  }
 }

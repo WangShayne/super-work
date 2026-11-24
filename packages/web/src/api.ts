@@ -18,6 +18,7 @@ import type {
   OutboxEntry,
   PipelineTemplateId,
   PlaybookEntry,
+  PreviewSession,
   PublicSetupStatus,
   ReasoningEffort,
   RepoConfig,
@@ -27,7 +28,9 @@ import type {
   RoutineRun,
   RoutineScheduleKind,
   RoutineSpec,
+  SandboxMode,
   SmokeCheckConfig,
+  SpecClarificationResult,
   SpillArtifact,
   Ticket,
   TicketDetailResponse,
@@ -89,13 +92,21 @@ export const api = {
     id: string,
     patch: Omit<
       Partial<RepoConfig>,
-      "maxConcurrentWorkers" | "dailyBudgetUsd" | "conventions" | "smokeCheck" | "fallbackEngines"
+      | "maxConcurrentWorkers"
+      | "dailyBudgetUsd"
+      | "conventions"
+      | "smokeCheck"
+      | "fallbackEngines"
+      | "previewCommand"
+      | "sandboxMode"
     > & {
       maxConcurrentWorkers?: number | null;
       dailyBudgetUsd?: number | null;
       conventions?: string | null;
       smokeCheck?: SmokeCheckConfig | null;
       fallbackEngines?: WorkerEngineId[] | null;
+      previewCommand?: string | null;
+      sandboxMode?: SandboxMode | null;
     },
   ) =>
     request<{ repo: RepoConfig }>(`/api/repos/${id}`, {
@@ -237,7 +248,45 @@ export const api = {
     arenaCompetitorEngine?: WorkerEngineId;
     modelOverride?: string;
     effortOverride?: ReasoningEffort;
+    acceptanceCriteria?: string[];
   }) => request<{ ticket: Ticket }>("/api/tickets", { method: "POST", body: JSON.stringify(payload) }),
+
+  clarifySpec: (payload: {
+    repoId: string;
+    title: string;
+    description: string;
+    template?: PipelineTemplateId;
+    answers?: Record<string, string>;
+  }) =>
+    request<{ clarification: SpecClarificationResult }>("/api/specs/clarify", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  listPreviews: (repoId?: string, ticketId?: string) => {
+    const params = new URLSearchParams();
+    if (repoId) params.set("repoId", repoId);
+    if (ticketId) params.set("ticketId", ticketId);
+    const qs = params.toString();
+    return request<{ previews: PreviewSession[] }>(qs ? `/api/previews?${qs}` : "/api/previews");
+  },
+
+  startPreview: (payload: { ticketId: string; candidateId?: string; ttlMinutes?: number }) =>
+    request<{ preview: PreviewSession }>("/api/previews", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  renewPreview: (id: string, ttlMinutes?: number) =>
+    request<{ preview: PreviewSession }>(`/api/previews/${encodeURIComponent(id)}/renew`, {
+      method: "POST",
+      body: JSON.stringify(ttlMinutes ? { ttlMinutes } : {}),
+    }),
+
+  stopPreview: (id: string) =>
+    request<{ preview: PreviewSession }>(`/api/previews/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
 
   getTicketDetail: (id: string) => request<TicketDetailResponse>(`/api/tickets/${id}`),
 
@@ -356,6 +405,13 @@ export const api = {
 
   getArtifact: (id: string) => request<{ artifact: SpillArtifact; content: string }>(`/api/artifacts/${id}`),
 
+  getArtifactRawUrl: (id: string) => {
+    const token = getAuthToken();
+    return token
+      ? `/api/artifacts/${encodeURIComponent(id)}/raw?token=${encodeURIComponent(token)}`
+      : `/api/artifacts/${encodeURIComponent(id)}/raw`;
+  },
+
   listOutbox: (repoId?: string) =>
     request<{ entries: OutboxEntry[] }>(
       repoId ? `/api/outbox?repoId=${encodeURIComponent(repoId)}` : "/api/outbox",
@@ -391,7 +447,12 @@ export const api = {
     claudeProfile?: EngineModelProfile;
     codexProfile?: EngineModelProfile;
     opencodeProfile?: EngineModelProfile;
-    notifications?: Partial<NotificationConfig> & { clearWebhookSecret?: boolean };
+    notifications?: Partial<NotificationConfig> & {
+      clearWebhookSecret?: boolean;
+      clearActionSecret?: boolean;
+      generateActionSecret?: boolean;
+      clearGithubWebhookSecret?: boolean;
+    };
   }) =>
     request<PublicSetupStatus>("/api/setup/configure", {
       method: "POST",

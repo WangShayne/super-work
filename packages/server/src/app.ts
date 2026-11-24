@@ -6,10 +6,14 @@ import { streamSSE } from "hono/streaming";
 import {
   ROUTINE_PRESET_TEMPLATES,
   classifyPlaybookHealth,
+  handleMcpJsonRpcMessage,
   newId,
   normalizePlaybookRuleText,
   normalizeSmokeCheckConfig,
   nowIso,
+  parseGithubWebhookEvent,
+  verifyActionToken,
+  verifyWebhookHmacSha256,
 } from "@super-work/core";
 import type {
   ArtifactStore,
@@ -22,6 +26,7 @@ import type {
   InboxItemStatus,
   KernelEvent,
   LlmProviderPreset,
+  McpToolHost,
   NotificationConfig,
   OutboxStatus,
   PipelineTemplateId,
@@ -31,6 +36,7 @@ import type {
   RepoConfig,
   RoutineScheduleKind,
   RoutineSpec,
+  SandboxMode,
   SmokeCheckConfig,
   StateStore,
   SuperWorkKernel,
@@ -99,7 +105,7 @@ export function toPublicSetupStatus(
     ...DEFAULT_NOTIFICATION_CONFIG,
     ...(notifications ?? {}),
   };
-  const { webhookSecret, ...notifRest } = mergedNotifs;
+  const { webhookSecret, actionSecret, githubWebhookSecret, ...notifRest } = mergedNotifs;
   return {
     initialized: cfg.initialized,
     activeLlmProvider,
@@ -112,10 +118,23 @@ export function toPublicSetupStatus(
         ...notifRest,
         hasWebhookSecret: Boolean(webhookSecret?.trim()),
         maskedWebhookSecret: maskApiKey(webhookSecret),
+        hasActionSecret: Boolean(actionSecret?.trim()),
+        maskedActionSecret: maskApiKey(actionSecret),
+        hasGithubWebhookSecret: Boolean(githubWebhookSecret?.trim()),
+        maskedGithubWebhookSecret: maskApiKey(githubWebhookSecret),
       },
     },
     scanReport,
   };
+}
+
+function escapeHtml(raw: string): string {
+  return raw
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function resolveEventTarget(
@@ -134,6 +153,8 @@ function resolveEventTarget(
       return { repoId: event.repoId, ticketId: event.entry.ticketId };
     case "epic_replanned":
       return { repoId: event.repoId, ticketId: event.epicId };
+    case "preview_updated":
+      return { repoId: event.preview.repoId, ticketId: event.preview.ticketId };
     case "trigger_ingested":
       return { repoId: event.trigger.repoId };
     case "ticket_created":
@@ -177,7 +198,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
 
   if (expectedToken) {
     app.use("/api/*", async (c, next) => {
-      if (c.req.method === "OPTIONS") {
+      if (c.req.method === "OPTIONS" || c.req.path.startsWith("/api/webhooks/")) {
         return next();
       }
       const authHeader = c.req.header("authorization") ?? "";
@@ -191,7 +212,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
   }
 
   app.get("/api/health", async (c) => {
-    const [repos, tickets, pendingInbox, pendingOutbox, availableEngines, worktrees, routines] =
+    const [repos, tickets, pendingInbox, pendingOutbox, availableEngines, worktrees, routines, previews] =
       await Promise.all([
         stateStore.listRepos(),
         stateStore.listTickets(),
@@ -200,6 +221,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         kernel.getAvailableEngines(),
         kernel.inspectWorktrees(),
         stateStore.listRoutines(),
+        kernel.listPreviews(),
       ]);
     return c.json({
       ok: true,
@@ -213,6 +235,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         activeWorktrees: worktrees.filter((w) => !w.reclaimable).length,
         reclaimableWorktrees: worktrees.filter((w) => w.reclaimable).length,
         activeRoutines: routines.filter((r) => r.enabled).length,
+        activePreviews: previews.length,
       },
       timestamp: nowIso(),
     });
@@ -274,7 +297,12 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       claudeProfile?: EngineModelProfile;
       codexProfile?: EngineModelProfile;
       opencodeProfile?: EngineModelProfile;
-      notifications?: Partial<NotificationConfig> & { clearWebhookSecret?: boolean };
+      notifications?: Partial<NotificationConfig> & {
+        clearWebhookSecret?: boolean;
+        clearActionSecret?: boolean;
+        generateActionSecret?: boolean;
+        clearGithubWebhookSecret?: boolean;
+      };
     };
 
     const existing = await stateStore.getSystemSetting<SystemSetupConfig>("setup_config");
@@ -300,6 +328,22 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       ...DEFAULT_NOTIFICATION_CONFIG,
       ...(existing?.notifications ?? {}),
     };
+    const nextActionSecret = body.notifications?.generateActionSecret
+      ? `${crypto.randomUUID().replace(/-/g, "")}${crypto.randomUUID().replace(/-/g, "")}`
+      : body.notifications?.clearActionSecret
+        ? undefined
+        : body.notifications?.actionSecret?.trim()
+          ? body.notifications.actionSecret.trim()
+          : existingNotifs.actionSecret;
+    const rawTtl =
+      body.notifications?.actionTtlMinutes !== undefined
+        ? Number(body.notifications.actionTtlMinutes)
+        : existingNotifs.actionTtlMinutes;
+    const nextTtl =
+      typeof rawTtl === "number" && Number.isFinite(rawTtl) && rawTtl >= 5
+        ? Math.min(24 * 60, Math.floor(rawTtl))
+        : existingNotifs.actionTtlMinutes;
+
     const nextNotifications: NotificationConfig = body.notifications
       ? {
           macosEnabled: body.notifications.macosEnabled ?? existingNotifs.macosEnabled,
@@ -316,6 +360,17 @@ export function createServerApp(deps: ServerAppDeps): Hono {
           notifyOnInbox: body.notifications.notifyOnInbox ?? existingNotifs.notifyOnInbox,
           notifyOnDelivery: body.notifications.notifyOnDelivery ?? existingNotifs.notifyOnDelivery,
           notifyOnFailure: body.notifications.notifyOnFailure ?? existingNotifs.notifyOnFailure,
+          publicBaseUrl:
+            body.notifications.publicBaseUrl !== undefined
+              ? body.notifications.publicBaseUrl.trim().replace(/\/+$/, "") || undefined
+              : existingNotifs.publicBaseUrl,
+          actionSecret: nextActionSecret,
+          githubWebhookSecret: body.notifications.clearGithubWebhookSecret
+            ? undefined
+            : body.notifications.githubWebhookSecret?.trim()
+              ? body.notifications.githubWebhookSecret.trim()
+              : existingNotifs.githubWebhookSecret,
+          actionTtlMinutes: nextTtl,
         }
       : existingNotifs;
 
@@ -411,6 +466,11 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         ? body.setupCommands.map((s) => String(s).trim()).filter(Boolean)
         : [],
       smokeCheck: normalizeSmokeCheckConfig(body.smokeCheck),
+      previewCommand: body.previewCommand?.trim() || undefined,
+      sandboxMode:
+        body.sandboxMode === "off" || body.sandboxMode === "balanced" || body.sandboxMode === "strict"
+          ? body.sandboxMode
+          : undefined,
       forbiddenPaths: Array.isArray(body.forbiddenPaths)
         ? body.forbiddenPaths.map((s) => String(s).trim()).filter(Boolean)
         : [],
@@ -440,13 +500,21 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     }
     const patch = (await c.req.json()) as Omit<
       Partial<RepoConfig>,
-      "maxConcurrentWorkers" | "dailyBudgetUsd" | "conventions" | "smokeCheck" | "fallbackEngines"
+      | "maxConcurrentWorkers"
+      | "dailyBudgetUsd"
+      | "conventions"
+      | "smokeCheck"
+      | "fallbackEngines"
+      | "previewCommand"
+      | "sandboxMode"
     > & {
       maxConcurrentWorkers?: number | null;
       dailyBudgetUsd?: number | null;
       conventions?: string | null;
       smokeCheck?: SmokeCheckConfig | null;
       fallbackEngines?: WorkerEngineId[] | null;
+      previewCommand?: string | null;
+      sandboxMode?: SandboxMode | null;
     };
     const updated: RepoConfig = {
       ...existing,
@@ -478,6 +546,18 @@ export function createServerApp(deps: ServerAppDeps): Hono {
             ? undefined
             : normalizeSmokeCheckConfig(patch.smokeCheck)
           : existing.smokeCheck,
+      previewCommand:
+        patch.previewCommand !== undefined
+          ? patch.previewCommand?.trim() || undefined
+          : existing.previewCommand,
+      sandboxMode:
+        patch.sandboxMode !== undefined
+          ? patch.sandboxMode === "off" ||
+            patch.sandboxMode === "balanced" ||
+            patch.sandboxMode === "strict"
+            ? patch.sandboxMode
+            : undefined
+          : existing.sandboxMode,
       forbiddenPaths:
         patch.forbiddenPaths !== undefined
           ? patch.forbiddenPaths.map((s) => String(s).trim()).filter(Boolean)
@@ -876,20 +956,21 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     }
   });
 
-  app.get("/api/tickets/:id", async (c) => {
-    const id = c.req.param("id");
+  const buildTicketDetail = async (id: string) => {
     const ticket = await stateStore.getTicket(id);
     if (!ticket) {
-      return c.json({ error: "Ticket not found" }, 404);
+      return null;
     }
-    const [repo, allRepos, stageRuns, artifacts, inboxItems, outboxEntries] = await Promise.all([
-      stateStore.getRepo(ticket.repoId),
-      stateStore.listRepos(),
-      stateStore.listStageRuns(ticket.id),
-      stateStore.listArtifacts(ticket.id),
-      stateStore.listInboxItems({ ticketId: ticket.id }),
-      stateStore.listOutboxEntries({ ticketId: ticket.id }),
-    ]);
+    const [repo, allRepos, stageRuns, artifacts, inboxItems, outboxEntries, allPreviews] =
+      await Promise.all([
+        stateStore.getRepo(ticket.repoId),
+        stateStore.listRepos(),
+        stateStore.listStageRuns(ticket.id),
+        stateStore.listArtifacts(ticket.id),
+        stateStore.listInboxItems({ ticketId: ticket.id }),
+        stateStore.listOutboxEntries({ ticketId: ticket.id }),
+        kernel.listPreviews(ticket.repoId),
+      ]);
 
     const reposById = new Map(allRepos.map((r) => [r.id, r]));
     const upstreamDependencies: Array<{
@@ -974,17 +1055,28 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       }
     }
 
-    return c.json({
+    const previews = allPreviews.filter((p) => p.ticketId === ticket.id);
+
+    return {
       ticket,
       stageRuns,
       artifacts,
       inboxItems,
       outboxEntries,
       diff,
+      previews,
       ...(subtasks ? { subtasks } : {}),
       ...(upstreamDependencies.length > 0 ? { upstreamDependencies } : {}),
       ...(arenaCandidateDiffs ? { arenaCandidateDiffs } : {}),
-    });
+    };
+  };
+
+  app.get("/api/tickets/:id", async (c) => {
+    const detail = await buildTicketDetail(c.req.param("id"));
+    if (!detail) {
+      return c.json({ error: "Ticket not found" }, 404);
+    }
+    return c.json(detail);
   });
 
   app.post("/api/tickets/:id/message", async (c) => {
@@ -1172,8 +1264,540 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     if (!artifact) {
       return c.json({ error: "Artifact not found" }, 404);
     }
+    if (artifact.kind === "screenshot" || artifact.storageUri.endsWith(".png")) {
+      return c.json({
+        artifact,
+        content: `[binary screenshot artifact: ${artifact.byteSize} bytes — view via /api/artifacts/${artifact.id}/raw]`,
+      });
+    }
     const content = await artifactStore.readSpill(artifact.storageUri);
     return c.json({ artifact, content });
+  });
+
+  app.get("/api/artifacts/:id/raw", async (c) => {
+    const id = c.req.param("id");
+    const artifact = await stateStore.getArtifact(id);
+    if (!artifact) {
+      return c.json({ error: "Artifact not found" }, 404);
+    }
+    const isPng = artifact.kind === "screenshot" || artifact.storageUri.toLowerCase().endsWith(".png");
+    if (artifactStore.readBinarySpill) {
+      const bytes = await artifactStore.readBinarySpill(artifact.storageUri);
+      return new Response(new Uint8Array(bytes), {
+        headers: {
+          "Content-Type": isPng ? "image/png" : "text/plain; charset=utf-8",
+          "Cache-Control": "private, max-age=3600",
+        },
+      });
+    }
+    const text = await artifactStore.readSpill(artifact.storageUri);
+    return c.text(text);
+  });
+
+  // --- D.1 Pre-Flight Spec Studio ---
+  app.post("/api/specs/clarify", async (c) => {
+    const body = (await c.req.json()) as {
+      repoId?: string;
+      title?: string;
+      description?: string;
+      template?: PipelineTemplateId;
+      answers?: Record<string, string>;
+    };
+    if (!body.repoId || !body.title?.trim() || !body.description?.trim()) {
+      return c.json({ error: "repoId, title, and description are required" }, 400);
+    }
+    try {
+      const clarification = await kernel.clarifySpec({
+        repoId: body.repoId,
+        title: body.title.trim(),
+        description: body.description.trim(),
+        template: body.template,
+        answers: body.answers,
+      });
+      return c.json({ clarification });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("Repository not found") ? 404 : 400);
+    }
+  });
+
+  // --- B.2 Live Worktree Preview Manager ---
+  app.get("/api/previews", async (c) => {
+    const repoId = c.req.query("repoId") || undefined;
+    const ticketId = c.req.query("ticketId") || undefined;
+    const all = await kernel.listPreviews(repoId);
+    const previews = ticketId ? all.filter((p) => p.ticketId === ticketId) : all;
+    return c.json({ previews });
+  });
+
+  app.post("/api/previews", async (c) => {
+    const body = (await c.req.json()) as {
+      ticketId?: string;
+      candidateId?: string;
+      ttlMinutes?: number;
+    };
+    if (!body.ticketId) {
+      return c.json({ error: "ticketId is required" }, 400);
+    }
+    try {
+      const preview = await kernel.startTicketPreview(
+        body.ticketId,
+        body.candidateId,
+        body.ttlMinutes,
+      );
+      return c.json({ preview }, 201);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.post("/api/previews/:id/renew", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { ttlMinutes?: number };
+    const preview = await kernel.renewPreview(c.req.param("id"), body.ttlMinutes);
+    if (!preview) {
+      return c.json({ error: "Active preview not found" }, 404);
+    }
+    return c.json({ preview });
+  });
+
+  app.delete("/api/previews/:id", async (c) => {
+    const preview = await kernel.stopPreview(c.req.param("id"));
+    if (!preview) {
+      return c.json({ error: "Preview not found" }, 404);
+    }
+    return c.json({ preview });
+  });
+
+  // --- A.1 Native MCP JSON-RPC 2.0 Streamable HTTP Endpoint ---
+  const buildMcpHost = (): McpToolHost => ({
+    getHealth: async () => {
+      const [repos, tickets, pendingInbox, pendingOutbox, availableEngines, previews] =
+        await Promise.all([
+          stateStore.listRepos(),
+          stateStore.listTickets(),
+          stateStore.listInboxItems({ status: "pending" }),
+          stateStore.listOutboxEntries({ status: "pending" }),
+          kernel.getAvailableEngines(),
+          kernel.listPreviews(),
+        ]);
+      return {
+        ok: true,
+        llmProvider: getActiveProviderName(),
+        availableEngines,
+        counts: {
+          repos: repos.length,
+          tickets: tickets.length,
+          pendingInbox: pendingInbox.length,
+          pendingOutbox: pendingOutbox.length,
+          activePreviews: previews.length,
+        },
+      };
+    },
+    listRepos: () => stateStore.listRepos(),
+    clarifySpec: (args) =>
+      kernel.clarifySpec({
+        repoId: String(args.repoId ?? ""),
+        title: String(args.title ?? ""),
+        description: String(args.description ?? ""),
+        template: args.template as PipelineTemplateId | undefined,
+        answers: (args.answers as Record<string, string> | undefined) ?? undefined,
+      }),
+    dispatchTicket: async (args) => {
+      const ticket = await kernel.createDirectTicket({
+        repoId: String(args.repoId ?? ""),
+        title: String(args.title ?? ""),
+        description: String(args.description ?? ""),
+        template: args.template as PipelineTemplateId | undefined,
+        allowedPaths: Array.isArray(args.allowedPaths)
+          ? args.allowedPaths.map(String)
+          : undefined,
+        dependsOn: Array.isArray(args.dependsOn) ? args.dependsOn.map(String) : undefined,
+        preferredEngine: args.preferredEngine as WorkerEngineId | undefined,
+        arenaMode: Boolean(args.arenaMode),
+        arenaCompetitorEngine: args.arenaCompetitorEngine as WorkerEngineId | undefined,
+        acceptanceCriteria: Array.isArray(args.acceptanceCriteria)
+          ? args.acceptanceCriteria.map(String)
+          : undefined,
+      });
+      void kernel.tick();
+      return { ticket };
+    },
+    dispatchEpic: async (args) => {
+      const repoId = String(args.repoId ?? "");
+      const title = String(args.title ?? "");
+      const description = String(args.description ?? "");
+      const template = args.template as PipelineTemplateId | undefined;
+      if (args.previewOnly) {
+        return { plan: await kernel.previewEpic({ repoId, title, description, template }) };
+      }
+      const res = await kernel.createEpic({
+        repoId,
+        title,
+        description,
+        template,
+        epicDeliveryMode: args.epicDeliveryMode as EpicDeliveryMode | undefined,
+      });
+      void kernel.tick();
+      return res;
+    },
+    listTickets: async (args) => {
+      const tickets = await stateStore.listTickets({
+        repoId: args.repoId ? String(args.repoId) : undefined,
+        status: args.status ? (String(args.status) as TicketStatus) : undefined,
+      });
+      return { tickets };
+    },
+    getTicketDetail: async (args) => {
+      const detail = await buildTicketDetail(String(args.ticketId ?? ""));
+      if (!detail) throw new Error(`Ticket not found: ${String(args.ticketId ?? "")}`);
+      return detail;
+    },
+    listInbox: async (args) => {
+      const items = await stateStore.listInboxItems({
+        repoId: args.repoId ? String(args.repoId) : undefined,
+        status: args.status ? (String(args.status) as InboxItemStatus) : undefined,
+      });
+      return { items };
+    },
+    resolveInbox: async (args) => {
+      const decision = args.decision === "rejected" ? "rejected" : "approved";
+      const res = await kernel.resolveInboxItem(
+        String(args.inboxId ?? ""),
+        decision,
+        args.note ? String(args.note) : undefined,
+        {
+          expandMandate: args.expandMandate !== undefined ? Boolean(args.expandMandate) : undefined,
+          arenaWinnerId: args.arenaWinnerId ? String(args.arenaWinnerId) : undefined,
+          deliveryAction: args.deliveryAction as "local_merge" | "push_and_create_pr" | undefined,
+          budgetIncreaseUsd:
+            typeof args.budgetIncreaseUsd === "number" ? args.budgetIncreaseUsd : undefined,
+        },
+      );
+      void kernel.tick();
+      void kernel.outbox.processDueEntries();
+      return res;
+    },
+    searchMemoryAndCasebook: async (args) => {
+      const query = String(args.query ?? "");
+      const repoId = args.repoId ? String(args.repoId) : undefined;
+      const limit = typeof args.limit === "number" ? args.limit : 10;
+      const memoryHits = await stateStore.searchMemory(query, limit, repoId);
+      const repos = repoId ? [await stateStore.getRepo(repoId)] : await stateStore.listRepos();
+      const qLower = query.toLowerCase();
+      const cases = [];
+      for (const r of repos) {
+        if (!r) continue;
+        const list = await stateStore.listCasebookEntries(r.id, { includeReverted: true });
+        for (const c of list) {
+          if (
+            !qLower ||
+            `${c.title} ${c.goalSummary} ${c.solutionSummary} ${c.changedFiles.join(" ")}`
+              .toLowerCase()
+              .includes(qLower)
+          ) {
+            cases.push(c);
+          }
+        }
+      }
+      return { memoryHits, cases: cases.slice(0, limit) };
+    },
+    triggerRoutine: (args) => kernel.triggerRoutineNow(String(args.routineId ?? "")),
+    managePreview: async (args) => {
+      const action = String(args.action ?? "list");
+      if (action === "list") {
+        return {
+          previews: await kernel.listPreviews(args.repoId ? String(args.repoId) : undefined),
+        };
+      }
+      if (action === "start") {
+        return {
+          preview: await kernel.startTicketPreview(
+            String(args.ticketId ?? ""),
+            args.candidateId ? String(args.candidateId) : undefined,
+            typeof args.ttlMinutes === "number" ? args.ttlMinutes : undefined,
+          ),
+        };
+      }
+      if (action === "renew") {
+        return {
+          preview: await kernel.renewPreview(
+            String(args.previewId ?? ""),
+            typeof args.ttlMinutes === "number" ? args.ttlMinutes : undefined,
+          ),
+        };
+      }
+      if (action === "stop") {
+        return {
+          preview: await kernel.stopPreview(String(args.previewId ?? "")),
+        };
+      }
+      throw new Error(`Unknown preview action: ${action}`);
+    },
+  });
+
+  app.get("/api/mcp", (c) => {
+    return c.json({
+      name: "super-work",
+      version: "0.8.0",
+      transport: "streamable-http",
+      endpoint: "/api/mcp",
+    });
+  });
+
+  app.post("/api/mcp", async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json(
+        { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } },
+        400,
+      );
+    }
+    const response = await handleMcpJsonRpcMessage(body, buildMcpHost());
+    if (response === null) {
+      return c.body(null, 202);
+    }
+    return c.json(response, 200);
+  });
+
+  // --- A.2 Inbound GitHub Webhook & Signed Mobile Remote Approval ---
+  app.post("/api/webhooks/github", async (c) => {
+    const rawBody = await c.req.text();
+    const savedSetup = await stateStore.getSystemSetting<SystemSetupConfig>("setup_config");
+    const secret =
+      savedSetup?.notifications?.githubWebhookSecret?.trim() ||
+      process.env.GITHUB_WEBHOOK_SECRET?.trim() ||
+      "";
+    if (!secret) {
+      return c.json(
+        { error: "Configure githubWebhookSecret in Setup before accepting inbound GitHub webhooks." },
+        403,
+      );
+    }
+    const sig = c.req.header("x-hub-signature-256") ?? c.req.header("X-Hub-Signature-256");
+    if (!verifyWebhookHmacSha256(rawBody, sig, secret)) {
+      return c.json({ error: "Invalid GitHub webhook signature" }, 401);
+    }
+
+    const eventName = c.req.header("x-github-event") ?? "";
+    if (eventName === "ping") {
+      return c.json({ ok: true, pong: true });
+    }
+
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(rawBody) as Record<string, unknown>;
+    } catch {
+      return c.json({ error: "Invalid JSON payload" }, 400);
+    }
+
+    const repos = await stateStore.listRepos();
+    const parsed = parseGithubWebhookEvent(eventName, payload, repos, c.req.query("repoId"));
+    if (!parsed.trigger) {
+      return c.json({ ok: true, ignored: true, reason: parsed.ignoredReason }, 200);
+    }
+    const result = await kernel.ingestTrigger(parsed.trigger);
+    void kernel.tick();
+    return c.json({ ok: true, repoId: parsed.matchedRepo?.id, result }, 202);
+  });
+
+  const getActionSecret = async (): Promise<string> => {
+    const savedSetup = await stateStore.getSystemSetting<SystemSetupConfig>("setup_config");
+    return (
+      savedSetup?.notifications?.actionSecret?.trim() ||
+      process.env.SUPER_WORK_ACTION_SECRET?.trim() ||
+      savedSetup?.notifications?.webhookSecret?.trim() ||
+      ""
+    );
+  };
+
+  app.get("/api/webhooks/action", async (c) => {
+    const tokenParam = c.req.query("token") ?? "";
+    const secret = await getActionSecret();
+    const verified = verifyActionToken(tokenParam, secret);
+    if (!verified.valid) {
+      return c.html(
+        `<!doctype html><html><body style="font-family:system-ui;background:#09090b;color:#f4f4f5;padding:24px;max-width:560px;margin:auto"><h2>Super-Work Remote Action</h2><p style="color:#fb7185">${escapeHtml(verified.reason)}</p></body></html>`,
+        401,
+      );
+    }
+    const item = await stateStore.getInboxItem(verified.payload.inboxId);
+    if (!item) {
+      return c.html(
+        `<!doctype html><html><body style="font-family:system-ui;background:#09090b;color:#f4f4f5;padding:24px;max-width:560px;margin:auto"><h2>Inbox Item Not Found</h2></body></html>`,
+        404,
+      );
+    }
+    const ticket = await stateStore.getTicket(item.ticketId);
+    const alreadyDone = item.status !== "pending";
+    const candidates = ticket?.arenaCandidates ?? [];
+    const safeToken = escapeHtml(tokenParam);
+
+    const buttonsHtml = alreadyDone
+      ? `<p style="padding:12px;border-radius:8px;background:#18181b;border:1px solid #27272a;color:#34d399">Already resolved: <strong>${escapeHtml(item.status)}</strong>${item.resolutionNote ? ` (${escapeHtml(item.resolutionNote)})` : ""}</p>`
+      : item.kind === "arena_tiebreak" && candidates.length >= 2
+        ? `<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px">
+            <button name="decision" value="approved_cand_a" style="padding:10px 16px;border-radius:8px;border:0;background:#4f46e5;color:#fff;font-weight:600;cursor:pointer">Adopt A (${escapeHtml(candidates[0]!.engine)} · ${candidates[0]!.score})</button>
+            <button name="decision" value="approved_cand_b" style="padding:10px 16px;border-radius:8px;border:0;background:#059669;color:#fff;font-weight:600;cursor:pointer">Adopt B (${escapeHtml(candidates[1]!.engine)} · ${candidates[1]!.score})</button>
+            <button name="decision" value="rejected" style="padding:10px 16px;border-radius:8px;border:1px solid #3f3f46;background:#18181b;color:#fca5a5;cursor:pointer">Reject</button>
+           </div>`
+        : `<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px">
+            <button name="decision" value="approved" style="padding:10px 18px;border-radius:8px;border:0;background:#4f46e5;color:#fff;font-weight:600;cursor:pointer">Approve & Continue</button>
+            ${item.kind === "mandate_violation" ? `<button name="decision" value="approved_expand" style="padding:10px 16px;border-radius:8px;border:0;background:#d97706;color:#fff;font-weight:600;cursor:pointer">Expand Mandate & Continue</button>` : ""}
+            <button name="decision" value="rejected" style="padding:10px 18px;border-radius:8px;border:1px solid #3f3f46;background:#18181b;color:#fca5a5;cursor:pointer">Reject</button>
+           </div>`;
+
+    return c.html(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Super-Work Decision</title></head>
+<body style="font-family:system-ui,-apple-system,sans-serif;background:#09090b;color:#f4f4f5;padding:20px;max-width:600px;margin:0 auto;line-height:1.5">
+  <div style="border:1px solid #27272a;background:#18181b;border-radius:14px;padding:20px">
+    <div style="font-size:12px;color:#818cf8;font-family:monospace">${escapeHtml(item.kind)} · ${escapeHtml(item.ticketId)}</div>
+    <h2 style="margin:8px 0;font-size:18px">${escapeHtml(item.title)}</h2>
+    <p style="color:#a1a1aa;font-size:14px;white-space:pre-wrap">${escapeHtml(item.summary)}</p>
+    ${
+      alreadyDone
+        ? buttonsHtml
+        : `<form method="POST" action="/api/webhooks/action" style="margin-top:16px">
+            <input type="hidden" name="token" value="${safeToken}" />
+            <label style="display:block;font-size:12px;color:#a1a1aa;margin-bottom:6px">Optional Note / Instruction</label>
+            <textarea name="note" rows="2" placeholder="Optional guidance for worker..." style="width:100%;box-sizing:border-box;background:#09090b;color:#f4f4f5;border:1px solid #3f3f46;border-radius:8px;padding:8px"></textarea>
+            ${buttonsHtml}
+          </form>`
+    }
+  </div>
+</body></html>`);
+  });
+
+  app.post("/api/webhooks/action", async (c) => {
+    const contentType = c.req.header("content-type") ?? "";
+    const accept = c.req.header("accept") ?? "";
+    let params: Record<string, unknown> = {};
+
+    if (contentType.includes("application/json")) {
+      params = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    } else if (contentType.includes("application/x-www-form-urlencoded")) {
+      const formBody = await c.req.text();
+      const sp = new URLSearchParams(formBody);
+      for (const [k, v] of sp.entries()) {
+        params[k] = v;
+      }
+    } else {
+      const parsed = await c.req.parseBody().catch(() => ({}));
+      params = parsed as Record<string, unknown>;
+    }
+
+    const tokenParam = String(params.token ?? c.req.query("token") ?? "");
+    const secret = await getActionSecret();
+    const verified = verifyActionToken(tokenParam, secret);
+    if (!verified.valid) {
+      return c.json({ error: verified.reason }, 401);
+    }
+
+    const existingItem = await stateStore.getInboxItem(verified.payload.inboxId);
+    if (!existingItem) {
+      return c.json({ error: "Inbox item not found" }, 404);
+    }
+
+    const wantsHtml =
+      contentType.includes("application/x-www-form-urlencoded") ||
+      (accept.includes("text/html") && !contentType.includes("application/json"));
+
+    if (existingItem.status !== "pending") {
+      if (wantsHtml) {
+        return c.html(
+          `<!doctype html><html><body style="font-family:system-ui;background:#09090b;color:#f4f4f5;padding:24px;max-width:560px;margin:auto"><h2>Already Resolved</h2><p>Status: <strong>${escapeHtml(existingItem.status)}</strong></p></body></html>`,
+        );
+      }
+      return c.json({ ok: true, alreadyResolved: true, item: existingItem });
+    }
+
+    const rawDecision = String(params.decision ?? "approved");
+    const decision: "approved" | "rejected" =
+      rawDecision === "rejected" || rawDecision === "reject" ? "rejected" : "approved";
+    const expandMandate =
+      rawDecision === "approved_expand" || Boolean(params.expandMandate);
+    const arenaWinnerId =
+      rawDecision === "approved_cand_a"
+        ? "cand_a"
+        : rawDecision === "approved_cand_b"
+          ? "cand_b"
+          : params.arenaWinnerId
+            ? String(params.arenaWinnerId)
+            : undefined;
+    const note = params.note ? String(params.note).trim() || undefined : undefined;
+
+    const resolved = await kernel.resolveInboxItem(existingItem.id, decision, note, {
+      expandMandate: expandMandate || undefined,
+      arenaWinnerId,
+      deliveryAction: params.deliveryAction as "local_merge" | "push_and_create_pr" | undefined,
+      budgetIncreaseUsd:
+        params.budgetIncreaseUsd !== undefined ? Number(params.budgetIncreaseUsd) : undefined,
+    });
+    void kernel.tick();
+    void kernel.outbox.processDueEntries();
+
+    if (wantsHtml) {
+      return c.html(
+        `<!doctype html><html><body style="font-family:system-ui;background:#09090b;color:#f4f4f5;padding:24px;max-width:560px;margin:auto"><div style="border:1px solid #065f46;background:#064e3b33;border-radius:12px;padding:20px"><h2 style="color:#34d399;margin-top:0">Decision Recorded</h2><p>${escapeHtml(resolved.item.title)} -> <strong>${escapeHtml(resolved.item.status)}</strong> (Ticket: ${escapeHtml(resolved.ticket.status)})</p></div></body></html>`,
+      );
+    }
+    return c.json({ ok: true, ...resolved });
+  });
+
+  app.post("/api/webhooks/chatops", async (c) => {
+    const rawBody = await c.req.text();
+    const secret = await getActionSecret();
+    if (!secret) {
+      return c.json(
+        { error: "Configure actionSecret or webhookSecret before accepting ChatOps callbacks." },
+        403,
+      );
+    }
+    const sig = c.req.header("x-super-work-signature") ?? c.req.header("X-Super-Work-Signature");
+    if (!verifyWebhookHmacSha256(rawBody, sig, secret)) {
+      return c.json({ error: "Invalid ChatOps HMAC signature" }, 401);
+    }
+
+    let body: {
+      action?: string;
+      inboxId?: string;
+      decision?: "approved" | "rejected";
+      note?: string;
+      expandMandate?: boolean;
+      arenaWinnerId?: string;
+      deliveryAction?: "local_merge" | "push_and_create_pr";
+      budgetIncreaseUsd?: number;
+      ticketId?: string;
+      message?: string;
+    };
+    try {
+      body = JSON.parse(rawBody);
+    } catch {
+      return c.json({ error: "Invalid JSON payload" }, 400);
+    }
+
+    if (body.action === "reply_ticket") {
+      if (!body.ticketId || !body.message?.trim()) {
+        return c.json({ error: "ticketId and message are required for reply_ticket" }, 400);
+      }
+      const ticket = await kernel.sendThreadMessage(body.ticketId, body.message.trim());
+      void kernel.tick();
+      return c.json({ ok: true, ticket });
+    }
+
+    if (!body.inboxId || (body.decision !== "approved" && body.decision !== "rejected")) {
+      return c.json({ error: "inboxId and decision ('approved'|'rejected') are required" }, 400);
+    }
+    const res = await kernel.resolveInboxItem(body.inboxId, body.decision, body.note, {
+      expandMandate: body.expandMandate,
+      arenaWinnerId: body.arenaWinnerId,
+      deliveryAction: body.deliveryAction,
+      budgetIncreaseUsd: body.budgetIncreaseUsd,
+    });
+    void kernel.tick();
+    void kernel.outbox.processDueEntries();
+    return c.json({ ok: true, ...res });
   });
 
   // --- Transactional Outbox ---

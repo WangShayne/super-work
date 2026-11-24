@@ -8,6 +8,18 @@ export type EpicDeliveryMode = "unified" | "per_subtask";
 
 export type SmokeTriggerMode = "every_gate" | "delivery_only";
 
+export type SandboxMode = "off" | "balanced" | "strict";
+
+export interface BrowserCheckConfig {
+  enabled: boolean;
+  paths?: string[];
+  viewportWidth?: number;
+  viewportHeight?: number;
+  waitForSelector?: string;
+  failOnConsoleError?: boolean;
+  timeoutMs?: number;
+}
+
 export interface SmokeCheckConfig {
   enabled: boolean;
   startCommand: string;
@@ -15,6 +27,7 @@ export interface SmokeCheckConfig {
   startupTimeoutSec?: number;
   checkCommands?: string[];
   triggerMode?: SmokeTriggerMode;
+  browserCheck?: BrowserCheckConfig;
 }
 
 export interface HandoverDigest {
@@ -83,6 +96,8 @@ export interface RepoContractFile {
   verificationCommands?: string[];
   setupCommands?: string[];
   smokeCheck?: SmokeCheckConfig;
+  previewCommand?: string;
+  sandboxMode?: SandboxMode;
   forbiddenPaths?: string[];
   conventions?: string;
   playbook?: SharedPlaybookRuleSpec[];
@@ -169,6 +184,7 @@ export interface ArenaCandidateResult {
   score: number;
   recommended?: boolean;
   rationale?: string;
+  screenshotArtifactIds?: string[];
 }
 
 export type EpicReplanMutationKind = "update_subtask" | "add_subtask" | "skip_subtask";
@@ -254,6 +270,10 @@ export interface NotificationConfig {
   notifyOnInbox: boolean;
   notifyOnDelivery: boolean;
   notifyOnFailure: boolean;
+  publicBaseUrl?: string;
+  actionSecret?: string;
+  githubWebhookSecret?: string;
+  actionTtlMinutes?: number;
 }
 
 export interface RepoConfig {
@@ -271,6 +291,8 @@ export interface RepoConfig {
   verificationCommands?: string[];
   setupCommands?: string[];
   smokeCheck?: SmokeCheckConfig;
+  previewCommand?: string;
+  sandboxMode?: SandboxMode;
   forbiddenPaths?: string[];
   conventions?: string;
   contractSyncedHash?: string;
@@ -381,7 +403,7 @@ export interface SpillArtifact {
   id: string;
   ticketId: string;
   stageRunId?: string;
-  kind: "transcript" | "diff" | "test_log" | "smoke_log" | "review_report" | "handover";
+  kind: "transcript" | "diff" | "test_log" | "smoke_log" | "review_report" | "handover" | "screenshot";
   summary: string;
   storageUri: string;
   byteSize: number;
@@ -428,6 +450,26 @@ export interface OutboxEntry {
   updatedAt: string;
 }
 
+export type PreviewSessionStatus = "starting" | "ready" | "failed" | "stopped";
+
+export interface PreviewSession {
+  id: string;
+  repoId: string;
+  ticketId: string;
+  candidateId?: string;
+  label: string;
+  worktreePath: string;
+  command: string;
+  port: number;
+  url: string;
+  status: PreviewSessionStatus;
+  pid?: number;
+  outputTail: string;
+  error?: string;
+  startedAt: string;
+  expiresAt: string;
+}
+
 export interface HealthResponse {
   ok: boolean;
   llmProvider: string;
@@ -440,6 +482,7 @@ export interface HealthResponse {
     activeWorktrees?: number;
     reclaimableWorktrees?: number;
     activeRoutines?: number;
+    activePreviews?: number;
   };
   timestamp: string;
 }
@@ -454,6 +497,7 @@ export interface ManagedWorktreeItem {
   branchName?: string;
   reclaimable: boolean;
   isOrphan: boolean;
+  activePreview?: PreviewSession;
 }
 
 export interface WorktreeGcResult {
@@ -512,6 +556,7 @@ export interface TicketDetailResponse {
   inboxItems: InboxItem[];
   outboxEntries: OutboxEntry[];
   diff: string;
+  previews?: PreviewSession[];
   subtasks?: Ticket[];
   arenaCandidateDiffs?: Record<string, string>;
   upstreamDependencies?: Array<{
@@ -577,15 +622,43 @@ export interface PublicSetupStatus {
     claudeProfile?: EngineModelProfile;
     codexProfile?: EngineModelProfile;
     opencodeProfile?: EngineModelProfile;
-    notifications?: Omit<NotificationConfig, "webhookSecret"> & {
+    notifications?: Omit<
+      NotificationConfig,
+      "webhookSecret" | "actionSecret" | "githubWebhookSecret"
+    > & {
       hasWebhookSecret: boolean;
       maskedWebhookSecret?: string;
+      hasActionSecret: boolean;
+      maskedActionSecret?: string;
+      hasGithubWebhookSecret: boolean;
+      maskedGithubWebhookSecret?: string;
     };
     updatedAt: string;
     hasApiKey: boolean;
     maskedApiKey?: string;
   };
   scanReport: CliScanReport;
+}
+
+export interface SpecClarificationQuestion {
+  id: string;
+  question: string;
+  options: string[];
+  recommendedIndex: number;
+}
+
+export interface SpecClarificationResult {
+  ready: boolean;
+  recommendedDispatchMode: "single" | "epic";
+  recommendedTemplate: PipelineTemplateId;
+  refinedTitle: string;
+  refinedDescription: string;
+  suggestedAllowedPaths: string[];
+  acceptanceCriteria: string[];
+  matchedFiles: string[];
+  matchedCaseTitles: string[];
+  questions: SpecClarificationQuestion[];
+  rationale: string;
 }
 
 export interface LlmConnectionTestResult {

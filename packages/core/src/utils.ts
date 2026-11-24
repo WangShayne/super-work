@@ -1,4 +1,4 @@
-import type { SmokeCheckConfig, TicketStatus } from "./types.ts";
+import type { BrowserCheckConfig, SmokeCheckConfig, TicketStatus } from "./types.ts";
 
 export function newId(prefix: string): string {
   const rand = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
@@ -61,6 +61,28 @@ export function normalizeSmokeCheckConfig(raw: unknown): SmokeCheckConfig | unde
   const triggerMode = r.triggerMode === "delivery_only" ? "delivery_only" : "every_gate";
   const enabled = Boolean(r.enabled) && Boolean(startCommand);
 
+  let browserCheck: BrowserCheckConfig | undefined;
+  if (r.browserCheck && typeof r.browserCheck === "object" && !Array.isArray(r.browserCheck)) {
+    const bc = r.browserCheck as Record<string, unknown>;
+    const bcPaths = Array.isArray(bc.paths)
+      ? bc.paths.map((p) => String(p).trim()).filter(Boolean)
+      : undefined;
+    const vw = typeof bc.viewportWidth === "number" ? bc.viewportWidth : Number(bc.viewportWidth);
+    const vh = typeof bc.viewportHeight === "number" ? bc.viewportHeight : Number(bc.viewportHeight);
+    const tm = typeof bc.timeoutMs === "number" ? bc.timeoutMs : Number(bc.timeoutMs);
+    browserCheck = {
+      enabled: Boolean(bc.enabled),
+      ...(bcPaths && bcPaths.length > 0 ? { paths: bcPaths } : {}),
+      ...(Number.isFinite(vw) && vw > 0 ? { viewportWidth: Math.floor(vw) } : {}),
+      ...(Number.isFinite(vh) && vh > 0 ? { viewportHeight: Math.floor(vh) } : {}),
+      ...(typeof bc.waitForSelector === "string" && bc.waitForSelector.trim()
+        ? { waitForSelector: bc.waitForSelector.trim() }
+        : {}),
+      ...(bc.failOnConsoleError !== undefined ? { failOnConsoleError: Boolean(bc.failOnConsoleError) } : {}),
+      ...(Number.isFinite(tm) && tm > 0 ? { timeoutMs: Math.floor(tm) } : {}),
+    };
+  }
+
   if (!startCommand && !readyUrl && (!checkCommands || checkCommands.length === 0) && r.enabled !== true) {
     return undefined;
   }
@@ -71,6 +93,7 @@ export function normalizeSmokeCheckConfig(raw: unknown): SmokeCheckConfig | unde
     ...(readyUrl ? { readyUrl } : {}),
     ...(startupTimeoutSec !== undefined ? { startupTimeoutSec } : {}),
     ...(checkCommands && checkCommands.length > 0 ? { checkCommands } : {}),
+    ...(browserCheck ? { browserCheck } : {}),
     triggerMode,
   };
 }

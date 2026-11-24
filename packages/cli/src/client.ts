@@ -8,12 +8,14 @@ import type {
   OutboxEntry,
   PipelineTemplateId,
   PlaybookEntry,
+  PreviewSession,
   RepoConfig,
   RepoContractFile,
   RepoMetricsSummary,
   RoutineRun,
   RoutineScheduleKind,
   RoutineSpec,
+  SpecClarificationResult,
   SpillArtifact,
   StageRun,
   Ticket,
@@ -47,6 +49,7 @@ export interface DaemonHealth {
     activeWorktrees?: number;
     reclaimableWorktrees?: number;
     activeRoutines?: number;
+    activePreviews?: number;
   };
   timestamp: string;
 }
@@ -196,11 +199,82 @@ export class SuperWorkHttpClient {
     preferredEngine?: WorkerEngineId;
     arenaMode?: boolean;
     arenaCompetitorEngine?: WorkerEngineId;
+    acceptanceCriteria?: string[];
   }): Promise<{ ticket: Ticket }> {
     return this.request<{ ticket: Ticket }>("/api/tickets", {
       method: "POST",
       body: JSON.stringify(payload),
     });
+  }
+
+  clarifySpec(payload: {
+    repoId: string;
+    title: string;
+    description: string;
+    template?: PipelineTemplateId;
+    answers?: Record<string, string>;
+  }): Promise<{ clarification: SpecClarificationResult }> {
+    return this.request("/api/specs/clarify", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  listPreviews(repoId?: string, ticketId?: string): Promise<{ previews: PreviewSession[] }> {
+    const params = new URLSearchParams();
+    if (repoId) params.set("repoId", repoId);
+    if (ticketId) params.set("ticketId", ticketId);
+    const qs = params.toString();
+    return this.request(qs ? `/api/previews?${qs}` : "/api/previews");
+  }
+
+  startPreview(payload: {
+    ticketId: string;
+    candidateId?: string;
+    ttlMinutes?: number;
+  }): Promise<{ preview: PreviewSession }> {
+    return this.request("/api/previews", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  renewPreview(id: string, ttlMinutes?: number): Promise<{ preview: PreviewSession }> {
+    return this.request(`/api/previews/${encodeURIComponent(id)}/renew`, {
+      method: "POST",
+      body: JSON.stringify(ttlMinutes ? { ttlMinutes } : {}),
+    });
+  }
+
+  stopPreview(id: string): Promise<{ preview: PreviewSession }> {
+    return this.request(`/api/previews/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+  }
+
+  async sendMcpMessage(message: unknown): Promise<unknown | null> {
+    let res: Response;
+    try {
+      res = await fetch(`${this.baseUrl}/api/mcp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...this.authHeaders(),
+        },
+        body: JSON.stringify(message),
+      });
+    } catch (err) {
+      throw new DaemonNotReachableError(this.baseUrl, err);
+    }
+    if (res.status === 202 || res.status === 204) {
+      return null;
+    }
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(body || `HTTP ${res.status}`);
+    }
+    const text = await res.text();
+    return text.trim() ? (JSON.parse(text) as unknown) : null;
   }
 
   prunePlaybook(

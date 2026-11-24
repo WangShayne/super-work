@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { dirname, resolve } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import type { PipelineTemplateId, Ticket, WorkerEngineId } from "@super-work/core";
 import { DaemonNotReachableError, SuperWorkHttpClient, type ParsedSseEvent } from "./client.ts";
@@ -12,6 +13,7 @@ export interface CliRunOptions {
   stdout?: (line: string) => void;
   stderr?: (line: string) => void;
   waitTimeoutMs?: number;
+  mcpInputLines?: AsyncIterable<string>;
 }
 
 interface ParsedArgs {
@@ -47,6 +49,7 @@ function parseCliArgs(argv: string[]): ParsedArgs {
     "every",
     "window",
     "routine",
+    "candidate",
   ]);
   const optionalEngineFlags = new Set(["arena"]);
   const engineValues = new Set(["claude", "codex", "opencode", "mock"]);
@@ -235,6 +238,10 @@ function formatEventLine(ev: ParsedSseEvent, watchedTicketId?: string): string {
     const prop = data.proposal as { summary?: string } | undefined;
     return `[epic_replanned] epic=${String(data.epicId ?? "?")} auto=${String(Boolean(data.autoApplied))} :: ${prop?.summary ?? ""}`;
   }
+  if (ev.event === "preview_updated") {
+    const p = data.preview as { id?: string; ticketId?: string; status?: string; url?: string } | undefined;
+    return `[preview_updated] ${p?.id ?? "?"} (${p?.ticketId ?? "?"}) status=${p?.status ?? "?"} ${p?.url ?? ""}`.trim();
+  }
   return `${childPrefix}[${ev.event}] ${JSON.stringify(data).slice(0, 140)}`;
 }
 
@@ -326,17 +333,19 @@ async function waitForTicketCompletion(
 }
 
 function printHelp(stdout: (line: string) => void): void {
-  stdout(`super-work v0.7.0 CLI
+  stdout(`super-work v0.8.0 CLI
 
 Usage:
   super-work up [-d|--detach] [--port 4318] [--data-dir path]
+  super-work mcp [--url http://localhost:4318] [--token <token>] [--no-auto-start]
   super-work status [--repo <id>] [--auto-start] [--json]
   super-work dispatch <title> [-d|--desc <text>] [--repo <id>] [--paths <csv>] [--depends-on <csv>]
                       [--template fast|standard|strict] [--engine claude|codex|opencode|mock]
-                      [--arena [engine]] [--budget <usd>] [--wait] [--auto-start] [--json]
+                      [--arena [engine]] [--clarify] [--clarify-only] [--budget <usd>] [--wait] [--auto-start] [--json]
   super-work epic <title> [-d|--desc <text>] [--repo <id>] [--template fast|standard|strict]
                   [--engine ...] [--preview-only] [--per-subtask] [--wait] [--auto-start] [--json]
   super-work inbox [list | approve <id> [--expand-mandate] [--local-merge] [--budget-add <usd>] [--winner <candId>] [-m <note>] | reject <id> [-m <note>]]
+  super-work preview [list | start <ticketId> [--candidate <candId>] | stop <previewId>] [--repo <id>] [--json]
   super-work routine [list | add <name> -d <prompt> [--cron <expr> | --every <min>] [--window HH:MM-HH:MM] [--paths <csv>] [--budget <usd>] | run <id> | toggle <id> | runs [--routine <id>] | delete <id>]
   super-work casebook [list | search <query>] [--repo <id>] [--auto-start] [--json]
   super-work playbook [list | add <rule> [--paths <csv>] [--pin] | toggle <entryId> | delete <entryId> | prune | sync [--export]] [--repo <id>] [--auto-start] [--json]
@@ -402,6 +411,70 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
       });
       const exitCode = await proc.exited;
       return exitCode;
+    }
+
+    if (cmd === "mcp") {
+      const noAutoStart = Boolean(flags["no-auto-start"]);
+      const ensureLocalDaemon = async () => {
+        try {
+          await client.getHealth();
+        } catch (err) {
+          if (err instanceof DaemonNotReachableError && !noAutoStart) {
+            const hostname = new URL(baseUrl).hostname;
+            if (hostname === "localhost" || hostname === "127.0.0.1") {
+              stderr(`[super-work mcp] Starting daemon at ${baseUrl}...`);
+              await spawnDetachedDaemon(baseUrl, { token });
+              return;
+            }
+          }
+          throw err;
+        }
+      };
+
+      await ensureLocalDaemon();
+
+      const lineSource: AsyncIterable<string> =
+        options?.mcpInputLines ?? createInterface({ input: process.stdin, crlfDelay: Infinity });
+
+      for await (const rawLine of lineSource) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          stdout(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: null,
+              error: { code: -32700, message: "Parse error" },
+            }),
+          );
+          continue;
+        }
+        try {
+          const reply = await client.sendMcpMessage(parsed);
+          if (reply !== null) {
+            stdout(JSON.stringify(reply));
+          }
+        } catch (err) {
+          const msgId =
+            parsed && typeof parsed === "object" && !Array.isArray(parsed) && "id" in parsed
+              ? ((parsed as { id?: string | number | null }).id ?? null)
+              : null;
+          stdout(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: msgId,
+              error: {
+                code: -32603,
+                message: err instanceof Error ? err.message : String(err),
+              },
+            }),
+          );
+        }
+      }
+      return 0;
     }
 
     if (cmd === "status") {
@@ -477,23 +550,73 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
       const arenaMode = Boolean(arenaFlag);
       const arenaCompetitorEngine =
         typeof arenaFlag === "string" ? (arenaFlag as WorkerEngineId) : undefined;
+      const clarify = Boolean(flags.clarify);
+      const clarifyOnly = Boolean(flags["clarify-only"]);
       const wait = Boolean(flags.wait);
+
+      if (clarifyOnly) {
+        const { clarification } = await withAutoStart(
+          baseUrl,
+          autoStart,
+          async () => {
+            const repoId = await resolveTargetRepoId(client, getStringFlag(flags, "repo"));
+            return client.clarifySpec({ repoId, title, description, template });
+          },
+          stdout,
+        );
+        if (asJson) {
+          stdout(JSON.stringify({ clarification }, null, 2));
+          return 0;
+        }
+        stdout(`Spec Clarification: ${clarification.refinedTitle}`);
+        stdout(
+          `Recommended: mode=${clarification.recommendedDispatchMode} template=${clarification.recommendedTemplate} paths=${clarification.suggestedAllowedPaths.join(",")}`,
+        );
+        stdout(`Rationale: ${clarification.rationale}`);
+        if (clarification.matchedFiles.length > 0) {
+          stdout(`Matched Files: ${clarification.matchedFiles.join(", ")}`);
+        }
+        for (const q of clarification.questions) {
+          stdout(`Question [${q.id}]: ${q.question}`);
+          q.options.forEach((opt, i) => stdout(`  ${i === q.recommendedIndex ? "*" : "-"} ${opt}`));
+        }
+        return 0;
+      }
 
       const { ticket } = await withAutoStart(
         baseUrl,
         autoStart,
         async () => {
           const repoId = await resolveTargetRepoId(client, getStringFlag(flags, "repo"));
+          let finalDescription = description;
+          let finalPaths = allowedPaths;
+          let finalTemplate = template;
+          let acceptanceCriteria: string[] | undefined;
+
+          if (clarify) {
+            const { clarification } = await client.clarifySpec({
+              repoId,
+              title,
+              description,
+              template,
+            });
+            finalDescription = clarification.refinedDescription;
+            finalPaths = allowedPaths ?? clarification.suggestedAllowedPaths;
+            finalTemplate = template ?? clarification.recommendedTemplate;
+            acceptanceCriteria = clarification.acceptanceCriteria;
+          }
+
           return client.createTicket({
             repoId,
             title,
-            description,
-            template,
-            allowedPaths,
+            description: finalDescription,
+            template: finalTemplate,
+            allowedPaths: finalPaths,
             dependsOn,
             preferredEngine,
             arenaMode,
             arenaCompetitorEngine,
+            acceptanceCriteria,
             maxCostUsd: Number.isFinite(maxCostUsd) ? maxCostUsd : undefined,
           });
         },
@@ -1138,6 +1261,76 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
         );
       }
       return 0;
+    }
+
+    if (cmd === "preview") {
+      const subCmd = positionals[1] ?? "list";
+      if (subCmd === "list") {
+        const { previews } = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.listPreviews(getStringFlag(flags, "repo")),
+          stdout,
+        );
+        if (asJson) {
+          stdout(JSON.stringify({ previews }, null, 2));
+          return 0;
+        }
+        if (previews.length === 0) {
+          stdout("No active live previews running.");
+          return 0;
+        }
+        for (const p of previews) {
+          stdout(
+            `[${p.id}] (${p.status}) ${p.url} ticket=${p.ticketId}${p.candidateId ? ` cand=${p.candidateId}` : ""} expires=${p.expiresAt}`,
+          );
+        }
+        return 0;
+      }
+
+      if (subCmd === "start") {
+        const ticketId = positionals[2];
+        if (!ticketId) {
+          stderr("Error: ticketId is required. Usage: super-work preview start <ticketId>");
+          return 1;
+        }
+        const candidateId = getStringFlag(flags, "candidate");
+        const { preview } = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.startPreview({ ticketId, candidateId }),
+          stdout,
+        );
+        stdout(
+          asJson
+            ? JSON.stringify({ preview }, null, 2)
+            : `Started preview ${preview.id} (${preview.status}) at ${preview.url} [expires ${preview.expiresAt}]`,
+        );
+        return 0;
+      }
+
+      if (subCmd === "stop") {
+        const previewId = positionals[2];
+        if (!previewId) {
+          stderr("Error: previewId is required. Usage: super-work preview stop <previewId>");
+          return 1;
+        }
+        const { preview } = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.stopPreview(previewId),
+          stdout,
+        );
+        stdout(
+          asJson
+            ? JSON.stringify({ preview }, null, 2)
+            : `Stopped preview ${preview.id}`,
+        );
+        return 0;
+      }
+
+      stderr(`Unknown preview subcommand: ${subCmd}`);
+      return 1;
     }
 
     stderr(`Unknown command: ${cmd}`);

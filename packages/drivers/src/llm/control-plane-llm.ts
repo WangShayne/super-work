@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  buildHeuristicSpecClarification,
   getAlternateEngine,
   heuristicDecomposeEpic,
   heuristicDistillPlaybookLesson,
@@ -16,6 +17,7 @@ import type {
   PipelineTemplateId,
   ReasoningEffort,
   RepoConfig,
+  SpecClarificationResult,
   StageRun,
   SystemSetupConfig,
   Ticket,
@@ -391,6 +393,71 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
       contractSnippets: Array.isArray(parsed.contractSnippets)
         ? parsed.contractSnippets.map(String)
         : undefined,
+    };
+  }
+
+  async clarifySpec(input: {
+    repo: RepoConfig;
+    title: string;
+    description: string;
+    defaultTemplate: PipelineTemplateId;
+    repoStructure?: string;
+    playbookRules?: string;
+    casebookContext?: string;
+    conventions?: string;
+  }): Promise<SpecClarificationResult> {
+    const baseline = buildHeuristicSpecClarification(input);
+    const sys = [
+      "You are the Super-agent Pre-Flight Spec Architect.",
+      "Clarify an engineering task using real repository paths, conventions, playbook rules, and historical cases.",
+      "Output ONLY valid JSON with keys: recommendedDispatchMode ('single'|'epic'), recommendedTemplate ('fast'|'standard'|'strict'), refinedTitle, refinedDescription, suggestedAllowedPaths (string[]), acceptanceCriteria (string[]), matchedFiles (string[]), questions (array of {id, question, options, recommendedIndex}, max 3), rationale.",
+    ].join("\n");
+    const user = JSON.stringify({
+      repo: { id: input.repo.id, name: input.repo.name, defaultTemplate: input.defaultTemplate },
+      repoStructure: input.repoStructure,
+      conventions: input.conventions,
+      playbookRules: input.playbookRules,
+      casebookContext: input.casebookContext,
+      title: input.title,
+      description: input.description,
+    });
+    const parsed = await this.chatJson<Partial<SpecClarificationResult>>(sys, user);
+    return {
+      ...baseline,
+      recommendedDispatchMode:
+        parsed.recommendedDispatchMode === "epic" || parsed.recommendedDispatchMode === "single"
+          ? parsed.recommendedDispatchMode
+          : baseline.recommendedDispatchMode,
+      recommendedTemplate:
+        parsed.recommendedTemplate === "fast" ||
+        parsed.recommendedTemplate === "standard" ||
+        parsed.recommendedTemplate === "strict"
+          ? parsed.recommendedTemplate
+          : baseline.recommendedTemplate,
+      refinedTitle: parsed.refinedTitle?.trim() || baseline.refinedTitle,
+      refinedDescription: parsed.refinedDescription?.trim() || baseline.refinedDescription,
+      suggestedAllowedPaths:
+        Array.isArray(parsed.suggestedAllowedPaths) && parsed.suggestedAllowedPaths.length > 0
+          ? parsed.suggestedAllowedPaths.map(String)
+          : baseline.suggestedAllowedPaths,
+      acceptanceCriteria:
+        Array.isArray(parsed.acceptanceCriteria) && parsed.acceptanceCriteria.length > 0
+          ? parsed.acceptanceCriteria.map(String)
+          : baseline.acceptanceCriteria,
+      matchedFiles:
+        Array.isArray(parsed.matchedFiles) && parsed.matchedFiles.length > 0
+          ? parsed.matchedFiles.map(String)
+          : baseline.matchedFiles,
+      questions:
+        Array.isArray(parsed.questions) && parsed.questions.length > 0
+          ? parsed.questions.slice(0, 3).map((q, idx) => ({
+              id: String(q.id || `q_${idx + 1}`),
+              question: String(q.question || "Confirm detail"),
+              options: Array.isArray(q.options) && q.options.length > 0 ? q.options.map(String) : ["Yes"],
+              recommendedIndex: typeof q.recommendedIndex === "number" ? q.recommendedIndex : 0,
+            }))
+          : baseline.questions,
+      rationale: parsed.rationale?.trim() || baseline.rationale,
     };
   }
 
@@ -970,6 +1037,16 @@ export class HeuristicControlLLM implements ControlPlaneLLM {
   async distillHandoverDigest(): Promise<null> {
     return null;
   }
+
+  async clarifySpec(input: {
+    repo: RepoConfig;
+    title: string;
+    description: string;
+    defaultTemplate: PipelineTemplateId;
+    repoStructure?: string;
+  }): Promise<SpecClarificationResult> {
+    return buildHeuristicSpecClarification(input);
+  }
 }
 
 export class CompositeControlPlaneLLM implements ControlPlaneLLM {
@@ -1081,6 +1158,27 @@ export class CompositeControlPlaneLLM implements ControlPlaneLLM {
       }
     }
     return null;
+  }
+
+  async clarifySpec(input: {
+    repo: RepoConfig;
+    title: string;
+    description: string;
+    defaultTemplate: PipelineTemplateId;
+    repoStructure?: string;
+    playbookRules?: string;
+    casebookContext?: string;
+    conventions?: string;
+  }): Promise<SpecClarificationResult> {
+    for (const provider of this.chain) {
+      if (!provider.clarifySpec) continue;
+      try {
+        return await provider.clarifySpec(input);
+      } catch {
+        // Fallback to next control-plane provider
+      }
+    }
+    return buildHeuristicSpecClarification(input);
   }
 }
 
@@ -1261,6 +1359,22 @@ export class MutableControlPlaneLLM implements ControlPlaneLLM {
       return this.current.distillHandoverDigest(input);
     }
     return Promise.resolve(null);
+  }
+
+  clarifySpec(input: {
+    repo: RepoConfig;
+    title: string;
+    description: string;
+    defaultTemplate: PipelineTemplateId;
+    repoStructure?: string;
+    playbookRules?: string;
+    casebookContext?: string;
+    conventions?: string;
+  }): Promise<SpecClarificationResult> {
+    if (this.current.clarifySpec) {
+      return this.current.clarifySpec(input);
+    }
+    return Promise.resolve(buildHeuristicSpecClarification(input));
   }
 }
 

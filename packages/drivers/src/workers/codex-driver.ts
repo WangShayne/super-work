@@ -5,6 +5,7 @@ import type {
   WorkerTurnInput,
 } from "@super-work/core";
 import { nowIso } from "@super-work/core";
+import { wrapCommandWithOsSandbox } from "../sandbox/os-sandbox.ts";
 import { readLinesFromStream, truncateText } from "./stream-utils.ts";
 
 export function normalizeCodexEffort(
@@ -148,8 +149,21 @@ export class CodexDriver implements WorkerDriver {
 
   async *runTurn(input: WorkerTurnInput, signal: AbortSignal): AsyncGenerator<WorkerStreamEvent> {
     const args = buildCodexCliArgs(input);
-    const proc = Bun.spawn([this.binaryPath, ...args], {
+    // Skip outer Seatbelt wrapper for Codex because `codex exec -s` invokes Seatbelt internally
+    // and macOS forbids nested sandbox_init calls; still enforce env secret scrubbing cleanly.
+    const wrapped = wrapCommandWithOsSandbox({
+      commandArgv: [this.binaryPath, ...args],
+      worktreePath: input.worktreePath,
+      rootRepoPath: input.rootRepoPath,
+      mode: input.sandboxMode ?? "balanced",
+      forbiddenPaths: input.mandate.forbiddenPaths,
+      allowNetwork: input.mandate.allowNetwork,
+      engine: "codex",
+      skipOuterSandbox: true,
+    });
+    const proc = Bun.spawn(wrapped.argv, {
       cwd: input.worktreePath,
+      env: wrapped.env,
       stdout: "pipe",
       stderr: "pipe",
       stdin: "ignore",

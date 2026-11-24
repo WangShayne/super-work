@@ -7,6 +7,7 @@ import {
   ChevronRight,
   Copy,
   Database,
+  ExternalLink,
   FileCode2,
   FileDiff,
   FolderGit2,
@@ -14,12 +15,15 @@ import {
   GitMerge,
   GitPullRequest,
   History,
+  Image,
   Layers,
   Link2,
+  Play,
   RotateCcw,
   Search,
   Send,
   Shield,
+  Square,
   Terminal,
   Trash2,
   X,
@@ -206,9 +210,12 @@ export function DeepDiveDrawer({
   const [searchQ, setSearchQ] = useState("");
   const [searchHits, setSearchHits] = useState<MemorySearchHit[] | null>(null);
   const [selectedArenaCandId, setSelectedArenaCandId] = useState<string | null>(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [previewErr, setPreviewErr] = useState<string | null>(null);
 
   useEffect(() => {
     setSelectedArenaCandId(null);
+    setPreviewErr(null);
   }, [ticketId]);
 
   useEffect(() => {
@@ -462,6 +469,70 @@ export function DeepDiveDrawer({
           </div>
 
           <div className="flex items-center gap-2 flex-wrap justify-end">
+            {ticket?.worktreePath && (() => {
+              const activePrv = detail?.previews?.find(
+                (p) => p.status === "starting" || p.status === "ready",
+              );
+              if (activePrv) {
+                return (
+                  <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-sky-500/40 bg-sky-500/10 text-xs">
+                    <a
+                      href={activePrv.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 font-mono text-[11px] text-sky-200 hover:underline"
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                      {t("preview.openBtn")} ({activePrv.port})
+                    </a>
+                    <button
+                      type="button"
+                      disabled={previewBusy}
+                      onClick={() => {
+                        setPreviewBusy(true);
+                        void api
+                          .stopPreview(activePrv.id)
+                          .then(() => api.getTicketDetail(ticket.id))
+                          .then((d) => {
+                            setDetail(d);
+                            onRefresh();
+                          })
+                          .finally(() => setPreviewBusy(false));
+                      }}
+                      className="pl-1.5 border-l border-sky-500/30 text-rose-300 hover:text-rose-200 inline-flex items-center gap-1"
+                    >
+                      <Square className="w-2.5 h-2.5" />
+                      {t("preview.stopBtn")}
+                    </button>
+                  </div>
+                );
+              }
+              return (
+                <button
+                  type="button"
+                  disabled={previewBusy}
+                  onClick={() => {
+                    setPreviewBusy(true);
+                    setPreviewErr(null);
+                    void api
+                      .startPreview({ ticketId: ticket.id })
+                      .then(() => api.getTicketDetail(ticket.id))
+                      .then((d) => {
+                        setDetail(d);
+                        onRefresh();
+                      })
+                      .catch((err) =>
+                        setPreviewErr(err instanceof Error ? err.message : String(err)),
+                      )
+                      .finally(() => setPreviewBusy(false));
+                  }}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-sky-500/40 bg-sky-500/15 text-sky-200 hover:bg-sky-500/25 text-xs disabled:opacity-50"
+                >
+                  <Play className="w-3 h-3" />
+                  {previewBusy ? t("preview.starting") : t("preview.startBtn")}
+                </button>
+              );
+            })()}
             {hasMergedLocally && !ticket?.revertedAt && (
               <button
                 type="button"
@@ -516,6 +587,11 @@ export function DeepDiveDrawer({
         </div>
 
         {/* Tabs */}
+        {previewErr && (
+          <div className="px-5 py-2 bg-rose-500/10 border-b border-rose-500/20 text-[11px] text-rose-300">
+            {previewErr}
+          </div>
+        )}
         <div className="px-5 border-b border-zinc-800 flex items-center gap-1 bg-zinc-950">
           {[
             { id: "stream" as const, label: t("drawer.tab.stream"), icon: Terminal },
@@ -987,7 +1063,9 @@ export function DeepDiveDrawer({
                                     : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
                                   : art.kind === "handover"
                                     ? "bg-teal-500/20 text-teal-300 border border-teal-500/30"
-                                    : "bg-zinc-800 text-zinc-300"
+                                    : art.kind === "screenshot"
+                                      ? "bg-sky-500/20 text-sky-300 border border-sky-500/30"
+                                      : "bg-zinc-800 text-zinc-300"
                               }`}
                             >
                               {art.kind === "test_log"
@@ -996,22 +1074,49 @@ export function DeepDiveDrawer({
                                   ? t("drawer.smokeLogTag")
                                   : art.kind === "handover"
                                     ? t("drawer.handoverTag")
-                                    : art.kind}
+                                    : art.kind === "screenshot"
+                                      ? "Screenshot"
+                                      : art.kind}
                             </span>
                             <span className="text-zinc-200">{art.summary}</span>
                             <span className="text-zinc-500 text-[11px] ml-2">
                               ({art.byteSize} {t("drawer.bytes")})
                             </span>
                           </div>
-                          <button
-                            onClick={() => handleLoadArtifact(art.id)}
-                            className="text-indigo-400 hover:text-indigo-300 font-medium"
-                          >
-                            {artifactContent?.id === art.id
-                              ? t("drawer.hideSpill")
-                              : t("drawer.readSpill")}
-                          </button>
+                          {art.kind === "screenshot" ? (
+                            <a
+                              href={api.getArtifactRawUrl(art.id)}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-sky-400 hover:text-sky-300 font-medium"
+                            >
+                              {t("preview.openBtn")}
+                            </a>
+                          ) : (
+                            <button
+                              onClick={() => handleLoadArtifact(art.id)}
+                              className="text-indigo-400 hover:text-indigo-300 font-medium"
+                            >
+                              {artifactContent?.id === art.id
+                                ? t("drawer.hideSpill")
+                                : t("drawer.readSpill")}
+                            </button>
+                          )}
                         </div>
+                        {art.kind === "screenshot" && (
+                          <a
+                            href={api.getArtifactRawUrl(art.id)}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="block rounded-lg border border-zinc-800 overflow-hidden bg-zinc-950 hover:border-sky-500/50 transition"
+                          >
+                            <img
+                              src={api.getArtifactRawUrl(art.id)}
+                              alt={art.summary || "screenshot"}
+                              className="w-full max-h-64 object-contain bg-zinc-950"
+                            />
+                          </a>
+                        )}
                         {artifactContent?.id === art.id && (
                           <pre className="p-2.5 rounded bg-zinc-950 border border-zinc-800 text-[11px] font-mono text-zinc-300 max-h-60 overflow-auto whitespace-pre-wrap">
                             {artifactContent.text}

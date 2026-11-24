@@ -356,6 +356,12 @@ export class SqliteStateStore implements StateStore {
     if (!existingRepoCols.has("fallback_engines_json")) {
       this.db.run("ALTER TABLE repos ADD COLUMN fallback_engines_json TEXT;");
     }
+    if (!existingRepoCols.has("sandbox_mode")) {
+      this.db.run("ALTER TABLE repos ADD COLUMN sandbox_mode TEXT;");
+    }
+    if (!existingRepoCols.has("preview_command")) {
+      this.db.run("ALTER TABLE repos ADD COLUMN preview_command TEXT;");
+    }
 
     const cols = this.db
       .query("PRAGMA table_info(tickets)")
@@ -461,12 +467,12 @@ export class SqliteStateStore implements StateStore {
         `INSERT INTO repos (
           id, name, root_path, base_branch, mode, github_repo, default_template,
           preferred_implement_engine, preferred_review_engine, fallback_engines_json, auto_cleanup_worktree,
-          verification_commands_json, setup_commands_json, smoke_check_json, forbidden_paths_json,
+          verification_commands_json, setup_commands_json, smoke_check_json, preview_command, sandbox_mode, forbidden_paths_json,
           conventions, contract_synced_hash, contract_synced_at,
           default_delivery_channel,
           max_concurrent_workers, daily_budget_usd, daily_budget_override_usd, daily_budget_override_date,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           root_path = excluded.root_path,
@@ -481,6 +487,8 @@ export class SqliteStateStore implements StateStore {
           verification_commands_json = excluded.verification_commands_json,
           setup_commands_json = excluded.setup_commands_json,
           smoke_check_json = excluded.smoke_check_json,
+          preview_command = excluded.preview_command,
+          sandbox_mode = excluded.sandbox_mode,
           forbidden_paths_json = excluded.forbidden_paths_json,
           conventions = excluded.conventions,
           contract_synced_hash = excluded.contract_synced_hash,
@@ -507,6 +515,8 @@ export class SqliteStateStore implements StateStore {
         JSON.stringify(repo.verificationCommands ?? []),
         JSON.stringify(repo.setupCommands ?? []),
         repo.smokeCheck ? JSON.stringify(repo.smokeCheck) : null,
+        repo.previewCommand ?? null,
+        repo.sandboxMode ?? null,
         JSON.stringify(repo.forbiddenPaths ?? []),
         repo.conventions ?? null,
         repo.contractSyncedHash ?? null,
@@ -1615,6 +1625,8 @@ function mapRepoRow(r: Record<string, unknown>): RepoConfig {
     smokeCheck: r.smoke_check_json
       ? (JSON.parse(String(r.smoke_check_json)) as SmokeCheckConfig)
       : undefined,
+    previewCommand: r.preview_command ? String(r.preview_command) : undefined,
+    sandboxMode: r.sandbox_mode ? (String(r.sandbox_mode) as RepoConfig["sandboxMode"]) : undefined,
     forbiddenPaths: r.forbidden_paths_json
       ? (JSON.parse(String(r.forbidden_paths_json)) as string[])
       : [],

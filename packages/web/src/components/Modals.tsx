@@ -8,16 +8,21 @@ import {
   ChevronUp,
   Database,
   Download,
+  ExternalLink,
+  Eye,
   FileJson2,
   FolderGit2,
   GitBranch,
   Layers,
   Pin,
+  Play,
   Plus,
   RefreshCw,
   RotateCcw,
   Search,
+  ShieldCheck,
   Sparkles,
+  Square,
   Trash2,
   Upload,
   X,
@@ -73,10 +78,13 @@ import type {
   OperatingMode,
   PipelineTemplateId,
   PlaybookEntry,
+  PreviewSession,
   ReasoningEffort,
   RepoConfig,
+  SandboxMode,
   SmokeCheckConfig,
   SmokeTriggerMode,
+  SpecClarificationResult,
   Ticket,
   WorkerEngineId,
   WorktreeGcResult,
@@ -102,6 +110,7 @@ interface DispatchModalProps {
     arenaCompetitorEngine?: WorkerEngineId;
     modelOverride?: string;
     effortOverride?: ReasoningEffort;
+    acceptanceCriteria?: string[];
     maxCostUsd: number;
   }) => Promise<void>;
   onCreateEpic: (data: {
@@ -148,6 +157,10 @@ export function DispatchTaskModal({
   const [budget, setBudget] = useState("2.0");
   const [epicPlan, setEpicPlan] = useState<EpicDecompositionPlan | null>(null);
   const [previewing, setPreviewing] = useState(false);
+  const [clarifying, setClarifying] = useState(false);
+  const [clarification, setClarification] = useState<SpecClarificationResult | null>(null);
+  const [clarifyAnswers, setClarifyAnswers] = useState<Record<string, string>>({});
+  const [acceptanceCriteria, setAcceptanceCriteria] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
 
   const reposById = new Map(repos.map((r) => [r.id, r]));
@@ -171,6 +184,9 @@ export function DispatchTaskModal({
       setDepsExpanded(false);
       setDepsQuery("");
       setEpicPlan(null);
+      setClarification(null);
+      setClarifyAnswers({});
+      setAcceptanceCriteria([]);
     }
   }, [open, defaultTemplate, defaultEngine]);
 
@@ -207,6 +223,54 @@ export function DispatchTaskModal({
     setDependsOn((prev) =>
       prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
     );
+  };
+
+  const handleClarifySpec = async () => {
+    if (!title.trim() || !description.trim()) return;
+    setClarifying(true);
+    try {
+      const res = await api.clarifySpec({
+        repoId,
+        title: title.trim(),
+        description: description.trim(),
+        template,
+      });
+      setClarification(res.clarification);
+      const defaults: Record<string, string> = {};
+      for (const q of res.clarification.questions) {
+        const rec = q.options[q.recommendedIndex] ?? q.options[0];
+        if (rec) defaults[q.id] = rec;
+      }
+      setClarifyAnswers(defaults);
+    } finally {
+      setClarifying(false);
+    }
+  };
+
+  const handleApplyClarification = async () => {
+    if (!clarification) return;
+    setClarifying(true);
+    try {
+      const res = await api.clarifySpec({
+        repoId,
+        title: title.trim(),
+        description: description.trim(),
+        template,
+        answers: clarifyAnswers,
+      });
+      const refined = res.clarification;
+      setTitle(refined.refinedTitle);
+      setDescription(refined.refinedDescription);
+      setTemplate(refined.recommendedTemplate);
+      setPaths(refined.suggestedAllowedPaths.join(", "));
+      setAcceptanceCriteria(refined.acceptanceCriteria);
+      if (refined.recommendedDispatchMode === "epic") {
+        setDispatchMode("epic");
+      }
+      setClarification(refined);
+    } finally {
+      setClarifying(false);
+    }
   };
 
   const handlePreviewEpic = async () => {
@@ -317,6 +381,7 @@ export function DispatchTaskModal({
               : undefined,
           modelOverride: isCliEngine ? modelOverride.trim() || undefined : undefined,
           effortOverride: isCliEngine ? effortOverride || undefined : undefined,
+          acceptanceCriteria: acceptanceCriteria.length > 0 ? acceptanceCriteria : undefined,
           maxCostUsd: Number(budget) || 2.0,
         });
       }
@@ -386,7 +451,18 @@ export function DispatchTaskModal({
             />
           </div>
           <div>
-            <label className="block text-zinc-400 mb-1">{t("modal.dispatch.goalLabel")}</label>
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <label className="block text-zinc-400">{t("modal.dispatch.goalLabel")}</label>
+              <button
+                type="button"
+                disabled={clarifying || !title.trim() || !description.trim()}
+                onClick={() => void handleClarifySpec()}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-teal-500/40 bg-teal-500/10 hover:bg-teal-500/20 text-teal-200 text-[11px] disabled:opacity-40 transition"
+              >
+                <Sparkles className={`w-3 h-3 ${clarifying ? "animate-spin" : ""}`} />
+                {clarifying ? t("modal.dispatch.clarifying") : t("modal.dispatch.clarifyBtn")}
+              </button>
+            </div>
             <textarea
               required
               rows={3}
@@ -396,6 +472,68 @@ export function DispatchTaskModal({
               className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-100 focus:outline-none focus:border-indigo-500"
             />
           </div>
+
+          {clarification && (
+            <div className="rounded-xl border border-teal-500/35 bg-teal-500/5 p-3 space-y-2.5">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-1.5 font-semibold text-teal-200">
+                  <Sparkles className="w-3.5 h-3.5 text-teal-400" />
+                  <span>{t("modal.dispatch.clarifyTitle")}</span>
+                  <span className="px-1.5 py-0.2 rounded bg-zinc-900 border border-zinc-700 font-mono text-[10px] text-indigo-300">
+                    {clarification.recommendedDispatchMode} · {clarification.recommendedTemplate}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  disabled={clarifying}
+                  onClick={() => void handleApplyClarification()}
+                  className="px-2.5 py-1 rounded bg-teal-600 hover:bg-teal-500 text-white text-[11px] font-medium disabled:opacity-50"
+                >
+                  {t("modal.dispatch.clarifyApplyBtn")}
+                </button>
+              </div>
+              <p className="text-[11px] text-zinc-400">{clarification.rationale}</p>
+              {clarification.matchedFiles.length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {clarification.matchedFiles.slice(0, 6).map((f) => (
+                    <code
+                      key={f}
+                      className="px-1.5 py-0.5 rounded bg-zinc-950 border border-zinc-800 font-mono text-[10px] text-emerald-300"
+                    >
+                      {f}
+                    </code>
+                  ))}
+                </div>
+              )}
+              {clarification.questions.map((q) => (
+                <div key={q.id} className="space-y-1">
+                  <div className="text-[11px] text-zinc-200 font-medium">{q.question}</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {q.options.map((opt, idx) => {
+                      const active = clarifyAnswers[q.id] === opt;
+                      return (
+                        <button
+                          key={opt}
+                          type="button"
+                          onClick={() =>
+                            setClarifyAnswers((prev) => ({ ...prev, [q.id]: opt }))
+                          }
+                          className={`px-2 py-1 rounded border text-[10px] text-left transition ${
+                            active
+                              ? "border-teal-400 bg-teal-500/20 text-teal-100"
+                              : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:text-zinc-200"
+                          }`}
+                        >
+                          {idx === q.recommendedIndex ? "★ " : ""}
+                          {opt}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
           <div className="grid grid-cols-3 gap-3">
             <div>
               <label className="block text-zinc-400 mb-1">{t("modal.dispatch.pipeline")}</label>
@@ -1171,13 +1309,21 @@ interface RepoSettingsModalProps {
     repoId: string,
     patch: Omit<
       Partial<RepoConfig>,
-      "maxConcurrentWorkers" | "dailyBudgetUsd" | "conventions" | "smokeCheck" | "fallbackEngines"
+      | "maxConcurrentWorkers"
+      | "dailyBudgetUsd"
+      | "conventions"
+      | "smokeCheck"
+      | "fallbackEngines"
+      | "previewCommand"
+      | "sandboxMode"
     > & {
       maxConcurrentWorkers?: number | null;
       dailyBudgetUsd?: number | null;
       conventions?: string | null;
       smokeCheck?: SmokeCheckConfig | null;
       fallbackEngines?: WorkerEngineId[] | null;
+      previewCommand?: string | null;
+      sandboxMode?: SandboxMode | null;
     },
   ) => Promise<void>;
 }
@@ -1203,17 +1349,23 @@ export function RepoSettingsModal({
   const [implEngine, setImplEngine] = useState<WorkerEngineId>("claude");
   const [reviewEngine, setReviewEngine] = useState<WorkerEngineId>("codex");
   const [fallbackEngines, setFallbackEngines] = useState<WorkerEngineId[]>([]);
+  const [sandboxMode, setSandboxMode] = useState<SandboxMode>("balanced");
   const [deliveryChannel, setDeliveryChannel] = useState<DeliveryChannel>("auto_pr_or_branch");
   const [verificationInput, setVerificationInput] = useState("");
   const [setupInput, setSetupInput] = useState("");
   const [forbiddenInput, setForbiddenInput] = useState("");
   const [conventions, setConventions] = useState("");
+  const [previewCommand, setPreviewCommand] = useState("");
   const [smokeEnabled, setSmokeEnabled] = useState(false);
   const [smokeStartCmd, setSmokeStartCmd] = useState("");
   const [smokeReadyUrl, setSmokeReadyUrl] = useState("");
   const [smokeTimeoutSec, setSmokeTimeoutSec] = useState("20");
   const [smokeTriggerMode, setSmokeTriggerMode] = useState<SmokeTriggerMode>("every_gate");
   const [smokeCheckCmds, setSmokeCheckCmds] = useState("");
+  const [browserEnabled, setBrowserEnabled] = useState(false);
+  const [browserPaths, setBrowserPaths] = useState("/");
+  const [browserSelector, setBrowserSelector] = useState("");
+  const [browserFailConsole, setBrowserFailConsole] = useState(false);
   const [maxConcurrentInput, setMaxConcurrentInput] = useState("");
   const [dailyBudgetInput, setDailyBudgetInput] = useState("");
   const [autoCleanupWorktree, setAutoCleanupWorktree] = useState(true);
@@ -1268,17 +1420,23 @@ export function RepoSettingsModal({
     setImplEngine(repo.preferredImplementEngine);
     setReviewEngine(repo.preferredReviewEngine);
     setFallbackEngines(repo.fallbackEngines ?? []);
+    setSandboxMode(repo.sandboxMode ?? "balanced");
     setDeliveryChannel(repo.defaultDeliveryChannel ?? "auto_pr_or_branch");
     setVerificationInput((repo.verificationCommands ?? []).join("\n"));
     setSetupInput((repo.setupCommands ?? []).join("\n"));
     setForbiddenInput((repo.forbiddenPaths ?? []).join(", "));
     setConventions(repo.conventions ?? "");
+    setPreviewCommand(repo.previewCommand ?? "");
     setSmokeEnabled(Boolean(repo.smokeCheck?.enabled));
     setSmokeStartCmd(repo.smokeCheck?.startCommand ?? "");
     setSmokeReadyUrl(repo.smokeCheck?.readyUrl ?? "");
     setSmokeTimeoutSec(String(repo.smokeCheck?.startupTimeoutSec ?? 20));
     setSmokeTriggerMode(repo.smokeCheck?.triggerMode ?? "every_gate");
     setSmokeCheckCmds((repo.smokeCheck?.checkCommands ?? []).join("\n"));
+    setBrowserEnabled(Boolean(repo.smokeCheck?.browserCheck?.enabled));
+    setBrowserPaths((repo.smokeCheck?.browserCheck?.paths ?? ["/"]).join(", "));
+    setBrowserSelector(repo.smokeCheck?.browserCheck?.waitForSelector ?? "");
+    setBrowserFailConsole(Boolean(repo.smokeCheck?.browserCheck?.failOnConsoleError));
     setMaxConcurrentInput(
       repo.maxConcurrentWorkers ? String(repo.maxConcurrentWorkers) : "",
     );
@@ -1325,6 +1483,10 @@ export function RepoSettingsModal({
         .map((s) => s.trim())
         .filter(Boolean);
       const parsedTimeout = Number(smokeTimeoutSec.trim());
+      const parsedBrowserPaths = browserPaths
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
       const smokeCheckPayload: SmokeCheckConfig | null =
         smokeStartCmd.trim() || smokeEnabled
           ? {
@@ -1337,6 +1499,16 @@ export function RepoSettingsModal({
                   : 20,
               checkCommands: parsedCheckCmds.length > 0 ? parsedCheckCmds : undefined,
               triggerMode: smokeTriggerMode,
+              ...(browserEnabled
+                ? {
+                    browserCheck: {
+                      enabled: true,
+                      paths: parsedBrowserPaths.length > 0 ? parsedBrowserPaths : ["/"],
+                      waitForSelector: browserSelector.trim() || undefined,
+                      failOnConsoleError: browserFailConsole,
+                    },
+                  }
+                : {}),
             }
           : null;
       await onSubmit(repo.id, {
@@ -1348,11 +1520,13 @@ export function RepoSettingsModal({
         preferredImplementEngine: implEngine,
         preferredReviewEngine: reviewEngine,
         fallbackEngines: fallbackEngines.length > 0 ? fallbackEngines : null,
+        sandboxMode,
         defaultDeliveryChannel: deliveryChannel,
         verificationCommands,
         setupCommands,
         forbiddenPaths,
         conventions: conventions.trim() || null,
+        previewCommand: previewCommand.trim() || null,
         smokeCheck: smokeCheckPayload,
         maxConcurrentWorkers:
           maxConcurrentInput.trim() && Number.isFinite(parsedMaxConcurrent) && parsedMaxConcurrent > 0
@@ -1386,6 +1560,12 @@ export function RepoSettingsModal({
       setSmokeTimeoutSec(String(res.repo.smokeCheck?.startupTimeoutSec ?? 20));
       setSmokeTriggerMode(res.repo.smokeCheck?.triggerMode ?? "every_gate");
       setSmokeCheckCmds((res.repo.smokeCheck?.checkCommands ?? []).join("\n"));
+      setPreviewCommand(res.repo.previewCommand ?? "");
+      setSandboxMode(res.repo.sandboxMode ?? "balanced");
+      setBrowserEnabled(Boolean(res.repo.smokeCheck?.browserCheck?.enabled));
+      setBrowserPaths((res.repo.smokeCheck?.browserCheck?.paths ?? ["/"]).join(", "));
+      setBrowserSelector(res.repo.smokeCheck?.browserCheck?.waitForSelector ?? "");
+      setBrowserFailConsole(Boolean(res.repo.smokeCheck?.browserCheck?.failOnConsoleError));
       await loadPlaybook(repo.id);
       onRefresh?.();
       setContractNotice(`Synced super-work.json (${res.repo.contractSyncedAt ?? "ok"})`);
@@ -1668,6 +1848,21 @@ export function RepoSettingsModal({
                 </div>
 
                 <div>
+                  <label className="block text-zinc-400 mb-1">
+                    {t("modal.repoSettings.sandboxTitle")}
+                  </label>
+                  <select
+                    value={sandboxMode}
+                    onChange={(e) => setSandboxMode(e.target.value as SandboxMode)}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-2 text-zinc-100"
+                  >
+                    <option value="balanced">{t("modal.repoSettings.sandboxBalanced")}</option>
+                    <option value="strict">{t("modal.repoSettings.sandboxStrict")}</option>
+                    <option value="off">{t("modal.repoSettings.sandboxOff")}</option>
+                  </select>
+                </div>
+
+                <div>
                   <label className="block text-zinc-400 mb-1">{t("modal.repo.githubRepo")}</label>
                   <input
                     value={githubRepo}
@@ -1835,6 +2030,18 @@ export function RepoSettingsModal({
                   />
                 </div>
 
+                <div>
+                  <label className="block text-zinc-400 mb-1">
+                    {t("modal.repoSettings.previewCmd")}
+                  </label>
+                  <input
+                    value={previewCommand}
+                    onChange={(e) => setPreviewCommand(e.target.value)}
+                    placeholder="bun run dev -- --port $PORT"
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
+                  />
+                </div>
+
                 <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-3.5 space-y-3">
                   <div className="flex items-center justify-between gap-2 flex-wrap">
                     <span className="font-semibold text-zinc-200 flex items-center gap-1.5">
@@ -1953,6 +2160,46 @@ export function RepoSettingsModal({
                           placeholder="curl -fsS $SUPER_WORK_SMOKE_URL/api/health"
                           className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-2.5 py-1.5 font-mono text-zinc-100 leading-relaxed focus:outline-none focus:border-indigo-500"
                         />
+                      </div>
+
+                      <div className="rounded-lg border border-zinc-800/80 bg-zinc-950/60 p-2.5 space-y-2">
+                        <label className="inline-flex items-center gap-1.5 text-zinc-200 cursor-pointer font-medium">
+                          <input
+                            type="checkbox"
+                            checked={browserEnabled}
+                            onChange={(e) => setBrowserEnabled(e.target.checked)}
+                            className="rounded border-zinc-700 bg-zinc-950 text-indigo-500"
+                          />
+                          <Eye className="w-3.5 h-3.5 text-sky-400" />
+                          <span className="text-[11px]">{t("modal.repoSettings.browserGateEnable")}</span>
+                        </label>
+                        {browserEnabled && (
+                          <div className="space-y-2 pt-1 pl-5">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                              <input
+                                value={browserPaths}
+                                onChange={(e) => setBrowserPaths(e.target.value)}
+                                placeholder={t("modal.repoSettings.browserPaths")}
+                                className="w-full bg-zinc-900 border border-zinc-800 rounded px-2 py-1 font-mono text-[11px] text-zinc-100"
+                              />
+                              <input
+                                value={browserSelector}
+                                onChange={(e) => setBrowserSelector(e.target.value)}
+                                placeholder={t("modal.repoSettings.browserSelector")}
+                                className="w-full bg-zinc-900 border border-zinc-800 rounded px-2 py-1 font-mono text-[11px] text-zinc-100"
+                              />
+                            </div>
+                            <label className="inline-flex items-center gap-1.5 text-[11px] text-zinc-300 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={browserFailConsole}
+                                onChange={(e) => setBrowserFailConsole(e.target.checked)}
+                                className="rounded border-zinc-700 bg-zinc-950 text-indigo-500"
+                              />
+                              {t("modal.repoSettings.browserFailConsole")}
+                            </label>
+                          </div>
+                        )}
                       </div>
 
                       <p className="text-[11px] text-zinc-500">{t("modal.repoSettings.smokeHint")}</p>
@@ -2259,6 +2506,7 @@ export function WorktreeManagerModal({
 }: WorktreeManagerModalProps) {
   const { locale, t } = useI18n();
   const [items, setItems] = useState<ManagedWorktreeItem[]>([]);
+  const [previews, setPreviews] = useState<PreviewSession[]>([]);
   const [loading, setLoading] = useState(false);
   const [gcing, setGcing] = useState(false);
   const [gcResult, setGcResult] = useState<WorktreeGcResult | null>(null);
@@ -2266,8 +2514,12 @@ export function WorktreeManagerModal({
   const loadWorktrees = async () => {
     setLoading(true);
     try {
-      const res = await api.listWorktrees(repoId);
-      setItems(res.items);
+      const [wtRes, prvRes] = await Promise.all([
+        api.listWorktrees(repoId),
+        api.listPreviews(repoId),
+      ]);
+      setItems(wtRes.items);
+      setPreviews(prvRes.previews);
     } finally {
       setLoading(false);
     }
@@ -2331,6 +2583,61 @@ export function WorktreeManagerModal({
             {t("modal.worktrees.gcResultBanner")
               .replace("{removed}", String(gcResult.removedPaths.length))
               .replace("{skipped}", String(gcResult.skippedActiveCount))}
+          </div>
+        )}
+
+        {previews.length > 0 && (
+          <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 p-3 space-y-2 text-xs">
+            <div className="font-semibold text-sky-300 flex items-center gap-1.5">
+              <Play className="w-3.5 h-3.5" />
+              {t("preview.activeTitle")} ({previews.length})
+            </div>
+            <div className="space-y-1.5">
+              {previews.map((prv) => (
+                <div
+                  key={prv.id}
+                  className="flex flex-wrap items-center justify-between gap-2 rounded border border-zinc-800 bg-zinc-950/80 px-2.5 py-1.5"
+                >
+                  <div className="min-w-0 flex items-center gap-2">
+                    <span className="px-1.5 py-0.2 rounded font-mono text-[10px] bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                      {prv.status}
+                    </span>
+                    <span className="text-zinc-200 truncate max-w-xs">{prv.label}</span>
+                    <a
+                      href={prv.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 font-mono text-[11px] text-sky-300 hover:underline"
+                    >
+                      {prv.url}
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => void api.renewPreview(prv.id).then(() => loadWorktrees())}
+                      className="px-2 py-0.5 rounded border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-[10px] text-zinc-200"
+                    >
+                      {t("preview.renewBtn")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void api.stopPreview(prv.id).then(() => {
+                          void loadWorktrees();
+                          onChanged();
+                        })
+                      }
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/20 text-[10px] text-rose-300"
+                    >
+                      <Square className="w-2.5 h-2.5" />
+                      {t("preview.stopBtn")}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 

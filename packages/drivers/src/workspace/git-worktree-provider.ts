@@ -4,9 +4,11 @@ import { access, lstat, mkdir, readdir, readFile, readlink, rm, symlink, writeFi
 import { createServer } from "node:net";
 import { basename, dirname, join, resolve } from "node:path";
 import type {
+  BrowserCheckConfig,
   RepoConfig,
   RepoContractFile,
   RevertResult,
+  SandboxMode,
   SmokeCheckConfig,
   SmokeCheckResult,
   Ticket,
@@ -14,6 +16,8 @@ import type {
   VerificationRunResult,
   WorkspaceProvider,
 } from "@super-work/core";
+import { runCdpBrowserCheck, type BrowserCheckExecutionResult } from "../browser/cdp-browser-check.ts";
+import { wrapCommandWithOsSandbox } from "../sandbox/os-sandbox.ts";
 import { scanRepoStructureSummary } from "./repo-structure-scanner.ts";
 
 export async function allocateFreeLocalPort(): Promise<number> {
@@ -57,11 +61,23 @@ export async function runGit(args: string[], cwd: string): Promise<GitCommandRes
   return { exitCode, stdout, stderr };
 }
 
+export type BrowserCheckRunner = (
+  baseUrl: string,
+  config: BrowserCheckConfig,
+) => Promise<BrowserCheckExecutionResult>;
+
 export class GitWorktreeProvider implements WorkspaceProvider {
   private readonly worktreesDir: string;
+  private readonly browserRunner: BrowserCheckRunner;
 
-  constructor(worktreesDir: string) {
+  constructor(
+    worktreesDir: string,
+    options?: {
+      browserRunner?: BrowserCheckRunner;
+    },
+  ) {
     this.worktreesDir = resolve(worktreesDir);
+    this.browserRunner = options?.browserRunner ?? ((url, cfg) => runCdpBrowserCheck(url, cfg));
   }
 
   async ensureBranch(rootRepoPath: string, branchName: string, startPoint: string): Promise<void> {
@@ -367,7 +383,13 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     worktreePath: string,
     commands: string[],
     timeoutSec = 120,
-    env?: NodeJS.ProcessEnv,
+    options?: {
+      env?: NodeJS.ProcessEnv;
+      sandboxMode?: SandboxMode;
+      forbiddenPaths?: string[];
+      allowNetwork?: boolean;
+      rootRepoPath?: string;
+    },
   ): Promise<VerificationRunResult> {
     const cleanCmds = commands.map((c) => c.trim()).filter(Boolean);
     if (cleanCmds.length === 0) {
@@ -380,12 +402,32 @@ export class GitWorktreeProvider implements WorkspaceProvider {
 
     const timeoutMs = Math.max(5, Math.min(timeoutSec, 300)) * 1_000;
     const results: VerificationCommandOutput[] = [];
+    const sandboxMode: SandboxMode = options?.sandboxMode ?? "off";
 
     for (const command of cleanCmds) {
       const started = Date.now();
-      const proc = Bun.spawn(["sh", "-lc", command], {
+      const baseArgv = ["sh", "-lc", command];
+      const wrapped =
+        sandboxMode !== "off"
+          ? wrapCommandWithOsSandbox({
+              commandArgv: baseArgv,
+              worktreePath,
+              rootRepoPath: options?.rootRepoPath,
+              mode: sandboxMode,
+              forbiddenPaths: options?.forbiddenPaths,
+              allowNetwork: options?.allowNetwork,
+              engine: "verification",
+              baseEnv: options?.env ?? process.env,
+            })
+          : {
+              argv: baseArgv,
+              env: options?.env ?? process.env,
+              appliedBackend: "off" as const,
+            };
+
+      const proc = Bun.spawn(wrapped.argv, {
         cwd: worktreePath,
-        env: env ?? process.env,
+        env: wrapped.env,
         stdout: "pipe",
         stderr: "pipe",
         stdin: "ignore",
@@ -452,7 +494,10 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     const port = await allocateFreeLocalPort();
     const smokeUrl = `http://127.0.0.1:${port}`;
     const rawReadyUrl = config.readyUrl?.trim() || smokeUrl;
-    const readyUrl = rawReadyUrl
+    const normalizedRawReadyUrl = rawReadyUrl.startsWith("/")
+      ? `${smokeUrl}${rawReadyUrl}`
+      : rawReadyUrl;
+    const readyUrl = normalizedRawReadyUrl
       .replace(/\$\{SUPER_WORK_SMOKE_URL\}|\$SUPER_WORK_SMOKE_URL/g, smokeUrl)
       .replace(/\$\{SUPER_WORK_SMOKE_PORT\}|\$SUPER_WORK_SMOKE_PORT/g, String(port))
       .replace(/\$\{PORT\}|\$PORT/g, String(port));
@@ -575,7 +620,9 @@ export class GitWorktreeProvider implements WorkspaceProvider {
       }
 
       const checkCmds = (config.checkCommands ?? []).map((c) => c.trim()).filter(Boolean);
-      const checkRes = await this.runVerificationCommands(worktreePath, checkCmds, 60, smokeEnv);
+      const checkRes = await this.runVerificationCommands(worktreePath, checkCmds, 60, {
+        env: smokeEnv,
+      });
       if (!checkRes.ok) {
         const tail = outputTail.trim();
         return {
@@ -591,6 +638,33 @@ export class GitWorktreeProvider implements WorkspaceProvider {
         };
       }
 
+      let browserExec: BrowserCheckExecutionResult | undefined;
+      if (config.browserCheck?.enabled) {
+        let browserBaseUrl = smokeUrl;
+        try {
+          browserBaseUrl = new URL(readyUrl).origin;
+        } catch {
+          browserBaseUrl = smokeUrl;
+        }
+        browserExec = await this.browserRunner(browserBaseUrl, config.browserCheck);
+        if (browserExec.summary.executed && !browserExec.summary.ok) {
+          const tail = outputTail.trim();
+          return {
+            ok: false,
+            port,
+            readyUrl,
+            startupDurationMs,
+            probeStatus,
+            checkResults: checkRes.results,
+            serverOutputTail: tail,
+            failedStep: "smoke:browserCheck",
+            summary: `${browserExec.summary.summary}${tail ? `\nServer tail:\n${tail.slice(-600)}` : ""}`,
+            browserResult: browserExec.summary,
+            rawScreenshots: browserExec.rawScreenshots,
+          };
+        }
+      }
+
       return {
         ok: true,
         port,
@@ -599,9 +673,15 @@ export class GitWorktreeProvider implements WorkspaceProvider {
         probeStatus,
         checkResults: checkRes.results,
         serverOutputTail: outputTail.trim(),
-        summary: `Smoke check passed (${readyUrl} ready in ${startupDurationMs}ms${
-          checkRes.results.length > 0 ? `, ${checkRes.results.length} check(s) ok` : ""
-        })`,
+        summary: [
+          `Smoke check passed (${readyUrl} ready in ${startupDurationMs}ms${
+            checkRes.results.length > 0 ? `, ${checkRes.results.length} check(s) ok` : ""
+          })`,
+          browserExec ? browserExec.summary.summary : "",
+        ]
+          .filter(Boolean)
+          .join(" · "),
+        ...(browserExec ? { browserResult: browserExec.summary, rawScreenshots: browserExec.rawScreenshots } : {}),
       };
     } finally {
       await killProcessGroup();

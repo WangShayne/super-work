@@ -3,7 +3,10 @@ import {
   AlertTriangle,
   Bell,
   CheckCircle2,
+  Copy,
   Cpu,
+  KeyRound,
+  Plug,
   RefreshCw,
   Send,
   Sparkles,
@@ -71,6 +74,10 @@ export function SetupWizardModal({
   const [notifyOnInbox, setNotifyOnInbox] = useState(true);
   const [notifyOnDelivery, setNotifyOnDelivery] = useState(true);
   const [notifyOnFailure, setNotifyOnFailure] = useState(true);
+  const [publicBaseUrl, setPublicBaseUrl] = useState("");
+  const [actionSecret, setActionSecret] = useState("");
+  const [githubWebhookSecret, setGithubWebhookSecret] = useState("");
+  const [mcpCopied, setMcpCopied] = useState(false);
   const [testingNotify, setTestingNotify] = useState(false);
   const [notifyTestMsg, setNotifyTestMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
@@ -104,6 +111,10 @@ export function SetupWizardModal({
     setNotifyOnInbox(cfg.notifications?.notifyOnInbox ?? true);
     setNotifyOnDelivery(cfg.notifications?.notifyOnDelivery ?? true);
     setNotifyOnFailure(cfg.notifications?.notifyOnFailure ?? true);
+    setPublicBaseUrl(cfg.notifications?.publicBaseUrl ?? "");
+    setActionSecret("");
+    setGithubWebhookSecret("");
+    setMcpCopied(false);
     setNotifyTestMsg(null);
     setApiKey("");
     setTestResult(null);
@@ -191,6 +202,9 @@ export function SetupWizardModal({
           notifyOnInbox,
           notifyOnDelivery,
           notifyOnFailure,
+          publicBaseUrl: publicBaseUrl.trim() || undefined,
+          actionSecret: actionSecret.trim() || undefined,
+          githubWebhookSecret: githubWebhookSecret.trim() || undefined,
         },
       });
       await onSaved(updated);
@@ -753,6 +767,106 @@ export function SetupWizardModal({
                   {notifyTestMsg.text}
                 </div>
               )}
+            </div>
+          </section>
+
+          {/* Panel D: MCP Integration & Bidirectional Remote Webhooks (v0.8) */}
+          <section className="space-y-3 pt-2 border-t border-zinc-800/80">
+            <div className="flex items-start justify-between gap-2 flex-wrap">
+              <div>
+                <h4 className="font-semibold text-zinc-200 flex items-center gap-1.5">
+                  <Plug className="w-3.5 h-3.5 text-teal-400" />
+                  {t("setup.mcpWebhookTitle")}
+                </h4>
+                <p className="text-[11px] text-zinc-400 mt-0.5">{t("setup.mcpWebhookDesc")}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const snippet = JSON.stringify(
+                    {
+                      mcpServers: {
+                        "super-work": {
+                          command: "bun",
+                          args: ["run", "packages/cli/src/index.ts", "mcp"],
+                        },
+                      },
+                    },
+                    null,
+                    2,
+                  );
+                  void navigator.clipboard?.writeText(snippet).then(() => {
+                    setMcpCopied(true);
+                    window.setTimeout(() => setMcpCopied(false), 1800);
+                  });
+                }}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-teal-500/40 bg-teal-500/10 hover:bg-teal-500/20 text-teal-200 text-[11px] shrink-0"
+              >
+                <Copy className="w-3 h-3" />
+                {mcpCopied ? t("setup.mcpCopied") : t("setup.mcpCopyBtn")}
+              </button>
+            </div>
+
+            <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 space-y-3">
+              <div>
+                <label className="block text-zinc-400 mb-1">{t("setup.publicBaseUrl")}</label>
+                <input
+                  value={publicBaseUrl}
+                  onChange={(e) => setPublicBaseUrl(e.target.value)}
+                  placeholder="https://my-mac.tailnet.ts.net:4318"
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label className="text-zinc-400">
+                      {t("setup.actionSecret")}
+                      {setupStatus.config.notifications?.hasActionSecret && (
+                        <span className="ml-1.5 text-[10px] text-emerald-400">
+                          ({setupStatus.config.notifications.maskedActionSecret})
+                        </span>
+                      )}
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setActionSecret(
+                          `${crypto.randomUUID().replace(/-/g, "")}${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`,
+                        )
+                      }
+                      className="inline-flex items-center gap-1 text-[10px] text-indigo-300 hover:text-indigo-200"
+                    >
+                      <KeyRound className="w-2.5 h-2.5" />
+                      {t("setup.generateSecretBtn")}
+                    </button>
+                  </div>
+                  <input
+                    value={actionSecret}
+                    onChange={(e) => setActionSecret(e.target.value)}
+                    placeholder="HMAC secret for /api/webhooks/action & chatops"
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
+                  />
+                </div>
+                <div>
+                  <label className="block text-zinc-400 mb-1">
+                    {t("setup.githubWebhookSecret")}
+                    {setupStatus.config.notifications?.hasGithubWebhookSecret && (
+                      <span className="ml-1.5 text-[10px] text-emerald-400">
+                        ({setupStatus.config.notifications.maskedGithubWebhookSecret})
+                      </span>
+                    )}
+                  </label>
+                  <input
+                    type="password"
+                    value={githubWebhookSecret}
+                    onChange={(e) => setGithubWebhookSecret(e.target.value)}
+                    placeholder="Secret configured on GitHub /api/webhooks/github"
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
+                  />
+                </div>
+              </div>
             </div>
           </section>
         </div>

@@ -16,6 +16,7 @@ import {
   NotificationDispatcher,
   OpenCodeDriver,
   SqliteStateStore,
+  WorktreePreviewManager,
   buildControlPlaneLLMFromSetup,
   runGit,
 } from "@super-work/drivers";
@@ -76,6 +77,8 @@ export async function startDaemon(options?: {
     new MockWorkerDriver(),
   ];
 
+  const previewProvider = new WorktreePreviewManager();
+
   const kernel = new SuperWorkKernel({
     stateStore,
     artifactStore,
@@ -83,6 +86,7 @@ export async function startDaemon(options?: {
     llm: mutableLlm,
     drivers,
     outboxExecutor: new GhOutboxExecutor(workspace),
+    previewProvider,
   });
 
   // Auto-register workspace repository if none registered yet

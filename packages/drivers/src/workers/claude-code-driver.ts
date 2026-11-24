@@ -1,6 +1,7 @@
 import type { WorkerDriver, WorkerStreamEvent, WorkerTurnInput } from "@super-work/core";
 import { nowIso } from "@super-work/core";
 import { createSanitizedClaudeEnv } from "../llm/control-plane-llm.ts";
+import { wrapCommandWithOsSandbox } from "../sandbox/os-sandbox.ts";
 import { readLinesFromStream, truncateText } from "./stream-utils.ts";
 
 export function buildClaudeCliArgs(input: WorkerTurnInput): string[] {
@@ -152,12 +153,22 @@ export class ClaudeCodeDriver implements WorkerDriver {
 
   async *runTurn(input: WorkerTurnInput, signal: AbortSignal): AsyncGenerator<WorkerStreamEvent> {
     const args = buildClaudeCliArgs(input);
-    const proc = Bun.spawn([this.binaryPath, ...args], {
+    const wrapped = wrapCommandWithOsSandbox({
+      commandArgv: [this.binaryPath, ...args],
+      worktreePath: input.worktreePath,
+      rootRepoPath: input.rootRepoPath,
+      mode: input.sandboxMode ?? "balanced",
+      forbiddenPaths: input.mandate.forbiddenPaths,
+      allowNetwork: input.mandate.allowNetwork,
+      engine: "claude",
+      baseEnv: createSanitizedClaudeEnv(),
+    });
+    const proc = Bun.spawn(wrapped.argv, {
       cwd: input.worktreePath,
       stdout: "pipe",
       stderr: "pipe",
       stdin: "ignore",
-      env: createSanitizedClaudeEnv(),
+      env: wrapped.env,
     });
 
     const onAbort = () => {

@@ -182,7 +182,7 @@ export function HeaderBar({
               <div className="flex items-center gap-2">
                 <span className="font-semibold tracking-tight text-zinc-100 text-sm">super-work</span>
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
-                  v0.7
+                  v0.8
                 </span>
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700/60">
                   {t("brand.badge")}
@@ -348,7 +348,9 @@ export function HeaderBar({
             label={t("strip.contract.label")}
             value={
               smokeEnabled
-                ? t("strip.contract.smokeOn")
+                ? activeRepo.smokeCheck?.browserCheck?.enabled
+                  ? t("strip.contract.smokeUiOn")
+                  : t("strip.contract.smokeOn")
                 : hasStaticGate
                   ? t("strip.contract.synced")
                   : t("strip.contract.unset")
@@ -358,11 +360,11 @@ export function HeaderBar({
             onClick={onOpenContractSettings ?? onOpenRepoSettings}
             tooltipTitle={t("strip.contract.label")}
             tooltipBody={t("strip.contract.desc")}
-            tooltipFooter={
+            tooltipFooter={`Sandbox: ${activeRepo.sandboxMode ?? "balanced"} | ${
               smokeEnabled
                 ? `Smoke: ${activeRepo.smokeCheck?.startCommand}`
                 : `${activeRepo.verificationCommands?.length ?? 0} verification cmd(s)`
-            }
+            }`}
           />
         )}
 
@@ -438,9 +440,11 @@ export function HeaderBar({
                 : t("strip.worktrees.clean")
           }
           extra={
-            reclaimableWorktrees > 0 && activeWorktrees > 0
-              ? `(${activeWorktrees} ${t("strip.worktrees.activeSuffix")})`
-              : undefined
+            (health?.counts.activePreviews ?? 0) > 0
+              ? `(${health?.counts.activePreviews} ${t("strip.worktrees.liveSuffix")})`
+              : reclaimableWorktrees > 0 && activeWorktrees > 0
+                ? `(${activeWorktrees} ${t("strip.worktrees.activeSuffix")})`
+                : undefined
           }
           tone={reclaimableWorktrees > 0 ? "warn" : "neutral"}
           align="right"

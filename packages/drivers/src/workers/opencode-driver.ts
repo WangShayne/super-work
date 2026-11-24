@@ -5,6 +5,7 @@ import type {
   WorkerTurnInput,
 } from "@super-work/core";
 import { nowIso } from "@super-work/core";
+import { wrapCommandWithOsSandbox } from "../sandbox/os-sandbox.ts";
 import { readLinesFromStream, truncateText } from "./stream-utils.ts";
 
 export function formatOpenCodeModelArg(
@@ -170,8 +171,18 @@ export class OpenCodeDriver implements WorkerDriver {
 
   async *runTurn(input: WorkerTurnInput, signal: AbortSignal): AsyncGenerator<WorkerStreamEvent> {
     const args = buildOpenCodeCliArgs(input);
-    const proc = Bun.spawn([this.binary, ...args], {
+    const wrapped = wrapCommandWithOsSandbox({
+      commandArgv: [this.binary, ...args],
+      worktreePath: input.worktreePath,
+      rootRepoPath: input.rootRepoPath,
+      mode: input.sandboxMode ?? "balanced",
+      forbiddenPaths: input.mandate.forbiddenPaths,
+      allowNetwork: input.mandate.allowNetwork,
+      engine: "opencode",
+    });
+    const proc = Bun.spawn(wrapped.argv, {
       cwd: input.worktreePath,
+      env: wrapped.env,
       stdin: new TextEncoder().encode(input.prompt),
       stdout: "pipe",
       stderr: "pipe",
