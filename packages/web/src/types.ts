@@ -1,14 +1,25 @@
 export type OperatingMode = "off" | "observe" | "auto";
 export type WorkerEngineId = "claude" | "codex" | "opencode" | "mock";
+export type EnginePreference = WorkerEngineId | "auto";
+export type TaskCategory = "ui" | "backend" | "refactor" | "test_ci" | "docs_chore";
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 export type PipelineTemplateId = "fast" | "standard" | "strict";
-export type StageKind = "plan" | "implement" | "review" | "rebase";
+export type StageKind = "plan" | "spec_test" | "implement" | "review" | "rebase";
 export type DeliveryChannel = "auto_pr_or_branch" | "local_merge" | "github_pr";
 export type EpicDeliveryMode = "unified" | "per_subtask";
 
 export type SmokeTriggerMode = "every_gate" | "delivery_only";
 
 export type SandboxMode = "off" | "balanced" | "strict";
+
+export type VisualDiffMode = "off" | "auto" | "enforce" | "informational";
+
+export interface BrowserInteractionStep {
+  action: "click" | "fill" | "press" | "waitForSelector" | "waitForText";
+  selector?: string;
+  value?: string;
+  timeoutMs?: number;
+}
 
 export interface BrowserCheckConfig {
   enabled: boolean;
@@ -18,6 +29,9 @@ export interface BrowserCheckConfig {
   waitForSelector?: string;
   failOnConsoleError?: boolean;
   timeoutMs?: number;
+  steps?: BrowserInteractionStep[];
+  visualDiffMode?: VisualDiffMode;
+  maxVisualDiffRatio?: number;
 }
 
 export interface SmokeCheckConfig {
@@ -50,6 +64,8 @@ export interface EpicSubtaskSpec {
   title: string;
   description: string;
   template: PipelineTemplateId;
+  tddMode?: boolean;
+  preferredEngine?: EnginePreference;
   allowedPaths: string[];
   dependsOnKeys: string[];
   acceptanceCriteria: string[];
@@ -72,6 +88,7 @@ export type TicketStatus =
   | "queued"
   | "waiting_deps"
   | "planning"
+  | "spec_testing"
   | "awaiting_plan_approval"
   | "implementing"
   | "reviewing"
@@ -93,6 +110,7 @@ export interface SharedPlaybookRuleSpec {
 export interface RepoContractFile {
   version?: 1;
   defaultTemplate?: PipelineTemplateId;
+  defaultTddMode?: boolean;
   verificationCommands?: string[];
   setupCommands?: string[];
   smokeCheck?: SmokeCheckConfig;
@@ -185,6 +203,7 @@ export interface ArenaCandidateResult {
   recommended?: boolean;
   rationale?: string;
   screenshotArtifactIds?: string[];
+  visualDiffArtifactIds?: string[];
 }
 
 export type EpicReplanMutationKind = "update_subtask" | "add_subtask" | "skip_subtask";
@@ -284,7 +303,8 @@ export interface RepoConfig {
   mode: OperatingMode;
   githubRepo?: string;
   defaultTemplate: PipelineTemplateId;
-  preferredImplementEngine: WorkerEngineId;
+  defaultTddMode?: boolean;
+  preferredImplementEngine: EnginePreference;
   preferredReviewEngine: WorkerEngineId;
   fallbackEngines?: WorkerEngineId[];
   autoCleanupWorktree?: boolean;
@@ -366,12 +386,22 @@ export interface Ticket {
   branchName?: string;
   worktreeCleanedAt?: string;
   nativeSessions: Partial<Record<WorkerEngineId, string>>;
+  preferredEngine?: EnginePreference;
   activeEngine?: WorkerEngineId;
   failedEngines?: WorkerEngineId[];
   arenaMode?: boolean;
   arenaCompetitorEngine?: WorkerEngineId;
   arenaCandidates?: ArenaCandidateResult[];
   arenaWinnerId?: string;
+  tddMode?: boolean;
+  lockedTestPaths?: string[];
+  specTestCommitSha?: string;
+  specTestChallengeCount?: number;
+  taskCategory?: TaskCategory;
+  routingRationale?: string;
+  autoArenaEscalated?: boolean;
+  impactSummary?: TicketImpactSummary;
+  pauseBeforeRun?: boolean;
   routineId?: string;
   epicReplanCount?: number;
   epicReplanHistory?: EpicReplanProposal[];
@@ -403,7 +433,15 @@ export interface SpillArtifact {
   id: string;
   ticketId: string;
   stageRunId?: string;
-  kind: "transcript" | "diff" | "test_log" | "smoke_log" | "review_report" | "handover" | "screenshot";
+  kind:
+    | "transcript"
+    | "diff"
+    | "test_log"
+    | "smoke_log"
+    | "review_report"
+    | "handover"
+    | "screenshot"
+    | "visual_diff";
   summary: string;
   storageUri: string;
   byteSize: number;
@@ -549,6 +587,58 @@ export interface MemorySearchHit {
   snippet: string;
 }
 
+export interface SymbolImpactReport {
+  targetFiles: string[];
+  directDependents: string[];
+  transitiveDependents: string[];
+  neighborSignatures: Array<{
+    filePath: string;
+    relation: "target" | "direct_dependent" | "direct_import";
+    symbols: string[];
+  }>;
+  contextPackMarkdown: string;
+}
+
+export interface TicketImpactSummary {
+  directDependents: string[];
+  transitiveDependents: string[];
+  semanticDepTicketIds: string[];
+}
+
+export interface TicketCheckpoint {
+  id: string;
+  ticketId: string;
+  repoId: string;
+  stageRunId?: string;
+  stage: StageKind | "baseline";
+  engine?: WorkerEngineId;
+  label: string;
+  gitRef: string;
+  commitSha: string;
+  changedFiles: string[];
+  verificationPassed?: boolean;
+  createdAt: string;
+  cleanedAt?: string;
+}
+
+export interface RestoreCheckpointInput {
+  mode?: "in_place" | "fork";
+  prompt?: string;
+  preferredEngine?: EnginePreference;
+  targetStage?: StageKind;
+}
+
+export interface DagNodeMutationInput {
+  action?: "update" | "pause" | "resume" | "rerun";
+  title?: string;
+  description?: string;
+  preferredEngine?: EnginePreference;
+  allowedPaths?: string[];
+  dependsOn?: string[];
+  tddMode?: boolean;
+  pauseBeforeRun?: boolean;
+}
+
 export interface TicketDetailResponse {
   ticket: Ticket;
   stageRuns: StageRun[];
@@ -557,6 +647,7 @@ export interface TicketDetailResponse {
   outboxEntries: OutboxEntry[];
   diff: string;
   previews?: PreviewSession[];
+  checkpoints?: TicketCheckpoint[];
   subtasks?: Ticket[];
   arenaCandidateDiffs?: Record<string, string>;
   upstreamDependencies?: Array<{
@@ -651,6 +742,9 @@ export interface SpecClarificationResult {
   ready: boolean;
   recommendedDispatchMode: "single" | "epic";
   recommendedTemplate: PipelineTemplateId;
+  recommendedTddMode?: boolean;
+  directDependents?: string[];
+  transitiveDependents?: string[];
   refinedTitle: string;
   refinedDescription: string;
   suggestedAllowedPaths: string[];
@@ -677,6 +771,17 @@ export interface EngineMetricRow {
   avgDurationMs: number;
 }
 
+export interface EngineCategoryMetricRow {
+  engine: WorkerEngineId;
+  category: TaskCategory;
+  tickets: number;
+  firstPassRate: number;
+  deliveryRate: number;
+  revertRate: number;
+  avgCostUsd: number;
+  compositeScore: number;
+}
+
 export interface RepoMetricsSummary {
   repoId?: string;
   todayDate: string;
@@ -695,4 +800,5 @@ export interface RepoMetricsSummary {
   };
   deliveryRate: number;
   byEngine: EngineMetricRow[];
+  engineMatrix?: EngineCategoryMetricRow[];
 }

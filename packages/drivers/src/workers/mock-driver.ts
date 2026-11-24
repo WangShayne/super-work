@@ -187,6 +187,34 @@ export class MockWorkerDriver implements WorkerDriver {
       return;
     }
 
+    if (input.stage === "spec_test") {
+      const safeId = input.ticketId.replace(/[^a-zA-Z0-9_-]/g, "_");
+      const testFile = `test/spec_${safeId}.test.ts`;
+      const absTest = join(input.worktreePath, testFile);
+      await mkdir(dirname(absTest), { recursive: true });
+      await writeFile(
+        absTest,
+        [
+          `import { expect, it } from "bun:test";`,
+          `it("satisfies spec contract for ${safeId}", () => { expect(true).toBe(true); });`,
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      yield { type: "tool_use", toolName: "Write", inputSummary: testFile, timestamp: nowIso() };
+      yield { type: "tool_result", toolName: "Write", isError: false, outputSummary: `Wrote ${testFile}`, timestamp: nowIso() };
+      yield { type: "text", text: `Authored spec contract tests in ${testFile}.`, timestamp: nowIso() };
+      yield { type: "usage", costUsd: 0.03, timestamp: nowIso() };
+      yield {
+        type: "completed",
+        summary: `Spec tests written to ${testFile}`,
+        costUsd: 0.03,
+        structuredOutput: { changedFiles: [testFile], verificationPassed: true },
+        timestamp: nowIso(),
+      };
+      return;
+    }
+
     if (input.stage === "implement") {
       const relFile = pickTargetFile(input.mandate.allowedPaths, input.ticketId);
       const absFile = join(input.worktreePath, relFile);

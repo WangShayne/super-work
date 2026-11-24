@@ -29,6 +29,9 @@ export interface McpToolHost {
   searchMemoryAndCasebook(args: Record<string, unknown>): Promise<unknown>;
   triggerRoutine(args: Record<string, unknown>): Promise<unknown>;
   managePreview(args: Record<string, unknown>): Promise<unknown>;
+  analyzeImpact(args: Record<string, unknown>): Promise<unknown>;
+  manageCheckpoints(args: Record<string, unknown>): Promise<unknown>;
+  mutateDagNode(args: Record<string, unknown>): Promise<unknown>;
 }
 
 export const MCP_PROTOCOL_VERSIONS = ["2025-03-26", "2024-11-05"] as const;
@@ -67,9 +70,10 @@ export const MCP_TOOL_DEFINITIONS = [
         template: { type: "string", enum: ["fast", "standard", "strict"] },
         allowedPaths: { type: "array", items: { type: "string" } },
         dependsOn: { type: "array", items: { type: "string" } },
-        preferredEngine: { type: "string", enum: ["claude", "codex", "opencode", "mock"] },
+        preferredEngine: { type: "string", enum: ["auto", "claude", "codex", "opencode", "mock"] },
         arenaMode: { type: "boolean" },
         arenaCompetitorEngine: { type: "string", enum: ["claude", "codex", "opencode", "mock"] },
+        tddMode: { type: "boolean" },
         acceptanceCriteria: { type: "array", items: { type: "string" } },
       },
       required: ["repoId", "title", "description"],
@@ -186,6 +190,57 @@ export const MCP_TOOL_DEFINITIONS = [
       required: ["action"],
     },
   },
+  {
+    name: "analyze_impact",
+    description:
+      "Compute 1-hop direct and transitive reverse-import impact radius + exported symbol signatures for repository scope paths.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repoId: { type: "string" },
+        paths: { type: "array", items: { type: "string" } },
+      },
+      required: ["repoId", "paths"],
+    },
+  },
+  {
+    name: "manage_checkpoints",
+    description:
+      "List worktree stage checkpoints, compute incremental diffs between snapshots, or restore/fork a ticket checkpoint.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["list", "diff", "restore"] },
+        ticketId: { type: "string" },
+        checkpointId: { type: "string" },
+        baseCheckpointId: { type: "string" },
+        mode: { type: "string", enum: ["in_place", "fork"] },
+        prompt: { type: "string" },
+        preferredEngine: { type: "string", enum: ["auto", "claude", "codex", "opencode", "mock"] },
+      },
+      required: ["action", "ticketId"],
+    },
+  },
+  {
+    name: "mutate_dag_node",
+    description:
+      "Perform live surgery on a ticket/subtask DAG node (update engine/paths/description/dependencies/TDD/breakpoint, or pause/resume/rerun).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticketId: { type: "string" },
+        action: { type: "string", enum: ["update", "pause", "resume", "rerun"] },
+        title: { type: "string" },
+        description: { type: "string" },
+        preferredEngine: { type: "string", enum: ["auto", "claude", "codex", "opencode", "mock"] },
+        allowedPaths: { type: "array", items: { type: "string" } },
+        dependsOn: { type: "array", items: { type: "string" } },
+        tddMode: { type: "boolean" },
+        pauseBeforeRun: { type: "boolean" },
+      },
+      required: ["ticketId"],
+    },
+  },
 ] as const;
 
 export const MCP_RESOURCES = [
@@ -270,7 +325,7 @@ async function handleSingleMcpRequest(
             },
             serverInfo: {
               name: "super-work",
-              version: "0.8.0",
+              version: "0.9.0",
             },
           },
         };
@@ -328,6 +383,15 @@ async function handleSingleMcpRequest(
               break;
             case "manage_preview":
               result = await host.managePreview(args);
+              break;
+            case "analyze_impact":
+              result = await host.analyzeImpact(args);
+              break;
+            case "manage_checkpoints":
+              result = await host.manageCheckpoints(args);
+              break;
+            case "mutate_dag_node":
+              result = await host.mutateDagNode(args);
               break;
             default:
               return jsonRpcError(id, -32601, `Unknown tool: ${name}`);

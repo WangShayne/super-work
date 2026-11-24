@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { access, lstat, mkdir, readdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
+import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type {
   BrowserCheckConfig,
@@ -11,14 +12,17 @@ import type {
   SandboxMode,
   SmokeCheckConfig,
   SmokeCheckResult,
+  SymbolImpactReport,
   Ticket,
   VerificationCommandOutput,
   VerificationRunResult,
   WorkspaceProvider,
 } from "@super-work/core";
 import { runCdpBrowserCheck, type BrowserCheckExecutionResult } from "../browser/cdp-browser-check.ts";
+import { comparePngVisualDiff } from "../browser/png-visual-diff.ts";
 import { wrapCommandWithOsSandbox } from "../sandbox/os-sandbox.ts";
 import { scanRepoStructureSummary } from "./repo-structure-scanner.ts";
+import { analyzeRepoSymbolImpact } from "./symbol-graph-scanner.ts";
 
 export async function allocateFreeLocalPort(): Promise<number> {
   return new Promise<number>((resolvePort, rejectPort) => {
@@ -46,9 +50,14 @@ export interface GitCommandResult {
   stderr: string;
 }
 
-export async function runGit(args: string[], cwd: string): Promise<GitCommandResult> {
+export async function runGit(
+  args: string[],
+  cwd: string,
+  extraEnv?: NodeJS.ProcessEnv,
+): Promise<GitCommandResult> {
   const proc = Bun.spawn(["git", ...args], {
     cwd,
+    env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
@@ -387,6 +396,7 @@ export class GitWorktreeProvider implements WorkspaceProvider {
       env?: NodeJS.ProcessEnv;
       sandboxMode?: SandboxMode;
       forbiddenPaths?: string[];
+      readOnlyPaths?: string[];
       allowNetwork?: boolean;
       rootRepoPath?: string;
     },
@@ -415,6 +425,7 @@ export class GitWorktreeProvider implements WorkspaceProvider {
               rootRepoPath: options?.rootRepoPath,
               mode: sandboxMode,
               forbiddenPaths: options?.forbiddenPaths,
+              readOnlyPaths: options?.readOnlyPaths,
               allowNetwork: options?.allowNetwork,
               engine: "verification",
               baseEnv: options?.env ?? process.env,
@@ -477,7 +488,14 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     };
   }
 
-  async runSmokeCheck(worktreePath: string, config: SmokeCheckConfig): Promise<SmokeCheckResult> {
+  async runSmokeCheck(
+    worktreePath: string,
+    config: SmokeCheckConfig,
+    options?: {
+      baselineScreenshotsDir?: string;
+      resolveBaselineScreenshotsDir?: () => Promise<string | undefined>;
+    },
+  ): Promise<SmokeCheckResult> {
     const startCommand = config.startCommand.trim();
     if (!startCommand) {
       return {
@@ -639,6 +657,7 @@ export class GitWorktreeProvider implements WorkspaceProvider {
       }
 
       let browserExec: BrowserCheckExecutionResult | undefined;
+      let rawVisualDiffs: SmokeCheckResult["rawVisualDiffs"];
       if (config.browserCheck?.enabled) {
         let browserBaseUrl = smokeUrl;
         try {
@@ -647,6 +666,7 @@ export class GitWorktreeProvider implements WorkspaceProvider {
           browserBaseUrl = smokeUrl;
         }
         browserExec = await this.browserRunner(browserBaseUrl, config.browserCheck);
+
         if (browserExec.summary.executed && !browserExec.summary.ok) {
           const tail = outputTail.trim();
           return {
@@ -662,6 +682,39 @@ export class GitWorktreeProvider implements WorkspaceProvider {
             browserResult: browserExec.summary,
             rawScreenshots: browserExec.rawScreenshots,
           };
+        }
+
+        const baselineDir =
+          options?.baselineScreenshotsDir ??
+          (browserExec.rawScreenshots.length > 0 && options?.resolveBaselineScreenshotsDir
+            ? await options.resolveBaselineScreenshotsDir()
+            : undefined);
+        if (baselineDir && existsSync(baselineDir) && browserExec.rawScreenshots.length > 0) {
+          const diffs: NonNullable<SmokeCheckResult["rawVisualDiffs"]> = [];
+          for (const shot of browserExec.rawScreenshots) {
+            const baseFile = join(baselineDir, `route_${shot.routeIndex}.png`);
+            if (!existsSync(baseFile)) continue;
+            try {
+              const baseBytes = new Uint8Array(await readFile(baseFile));
+              const diff = comparePngVisualDiff(baseBytes, shot.bytes);
+              const routeObj = browserExec.summary.routes[shot.routeIndex];
+              if (routeObj) {
+                routeObj.diffRatio = Number(diff.diffRatio.toFixed(6));
+                routeObj.baselineMatched = true;
+              }
+              diffs.push({
+                routeIndex: shot.routeIndex,
+                path: shot.path,
+                diffRatio: diff.diffRatio,
+                bytes: diff.diffPngBytes,
+              });
+            } catch {
+              // Ignore non-PNG or decode failures gracefully
+            }
+          }
+          if (diffs.length > 0) {
+            rawVisualDiffs = diffs;
+          }
         }
       }
 
@@ -681,7 +734,13 @@ export class GitWorktreeProvider implements WorkspaceProvider {
         ]
           .filter(Boolean)
           .join(" · "),
-        ...(browserExec ? { browserResult: browserExec.summary, rawScreenshots: browserExec.rawScreenshots } : {}),
+        ...(browserExec
+          ? {
+              browserResult: browserExec.summary,
+              rawScreenshots: browserExec.rawScreenshots,
+              ...(rawVisualDiffs ? { rawVisualDiffs } : {}),
+            }
+          : {}),
       };
     } finally {
       await killProcessGroup();
@@ -1002,6 +1061,143 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     } catch {
       return [];
     }
+  }
+
+  async analyzeSymbolImpact(
+    rootRepoPath: string,
+    scopePatterns: string[],
+  ): Promise<SymbolImpactReport> {
+    return analyzeRepoSymbolImpact(rootRepoPath, scopePatterns);
+  }
+
+  async getHeadCommitSha(repoOrWorktreePath: string, rev = "HEAD"): Promise<string> {
+    const res = await runGit(["rev-parse", "--verify", rev], repoOrWorktreePath);
+    if (res.exitCode !== 0 || !res.stdout.trim()) {
+      throw new Error(`Unable to resolve git revision '${rev}': ${res.stderr.trim() || res.stdout.trim()}`);
+    }
+    return res.stdout.trim();
+  }
+
+  async getChangedFilesSince(worktreePath: string, refOrSha: string): Promise<string[]> {
+    const [trackedRes, untrackedRes] = await Promise.all([
+      runGit(["diff", "--name-only", refOrSha], worktreePath),
+      runGit(["ls-files", "--others", "--exclude-standard"], worktreePath),
+    ]);
+    const files = new Set<string>();
+    for (const out of [trackedRes.stdout, untrackedRes.stdout]) {
+      for (const line of out.split("\n")) {
+        const clean = line.trim();
+        if (clean) files.add(clean);
+      }
+    }
+    return Array.from(files).sort();
+  }
+
+  async revertPathsToCommit(
+    worktreePath: string,
+    commitSha: string,
+    paths: string[],
+  ): Promise<void> {
+    for (const rel of paths) {
+      const check = await runGit(["ls-tree", "-r", "--name-only", commitSha, "--", rel], worktreePath);
+      if (check.exitCode === 0 && check.stdout.trim()) {
+        await runGit(["checkout", commitSha, "--", rel], worktreePath);
+      } else {
+        await rm(join(worktreePath, rel), { recursive: true, force: true });
+      }
+    }
+  }
+
+  async captureWorktreeCheckpoint(input: {
+    worktreePath: string;
+    ticketId: string;
+    checkpointId: string;
+    label: string;
+  }): Promise<{ gitRef: string; commitSha: string }> {
+    const headSha = await this.getHeadCommitSha(input.worktreePath, "HEAD");
+    const tmpIdx = join(
+      tmpdir(),
+      `sw-cp-${input.checkpointId.replace(/[^a-zA-Z0-9_-]/g, "_")}-${Date.now()}.idx`,
+    );
+    const idxEnv: NodeJS.ProcessEnv = {
+      GIT_INDEX_FILE: tmpIdx,
+      GIT_AUTHOR_NAME: "super-work",
+      GIT_AUTHOR_EMAIL: "super-work@local",
+      GIT_COMMITTER_NAME: "super-work",
+      GIT_COMMITTER_EMAIL: "super-work@local",
+    };
+
+    try {
+      const readRes = await runGit(["read-tree", headSha], input.worktreePath, idxEnv);
+      if (readRes.exitCode !== 0) {
+        throw new Error(`git read-tree failed: ${readRes.stderr.trim()}`);
+      }
+      const addRes = await runGit(["add", "-A"], input.worktreePath, idxEnv);
+      if (addRes.exitCode !== 0) {
+        throw new Error(`git add checkpoint failed: ${addRes.stderr.trim()}`);
+      }
+      const treeRes = await runGit(["write-tree"], input.worktreePath, idxEnv);
+      const treeSha = treeRes.stdout.trim();
+      if (treeRes.exitCode !== 0 || !treeSha) {
+        throw new Error(`git write-tree failed: ${treeRes.stderr.trim()}`);
+      }
+
+      const commitRes = await runGit(
+        ["commit-tree", treeSha, "-p", headSha, "-m", input.label],
+        input.worktreePath,
+        idxEnv,
+      );
+      const commitSha = commitRes.stdout.trim();
+      if (commitRes.exitCode !== 0 || !commitSha) {
+        throw new Error(`git commit-tree failed: ${commitRes.stderr.trim()}`);
+      }
+
+      const gitRef = `refs/super-work/checkpoints/${input.ticketId}/${input.checkpointId}`;
+      const updRes = await runGit(["update-ref", gitRef, commitSha], input.worktreePath);
+      if (updRes.exitCode !== 0) {
+        throw new Error(`git update-ref checkpoint failed: ${updRes.stderr.trim()}`);
+      }
+      return { gitRef, commitSha };
+    } finally {
+      await rm(tmpIdx, { force: true }).catch(() => {});
+    }
+  }
+
+  async restoreWorktreeCheckpoint(input: {
+    worktreePath: string;
+    rootRepoPath: string;
+    commitSha: string;
+  }): Promise<void> {
+    const resetRes = await runGit(["reset", "--hard", input.commitSha], input.worktreePath);
+    if (resetRes.exitCode !== 0) {
+      throw new Error(`git reset checkpoint failed: ${resetRes.stderr.trim() || resetRes.stdout.trim()}`);
+    }
+    await runGit(
+      ["clean", "-fd", "-e", "node_modules", "-e", "**/node_modules"],
+      input.worktreePath,
+    );
+    await this.linkRepoNodeModules(input.rootRepoPath, input.worktreePath);
+  }
+
+  async getCommitDiff(repoOrWorktreePath: string, fromSha: string, toSha: string): Promise<string> {
+    const res = await runGit(["diff", fromSha, toSha], repoOrWorktreePath);
+    return res.exitCode === 0 ? res.stdout : "";
+  }
+
+  async cleanupTicketCheckpoints(rootRepoPath: string, ticketId: string): Promise<number> {
+    const prefix = `refs/super-work/checkpoints/${ticketId}/`;
+    const listRes = await runGit(["for-each-ref", "--format=%(refname)", prefix], rootRepoPath);
+    if (listRes.exitCode !== 0 || !listRes.stdout.trim()) {
+      return 0;
+    }
+    let count = 0;
+    for (const rawRef of listRes.stdout.split("\n")) {
+      const ref = rawRef.trim();
+      if (!ref) continue;
+      const del = await runGit(["update-ref", "-d", ref], rootRepoPath);
+      if (del.exitCode === 0) count += 1;
+    }
+    return count;
   }
 
   async cleanupWorkspace(worktreePath: string, rootRepoPath?: string): Promise<void> {

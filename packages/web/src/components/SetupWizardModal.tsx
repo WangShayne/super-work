@@ -770,7 +770,7 @@ export function SetupWizardModal({
             </div>
           </section>
 
-          {/* Panel D: MCP Integration & Bidirectional Remote Webhooks (v0.8) */}
+          {/* Panel D: MCP Integration & Bidirectional Remote Webhooks (v0.9) */}
           <section className="space-y-3 pt-2 border-t border-zinc-800/80">
             <div className="flex items-start justify-between gap-2 flex-wrap">
               <div>

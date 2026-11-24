@@ -69,8 +69,10 @@ function computeSubtaskWaves(subtasks: EpicSubtaskSpec[]): {
 import { api } from "../api.ts";
 import { formatTemplate, formatTicketStatus, useI18n } from "../i18n.tsx";
 import type {
+  BrowserInteractionStep,
   CasebookEntry,
   DeliveryChannel,
+  EnginePreference,
   EpicDecompositionPlan,
   EpicDeliveryMode,
   EpicSubtaskSpec,
@@ -86,6 +88,7 @@ import type {
   SmokeTriggerMode,
   SpecClarificationResult,
   Ticket,
+  VisualDiffMode,
   WorkerEngineId,
   WorktreeGcResult,
 } from "../types.ts";
@@ -97,7 +100,8 @@ interface DispatchModalProps {
   allTickets?: Ticket[];
   availableEngines: WorkerEngineId[];
   defaultTemplate: PipelineTemplateId;
-  defaultEngine: WorkerEngineId;
+  defaultEngine: EnginePreference;
+  defaultTddMode?: boolean;
   onClose: () => void;
   onSubmit: (data: {
     title: string;
@@ -105,7 +109,9 @@ interface DispatchModalProps {
     template: PipelineTemplateId;
     allowedPaths: string[];
     dependsOn?: string[];
-    preferredEngine: WorkerEngineId;
+    preferredEngine: EnginePreference;
+    tddMode?: boolean;
+    pauseBeforeRun?: boolean;
     arenaMode?: boolean;
     arenaCompetitorEngine?: WorkerEngineId;
     modelOverride?: string;
@@ -119,7 +125,8 @@ interface DispatchModalProps {
     description: string;
     template: PipelineTemplateId;
     epicDeliveryMode: EpicDeliveryMode;
-    preferredEngine: WorkerEngineId;
+    preferredEngine: EnginePreference;
+    tddMode?: boolean;
     modelOverride?: string;
     effortOverride?: ReasoningEffort;
     maxCostUsdPerSubtask: number;
@@ -135,6 +142,7 @@ export function DispatchTaskModal({
   availableEngines,
   defaultTemplate,
   defaultEngine,
+  defaultTddMode = false,
   onClose,
   onSubmit,
   onCreateEpic,
@@ -149,7 +157,9 @@ export function DispatchTaskModal({
   const [dependsOn, setDependsOn] = useState<string[]>([]);
   const [depsExpanded, setDepsExpanded] = useState(false);
   const [depsQuery, setDepsQuery] = useState("");
-  const [engine, setEngine] = useState<WorkerEngineId>(defaultEngine);
+  const [engine, setEngine] = useState<EnginePreference>(defaultEngine);
+  const [tddMode, setTddMode] = useState(Boolean(defaultTddMode));
+  const [pauseBeforeRun, setPauseBeforeRun] = useState(false);
   const [arenaMode, setArenaMode] = useState(false);
   const [arenaCompetitorEngine, setArenaCompetitorEngine] = useState<string>("");
   const [modelOverride, setModelOverride] = useState("");
@@ -176,6 +186,8 @@ export function DispatchTaskModal({
       setEpicDeliveryMode("unified");
       setTemplate(defaultTemplate);
       setEngine(defaultEngine);
+      setTddMode(Boolean(defaultTddMode));
+      setPauseBeforeRun(false);
       setArenaMode(false);
       setArenaCompetitorEngine("");
       setModelOverride("");
@@ -188,7 +200,7 @@ export function DispatchTaskModal({
       setClarifyAnswers({});
       setAcceptanceCriteria([]);
     }
-  }, [open, defaultTemplate, defaultEngine]);
+  }, [open, defaultTemplate, defaultEngine, defaultTddMode]);
 
   useEscapeKey(open, onClose);
 
@@ -264,6 +276,9 @@ export function DispatchTaskModal({
       setTemplate(refined.recommendedTemplate);
       setPaths(refined.suggestedAllowedPaths.join(", "));
       setAcceptanceCriteria(refined.acceptanceCriteria);
+      if (refined.recommendedTddMode !== undefined) {
+        setTddMode(refined.recommendedTddMode);
+      }
       if (refined.recommendedDispatchMode === "epic") {
         setDispatchMode("epic");
       }
@@ -358,6 +373,7 @@ export function DispatchTaskModal({
           template,
           epicDeliveryMode,
           preferredEngine: engine,
+          tddMode: tddMode || undefined,
           modelOverride: isCliEngine ? modelOverride.trim() || undefined : undefined,
           effortOverride: isCliEngine ? effortOverride || undefined : undefined,
           maxCostUsdPerSubtask: Number(budget) || 2.0,
@@ -374,6 +390,8 @@ export function DispatchTaskModal({
             .filter(Boolean),
           dependsOn: dependsOn.length > 0 ? dependsOn : undefined,
           preferredEngine: engine,
+          tddMode: tddMode || undefined,
+          pauseBeforeRun: pauseBeforeRun || undefined,
           arenaMode: arenaMode || undefined,
           arenaCompetitorEngine:
             arenaMode && arenaCompetitorEngine
@@ -505,6 +523,19 @@ export function DispatchTaskModal({
                   ))}
                 </div>
               )}
+              {clarification.directDependents && clarification.directDependents.length > 0 && (
+                <div className="rounded border border-cyan-500/30 bg-cyan-500/10 px-2.5 py-1.5 text-[11px] text-cyan-200 flex flex-wrap items-center gap-1.5">
+                  <span className="font-medium">{t("modal.dispatch.impactWarningPrefix")}:</span>
+                  {clarification.directDependents.slice(0, 5).map((dep) => (
+                    <code
+                      key={dep}
+                      className="px-1 py-0.5 rounded bg-zinc-950/70 border border-cyan-500/30 font-mono text-[10px]"
+                    >
+                      {dep}
+                    </code>
+                  ))}
+                </div>
+              )}
               {clarification.questions.map((q) => (
                 <div key={q.id} className="space-y-1">
                   <div className="text-[11px] text-zinc-200 font-medium">{q.question}</div>
@@ -551,9 +582,10 @@ export function DispatchTaskModal({
               <label className="block text-zinc-400 mb-1">{t("modal.dispatch.engine")}</label>
               <select
                 value={engine}
-                onChange={(e) => setEngine(e.target.value as WorkerEngineId)}
+                onChange={(e) => setEngine(e.target.value as EnginePreference)}
                 className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-2 text-zinc-100"
               >
+                <option value="auto">{t("modal.dispatch.engineAuto")}</option>
                 {availableEngines.map((eng) => (
                   <option key={eng} value={eng}>
                     {eng}
@@ -634,6 +666,26 @@ export function DispatchTaskModal({
               </div>
 
               <div className="rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-2.5 space-y-2">
+                <label className="flex items-center gap-2 cursor-pointer text-zinc-200">
+                  <input
+                    type="checkbox"
+                    checked={tddMode}
+                    onChange={(e) => setTddMode(e.target.checked)}
+                    className="rounded border-zinc-700 bg-zinc-950 text-rose-500"
+                  />
+                  <span className="text-[11px] font-medium">{t("modal.dispatch.tddEnable")}</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer text-zinc-200">
+                  <input
+                    type="checkbox"
+                    checked={pauseBeforeRun}
+                    onChange={(e) => setPauseBeforeRun(e.target.checked)}
+                    className="rounded border-zinc-700 bg-zinc-950 text-amber-500"
+                  />
+                  <span className="text-[11px] font-medium">
+                    {t("modal.dispatch.breakpointEnable")}
+                  </span>
+                </label>
                 <label className="flex items-center gap-2 cursor-pointer text-zinc-200">
                   <input
                     type="checkbox"
@@ -803,6 +855,16 @@ export function DispatchTaskModal({
                   <p className="text-[11px] text-sky-300 mt-1.5">{t("modal.dispatch.crossRepoNotice")}</p>
                 )}
               </div>
+
+              <label className="flex items-center gap-2 cursor-pointer text-zinc-200">
+                <input
+                  type="checkbox"
+                  checked={tddMode}
+                  onChange={(e) => setTddMode(e.target.checked)}
+                  className="rounded border-zinc-700 bg-zinc-950 text-rose-500"
+                />
+                <span className="text-[11px] font-medium">{t("modal.dispatch.tddEnable")}</span>
+              </label>
 
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="font-medium text-zinc-200 flex items-center gap-1.5">
@@ -1346,7 +1408,8 @@ export function RepoSettingsModal({
   const [githubRepo, setGithubRepo] = useState("");
   const [mode, setMode] = useState<OperatingMode>("observe");
   const [defaultTemplate, setDefaultTemplate] = useState<PipelineTemplateId>("standard");
-  const [implEngine, setImplEngine] = useState<WorkerEngineId>("claude");
+  const [defaultTddMode, setDefaultTddMode] = useState(false);
+  const [implEngine, setImplEngine] = useState<EnginePreference>("claude");
   const [reviewEngine, setReviewEngine] = useState<WorkerEngineId>("codex");
   const [fallbackEngines, setFallbackEngines] = useState<WorkerEngineId[]>([]);
   const [sandboxMode, setSandboxMode] = useState<SandboxMode>("balanced");
@@ -1366,6 +1429,9 @@ export function RepoSettingsModal({
   const [browserPaths, setBrowserPaths] = useState("/");
   const [browserSelector, setBrowserSelector] = useState("");
   const [browserFailConsole, setBrowserFailConsole] = useState(false);
+  const [visualDiffMode, setVisualDiffMode] = useState<VisualDiffMode>("auto");
+  const [maxVisualDiffRatio, setMaxVisualDiffRatio] = useState("0.02");
+  const [browserStepsText, setBrowserStepsText] = useState("");
   const [maxConcurrentInput, setMaxConcurrentInput] = useState("");
   const [dailyBudgetInput, setDailyBudgetInput] = useState("");
   const [autoCleanupWorktree, setAutoCleanupWorktree] = useState(true);
@@ -1417,6 +1483,7 @@ export function RepoSettingsModal({
     setGithubRepo(repo.githubRepo ?? "");
     setMode(repo.mode);
     setDefaultTemplate(repo.defaultTemplate);
+    setDefaultTddMode(Boolean(repo.defaultTddMode));
     setImplEngine(repo.preferredImplementEngine);
     setReviewEngine(repo.preferredReviewEngine);
     setFallbackEngines(repo.fallbackEngines ?? []);
@@ -1437,6 +1504,17 @@ export function RepoSettingsModal({
     setBrowserPaths((repo.smokeCheck?.browserCheck?.paths ?? ["/"]).join(", "));
     setBrowserSelector(repo.smokeCheck?.browserCheck?.waitForSelector ?? "");
     setBrowserFailConsole(Boolean(repo.smokeCheck?.browserCheck?.failOnConsoleError));
+    setVisualDiffMode(repo.smokeCheck?.browserCheck?.visualDiffMode ?? "auto");
+    setMaxVisualDiffRatio(
+      repo.smokeCheck?.browserCheck?.maxVisualDiffRatio !== undefined
+        ? String(repo.smokeCheck.browserCheck.maxVisualDiffRatio)
+        : "0.02",
+    );
+    setBrowserStepsText(
+      repo.smokeCheck?.browserCheck?.steps?.length
+        ? JSON.stringify(repo.smokeCheck.browserCheck.steps)
+        : "",
+    );
     setMaxConcurrentInput(
       repo.maxConcurrentWorkers ? String(repo.maxConcurrentWorkers) : "",
     );
@@ -1453,7 +1531,7 @@ export function RepoSettingsModal({
   const engineOptions = Array.from(
     new Set<WorkerEngineId>([
       ...availableEngines,
-      repo.preferredImplementEngine,
+      ...(repo.preferredImplementEngine !== "auto" ? [repo.preferredImplementEngine] : []),
       repo.preferredReviewEngine,
       "mock",
     ]),
@@ -1487,6 +1565,21 @@ export function RepoSettingsModal({
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean);
+      const parsedVisualRatio = Number(maxVisualDiffRatio.trim());
+      let parsedSteps: BrowserInteractionStep[] | undefined;
+      if (browserStepsText.trim()) {
+        try {
+          const rawParsed = JSON.parse(browserStepsText.trim());
+          if (Array.isArray(rawParsed)) {
+            parsedSteps = rawParsed.filter(
+              (item): item is BrowserInteractionStep =>
+                Boolean(item) && typeof item === "object" && typeof item.action === "string",
+            );
+          }
+        } catch {
+          // ignore malformed optional JSON during save
+        }
+      }
       const smokeCheckPayload: SmokeCheckConfig | null =
         smokeStartCmd.trim() || smokeEnabled
           ? {
@@ -1506,6 +1599,14 @@ export function RepoSettingsModal({
                       paths: parsedBrowserPaths.length > 0 ? parsedBrowserPaths : ["/"],
                       waitForSelector: browserSelector.trim() || undefined,
                       failOnConsoleError: browserFailConsole,
+                      visualDiffMode,
+                      maxVisualDiffRatio:
+                        Number.isFinite(parsedVisualRatio) &&
+                        parsedVisualRatio >= 0 &&
+                        parsedVisualRatio <= 1
+                          ? parsedVisualRatio
+                          : undefined,
+                      steps: parsedSteps && parsedSteps.length > 0 ? parsedSteps : undefined,
                     },
                   }
                 : {}),
@@ -1517,6 +1618,7 @@ export function RepoSettingsModal({
         githubRepo: githubRepo.trim(),
         mode,
         defaultTemplate,
+        defaultTddMode,
         preferredImplementEngine: implEngine,
         preferredReviewEngine: reviewEngine,
         fallbackEngines: fallbackEngines.length > 0 ? fallbackEngines : null,
@@ -1554,6 +1656,7 @@ export function RepoSettingsModal({
       setForbiddenInput((res.repo.forbiddenPaths ?? []).join(", "));
       setConventions(res.repo.conventions ?? "");
       setDefaultTemplate(res.repo.defaultTemplate);
+      setDefaultTddMode(Boolean(res.repo.defaultTddMode));
       setSmokeEnabled(Boolean(res.repo.smokeCheck?.enabled));
       setSmokeStartCmd(res.repo.smokeCheck?.startCommand ?? "");
       setSmokeReadyUrl(res.repo.smokeCheck?.readyUrl ?? "");
@@ -1566,6 +1669,17 @@ export function RepoSettingsModal({
       setBrowserPaths((res.repo.smokeCheck?.browserCheck?.paths ?? ["/"]).join(", "));
       setBrowserSelector(res.repo.smokeCheck?.browserCheck?.waitForSelector ?? "");
       setBrowserFailConsole(Boolean(res.repo.smokeCheck?.browserCheck?.failOnConsoleError));
+      setVisualDiffMode(res.repo.smokeCheck?.browserCheck?.visualDiffMode ?? "auto");
+      setMaxVisualDiffRatio(
+        res.repo.smokeCheck?.browserCheck?.maxVisualDiffRatio !== undefined
+          ? String(res.repo.smokeCheck.browserCheck.maxVisualDiffRatio)
+          : "0.02",
+      );
+      setBrowserStepsText(
+        res.repo.smokeCheck?.browserCheck?.steps?.length
+          ? JSON.stringify(res.repo.smokeCheck.browserCheck.steps)
+          : "",
+      );
       await loadPlaybook(repo.id);
       onRefresh?.();
       setContractNotice(`Synced super-work.json (${res.repo.contractSyncedAt ?? "ok"})`);
@@ -1788,9 +1902,10 @@ export function RepoSettingsModal({
                     </label>
                     <select
                       value={implEngine}
-                      onChange={(e) => setImplEngine(e.target.value as WorkerEngineId)}
+                      onChange={(e) => setImplEngine(e.target.value as EnginePreference)}
                       className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-2 font-mono text-zinc-100"
                     >
+                      <option value="auto">{t("modal.dispatch.engineAuto")}</option>
                       {engineOptions.map((eng) => (
                         <option key={eng} value={eng}>
                           {eng}
@@ -1917,6 +2032,23 @@ export function RepoSettingsModal({
                     />
                   </div>
                 </div>
+
+                <label className="flex items-start gap-2.5 rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={defaultTddMode}
+                    onChange={(e) => setDefaultTddMode(e.target.checked)}
+                    className="mt-0.5 rounded border-zinc-700 bg-zinc-950 text-rose-500 focus:ring-rose-500"
+                  />
+                  <div>
+                    <div className="font-medium text-zinc-200">
+                      {t("modal.repoSettings.defaultTddLabel")}
+                    </div>
+                    <p className="text-[11px] text-zinc-400 mt-0.5">
+                      {t("modal.repoSettings.defaultTddDesc")}
+                    </p>
+                  </div>
+                </label>
 
                 <label className="flex items-start gap-2.5 rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-3 cursor-pointer">
                   <input
@@ -2198,6 +2330,50 @@ export function RepoSettingsModal({
                               />
                               {t("modal.repoSettings.browserFailConsole")}
                             </label>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                              <div>
+                                <label className="block text-[10px] text-zinc-400 mb-1">
+                                  {t("modal.repoSettings.visualDiffMode")}
+                                </label>
+                                <select
+                                  value={visualDiffMode}
+                                  onChange={(e) =>
+                                    setVisualDiffMode(e.target.value as VisualDiffMode)
+                                  }
+                                  className="w-full bg-zinc-900 border border-zinc-800 rounded px-2 py-1 font-mono text-[11px] text-zinc-100"
+                                >
+                                  <option value="auto">auto</option>
+                                  <option value="enforce">enforce</option>
+                                  <option value="informational">informational</option>
+                                  <option value="off">off</option>
+                                </select>
+                              </div>
+                              <div>
+                                <label className="block text-[10px] text-zinc-400 mb-1">
+                                  {t("modal.repoSettings.maxVisualDiffRatio")}
+                                </label>
+                                <input
+                                  type="number"
+                                  step="0.005"
+                                  min="0"
+                                  max="1"
+                                  value={maxVisualDiffRatio}
+                                  onChange={(e) => setMaxVisualDiffRatio(e.target.value)}
+                                  className="w-full bg-zinc-900 border border-zinc-800 rounded px-2 py-1 font-mono text-[11px] text-zinc-100"
+                                />
+                              </div>
+                            </div>
+                            <div>
+                              <label className="block text-[10px] text-zinc-400 mb-1">
+                                {t("modal.repoSettings.browserStepsLabel")}
+                              </label>
+                              <input
+                                value={browserStepsText}
+                                onChange={(e) => setBrowserStepsText(e.target.value)}
+                                placeholder={t("modal.repoSettings.browserStepsPlaceholder")}
+                                className="w-full bg-zinc-900 border border-zinc-800 rounded px-2 py-1 font-mono text-[11px] text-zinc-100"
+                              />
+                            </div>
                           </div>
                         )}
                       </div>

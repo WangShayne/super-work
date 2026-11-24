@@ -362,6 +362,107 @@ export async function runCdpBrowserCheck(
           }
         }
 
+        const stepErrors: string[] = [];
+        if (config.steps && config.steps.length > 0 && (i === 0 || routes.length === 1)) {
+          for (const step of config.steps) {
+            const stepTimeout = Math.max(200, Math.min(timeoutMs, step.timeoutMs ?? 3_000));
+            const selJson = JSON.stringify(step.selector ?? "");
+            const valJson = JSON.stringify(step.value ?? "");
+            const actionJson = JSON.stringify(step.action);
+            const expr = `(async () => {
+              const action = ${actionJson};
+              const sel = ${selJson};
+              const val = ${valJson};
+              const deadline = Date.now() + ${stepTimeout};
+              const findEl = () => sel ? document.querySelector(sel) : null;
+              if (action === "waitForSelector") {
+                while (Date.now() < deadline) {
+                  if (findEl()) return { ok: true };
+                  await new Promise((r) => setTimeout(r, 40));
+                }
+                return { ok: false, error: "waitForSelector timeout: " + sel };
+              }
+              if (action === "waitForText") {
+                while (Date.now() < deadline) {
+                  const targetEl = sel ? findEl() : document.body;
+                  const txt = targetEl ? (targetEl.innerText || targetEl.textContent || "") : "";
+                  if (txt.includes(val)) return { ok: true };
+                  await new Promise((r) => setTimeout(r, 40));
+                }
+                return { ok: false, error: "waitForText timeout: " + val };
+              }
+              if (action === "click") {
+                let el = null;
+                while (Date.now() < deadline) {
+                  el = findEl();
+                  if (el) break;
+                  await new Promise((r) => setTimeout(r, 40));
+                }
+                if (!el) return { ok: false, error: "click target not found: " + sel };
+                el.click();
+                return { ok: true };
+              }
+              if (action === "fill") {
+                let el = null;
+                while (Date.now() < deadline) {
+                  el = findEl();
+                  if (el) break;
+                  await new Promise((r) => setTimeout(r, 40));
+                }
+                if (!el) return { ok: false, error: "fill target not found: " + sel };
+                const proto = el instanceof HTMLTextAreaElement
+                  ? HTMLTextAreaElement.prototype
+                  : el instanceof HTMLInputElement
+                    ? HTMLInputElement.prototype
+                    : null;
+                const desc = proto ? Object.getOwnPropertyDescriptor(proto, "value") : null;
+                if (desc && desc.set) desc.set.call(el, val);
+                else el.value = val;
+                el.dispatchEvent(new Event("input", { bubbles: true }));
+                el.dispatchEvent(new Event("change", { bubbles: true }));
+                return { ok: true };
+              }
+              if (action === "press") {
+                const el = (sel ? findEl() : document.activeElement) || document.body;
+                if (!el) return { ok: false, error: "press target not found: " + sel };
+                el.dispatchEvent(new KeyboardEvent("keydown", { key: val || "Enter", bubbles: true }));
+                el.dispatchEvent(new KeyboardEvent("keyup", { key: val || "Enter", bubbles: true }));
+                return { ok: true };
+              }
+              return { ok: false, error: "Unknown step action: " + action };
+            })()`;
+            try {
+              const stepRes = await client.send(
+                "Runtime.evaluate",
+                { expression: expr, awaitPromise: true, returnByValue: true },
+                sessionId,
+                stepTimeout + 2_000,
+              );
+              const valObj = (stepRes.result as { value?: unknown } | undefined)?.value;
+              if (stepRes.exceptionDetails) {
+                stepErrors.push(`${step.action}(${step.selector ?? step.value ?? ""}): exception`);
+                break;
+              }
+              if (valObj === false) {
+                stepErrors.push(`${step.action}(${step.selector ?? step.value ?? ""}): failed`);
+                break;
+              }
+              if (valObj && typeof valObj === "object" && (valObj as { ok?: boolean }).ok === false) {
+                stepErrors.push(
+                  String((valObj as { error?: string }).error ?? `${step.action} failed`),
+                );
+                break;
+              }
+            } catch (err) {
+              stepErrors.push(
+                `${step.action}: ${err instanceof Error ? err.message : String(err)}`,
+              );
+              break;
+            }
+          }
+          await new Promise<void>((r) => setTimeout(r, 120));
+        }
+
         const shot = await client.send(
           "Page.captureScreenshot",
           { format: "png" },
@@ -379,6 +480,7 @@ export async function runCdpBrowserCheck(
         const routeOk =
           pageErrors.length === 0 &&
           failedRequests.length === 0 &&
+          stepErrors.length === 0 &&
           !missingSelector &&
           (mainDocStatus === undefined || mainDocStatus < 500) &&
           (!config.failOnConsoleError || consoleErrors.length === 0);
@@ -391,6 +493,7 @@ export async function runCdpBrowserCheck(
           consoleErrors,
           pageErrors,
           failedRequests,
+          ...(stepErrors.length > 0 ? { stepErrors } : {}),
           missingSelector,
           durationMs: Math.max(1, Date.now() - started),
         });
@@ -408,6 +511,7 @@ export async function runCdpBrowserCheck(
             const errs = [
               ...r.pageErrors,
               ...r.failedRequests,
+              ...(r.stepErrors ?? []),
               ...(r.missingSelector ? [`missing selector ${r.missingSelector}`] : []),
               ...(config.failOnConsoleError ? r.consoleErrors : []),
             ];

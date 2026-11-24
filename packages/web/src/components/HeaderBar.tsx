@@ -168,6 +168,12 @@ export function HeaderBar({
   const hasStaticGate = Boolean(
     activeRepo?.contractSyncedAt || (activeRepo?.verificationCommands?.length ?? 0) > 0,
   );
+  const vdiffMode = activeRepo?.smokeCheck?.browserCheck?.visualDiffMode ?? "auto";
+  const vdiffActive = smokeEnabled && Boolean(activeRepo?.smokeCheck?.browserCheck?.enabled) && vdiffMode !== "off";
+  const contractExtras = [
+    activeRepo?.defaultTddMode ? t("header.tddOn") : "",
+    vdiffActive ? t("header.vdiffOn") : "",
+  ].filter(Boolean);
 
   return (
     <header className="border-b border-zinc-800/80 bg-zinc-950/95 backdrop-blur sticky top-0 z-20">
@@ -182,7 +188,7 @@ export function HeaderBar({
               <div className="flex items-center gap-2">
                 <span className="font-semibold tracking-tight text-zinc-100 text-sm">super-work</span>
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
-                  v0.8
+                  v0.9
                 </span>
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700/60">
                   {t("brand.badge")}
@@ -355,6 +361,7 @@ export function HeaderBar({
                   ? t("strip.contract.synced")
                   : t("strip.contract.unset")
             }
+            extra={contractExtras.length > 0 ? contractExtras.join("·") : undefined}
             tone={smokeEnabled ? "good" : hasStaticGate ? "accent" : "neutral"}
             align="left"
             onClick={onOpenContractSettings ?? onOpenRepoSettings}

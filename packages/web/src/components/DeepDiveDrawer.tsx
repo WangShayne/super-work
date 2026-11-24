@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Clock,
   Copy,
   Database,
   ExternalLink,
@@ -12,23 +13,27 @@ import {
   FileDiff,
   FolderGit2,
   GitBranch,
+  GitFork,
   GitMerge,
   GitPullRequest,
   History,
   Image,
   Layers,
   Link2,
+  Lock,
   Play,
   RotateCcw,
   Search,
   Send,
   Shield,
+  Sparkles,
   Square,
   Terminal,
   Trash2,
   X,
 } from "lucide-react";
 import { api } from "../api.ts";
+import { DagCanvas } from "./DagCanvas.tsx";
 import { DiffStudio } from "./DiffStudio.tsx";
 import {
   formatOutboxStatus,
@@ -183,7 +188,7 @@ interface DeepDiveDrawerProps {
   onRefresh: () => void;
 }
 
-type DrawerTab = "stream" | "diff" | "recall" | "outbox";
+type DrawerTab = "stream" | "diff" | "recall" | "outbox" | "checkpoints";
 
 export function DeepDiveDrawer({
   ticketId,
@@ -212,10 +217,17 @@ export function DeepDiveDrawer({
   const [selectedArenaCandId, setSelectedArenaCandId] = useState<string | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [previewErr, setPreviewErr] = useState<string | null>(null);
+  const [checkpointDiff, setCheckpointDiff] = useState<{ cpId: string; diff: string } | null>(null);
+  const [resteerPrompt, setResteerPrompt] = useState("");
+  const [checkpointBusy, setCheckpointBusy] = useState<string | null>(null);
+  const [checkpointNotice, setCheckpointNotice] = useState<string | null>(null);
 
   useEffect(() => {
     setSelectedArenaCandId(null);
     setPreviewErr(null);
+    setCheckpointDiff(null);
+    setCheckpointNotice(null);
+    setResteerPrompt("");
   }, [ticketId]);
 
   useEffect(() => {
@@ -602,6 +614,11 @@ export function DeepDiveDrawer({
               label: `${t("drawer.tab.outbox")} (${detail?.outboxEntries.length ?? 0})`,
               icon: Database,
             },
+            {
+              id: "checkpoints" as const,
+              label: `${t("drawer.tab.checkpoints")} (${detail?.checkpoints?.length ?? 0})`,
+              icon: Clock,
+            },
           ].map((tabItem) => {
             const Icon = tabItem.icon;
             const active = tab === tabItem.id;
@@ -637,6 +654,54 @@ export function DeepDiveDrawer({
                 </div>
               )}
 
+              {ticket &&
+                (ticket.routingRationale ||
+                  (ticket.lockedTestPaths && ticket.lockedTestPaths.length > 0) ||
+                  ticket.impactSummary) && (
+                  <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3 text-xs space-y-2">
+                    {ticket.routingRationale && (
+                      <div className="flex items-start gap-2">
+                        <Sparkles className="w-3.5 h-3.5 text-indigo-400 shrink-0 mt-0.5" />
+                        <div>
+                          <span className="text-zinc-400 font-medium mr-1.5">
+                            {t("drawer.routingRationaleLabel")}:
+                          </span>
+                          <span className="text-zinc-200 font-mono text-[11px]">
+                            {ticket.routingRationale}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                    {ticket.lockedTestPaths && ticket.lockedTestPaths.length > 0 && (
+                      <div className="flex items-start gap-2">
+                        <Lock className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
+                        <div>
+                          <span className="text-zinc-400 font-medium mr-1.5">
+                            {t("drawer.lockedTestsLabel")}:
+                          </span>
+                          <span className="text-rose-200 font-mono text-[11px]">
+                            {ticket.lockedTestPaths.join(", ")}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                    {ticket.impactSummary && (
+                      <div className="flex items-start gap-2">
+                        <GitFork className="w-3.5 h-3.5 text-cyan-400 shrink-0 mt-0.5" />
+                        <div>
+                          <span className="text-zinc-400 font-medium mr-1.5">
+                            {t("drawer.impactSummaryLabel")}:
+                          </span>
+                          <span className="text-cyan-200 font-mono text-[11px]">
+                            {ticket.impactSummary.directDependents.join(", ") || "—"} /{" "}
+                            {ticket.impactSummary.transitiveDependents.join(", ") || "—"}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
               {ticket?.isEpic && (ticket.epicReplanHistory?.length || ticket.pendingEpicReplan) && (
                 <div className="rounded-lg border border-purple-500/30 bg-purple-500/5 p-3 text-xs space-y-1.5">
                   <div className="font-semibold text-purple-300 flex items-center gap-1.5">
@@ -657,11 +722,22 @@ export function DeepDiveDrawer({
               )}
 
               {ticket?.isEpic && childSubtasks.length > 0 && (
-                <div className="space-y-2">
+                <div className="space-y-3">
                   <h3 className="text-xs font-semibold uppercase tracking-wider text-purple-300 flex items-center gap-1.5">
                     <Layers className="w-3.5 h-3.5" />
                     {t("drawer.epicDagTitle")} ({childSubtasks.length})
                   </h3>
+                  <DagCanvas
+                    tickets={childSubtasks}
+                    repos={repos}
+                    onInspectTicket={(id) => onSelectTicket?.(id)}
+                    onMutated={() => {
+                      if (ticketId) {
+                        api.getTicketDetail(ticketId).then(setDetail).catch(() => {});
+                      }
+                      onRefresh();
+                    }}
+                  />
                   <div className="space-y-2">
                     {childSubtasks.map((sub) => {
                       const subRepoName = reposById.get(sub.repoId)?.name;
@@ -1065,7 +1141,9 @@ export function DeepDiveDrawer({
                                     ? "bg-teal-500/20 text-teal-300 border border-teal-500/30"
                                     : art.kind === "screenshot"
                                       ? "bg-sky-500/20 text-sky-300 border border-sky-500/30"
-                                      : "bg-zinc-800 text-zinc-300"
+                                      : art.kind === "visual_diff"
+                                        ? "bg-rose-500/20 text-rose-300 border border-rose-500/30"
+                                        : "bg-zinc-800 text-zinc-300"
                               }`}
                             >
                               {art.kind === "test_log"
@@ -1076,14 +1154,16 @@ export function DeepDiveDrawer({
                                     ? t("drawer.handoverTag")
                                     : art.kind === "screenshot"
                                       ? "Screenshot"
-                                      : art.kind}
+                                      : art.kind === "visual_diff"
+                                        ? t("drawer.visualDiffTag")
+                                        : art.kind}
                             </span>
                             <span className="text-zinc-200">{art.summary}</span>
                             <span className="text-zinc-500 text-[11px] ml-2">
                               ({art.byteSize} {t("drawer.bytes")})
                             </span>
                           </div>
-                          {art.kind === "screenshot" ? (
+                          {art.kind === "screenshot" || art.kind === "visual_diff" ? (
                             <a
                               href={api.getArtifactRawUrl(art.id)}
                               target="_blank"
@@ -1103,7 +1183,7 @@ export function DeepDiveDrawer({
                             </button>
                           )}
                         </div>
-                        {art.kind === "screenshot" && (
+                        {(art.kind === "screenshot" || art.kind === "visual_diff") && (
                           <a
                             href={api.getArtifactRawUrl(art.id)}
                             target="_blank"
@@ -1112,7 +1192,7 @@ export function DeepDiveDrawer({
                           >
                             <img
                               src={api.getArtifactRawUrl(art.id)}
-                              alt={art.summary || "screenshot"}
+                              alt={art.summary || art.kind}
                               className="w-full max-h-64 object-contain bg-zinc-950"
                             />
                           </a>
@@ -1167,6 +1247,156 @@ export function DeepDiveDrawer({
                     )}
                   </div>
                 ))
+              )}
+            </div>
+          )}
+
+          {tab === "checkpoints" && (
+            <div className="space-y-4">
+              <div className="flex flex-col gap-2">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                  {t("drawer.tab.checkpoints")} ({detail?.checkpoints?.length ?? 0})
+                </h3>
+                <input
+                  type="text"
+                  value={resteerPrompt}
+                  onChange={(e) => setResteerPrompt(e.target.value)}
+                  placeholder={t("drawer.checkpointPromptPlaceholder")}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
+                />
+                {checkpointNotice && (
+                  <div className="p-2.5 rounded-lg border border-indigo-500/30 bg-indigo-500/10 text-xs text-indigo-200">
+                    {checkpointNotice}
+                  </div>
+                )}
+              </div>
+
+              {(detail?.checkpoints?.length ?? 0) === 0 ? (
+                <p className="text-xs text-zinc-500">{t("drawer.checkpointsEmpty")}</p>
+              ) : (
+                <div className="space-y-2.5">
+                  {detail!.checkpoints!.map((cp) => {
+                    const isDiffOpen = checkpointDiff?.cpId === cp.id;
+                    const busy = checkpointBusy === cp.id;
+                    return (
+                      <div
+                        key={cp.id}
+                        className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3.5 text-xs space-y-2.5"
+                      >
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="px-1.5 py-0.5 rounded bg-indigo-500/15 border border-indigo-500/30 font-mono text-[10px] text-indigo-300">
+                              {cp.stage === "baseline" ? "Baseline" : formatStage(cp.stage, locale)}
+                            </span>
+                            <span className="font-mono text-[11px] text-zinc-300">
+                              {cp.commitSha.slice(0, 8)}
+                            </span>
+                            {Boolean(cp.cleanedAt) && (
+                              <span className="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 font-mono text-[10px] text-zinc-400">
+                                {t("drawer.checkpointCleaned")}
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-[11px] font-mono text-zinc-500">
+                            {new Date(cp.createdAt).toLocaleTimeString()}
+                          </span>
+                        </div>
+                        {cp.label && <p className="text-zinc-300 text-xs">{cp.label}</p>}
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={async () => {
+                              if (!ticketId) return;
+                              if (isDiffOpen) {
+                                setCheckpointDiff(null);
+                                return;
+                              }
+                              setCheckpointBusy(cp.id);
+                              try {
+                                const res = await api.getCheckpointDiff(ticketId, cp.id);
+                                setCheckpointDiff({ cpId: cp.id, diff: res.diff || "(empty diff)" });
+                              } catch (err) {
+                                setCheckpointNotice((err as Error).message);
+                              } finally {
+                                setCheckpointBusy(null);
+                              }
+                            }}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-zinc-700 bg-zinc-950 text-zinc-300 hover:text-white text-[11px] transition disabled:opacity-40"
+                          >
+                            <FileDiff className="w-3 h-3" />
+                            {isDiffOpen ? t("drawer.checkpointHideDiff") : t("drawer.checkpointDiffBtn")}
+                          </button>
+
+                          {!cp.cleanedAt && (
+                            <>
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={async () => {
+                                  if (!ticketId) return;
+                                  setCheckpointBusy(cp.id);
+                                  setCheckpointNotice(null);
+                                  try {
+                                    await api.restoreCheckpoint(ticketId, cp.id, {
+                                      mode: "in_place",
+                                      prompt: resteerPrompt.trim() || undefined,
+                                    });
+                                    setResteerPrompt("");
+                                    const updated = await api.getTicketDetail(ticketId);
+                                    setDetail(updated);
+                                    onRefresh();
+                                  } catch (err) {
+                                    setCheckpointNotice((err as Error).message);
+                                  } finally {
+                                    setCheckpointBusy(null);
+                                  }
+                                }}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-600/20 hover:bg-amber-600/30 border border-amber-500/30 text-amber-200 text-[11px] font-medium transition disabled:opacity-40"
+                              >
+                                <RotateCcw className="w-3 h-3" />
+                                {t("drawer.checkpointRestoreBtn")}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={async () => {
+                                  if (!ticketId) return;
+                                  setCheckpointBusy(cp.id);
+                                  setCheckpointNotice(null);
+                                  try {
+                                    const res = await api.restoreCheckpoint(ticketId, cp.id, {
+                                      mode: "fork",
+                                      prompt: resteerPrompt.trim() || undefined,
+                                    });
+                                    setResteerPrompt("");
+                                    onRefresh();
+                                    if (res.ticket?.id) {
+                                      onSelectTicket?.(res.ticket.id);
+                                    }
+                                  } catch (err) {
+                                    setCheckpointNotice((err as Error).message);
+                                  } finally {
+                                    setCheckpointBusy(null);
+                                  }
+                                }}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30 text-indigo-200 text-[11px] font-medium transition disabled:opacity-40"
+                              >
+                                <GitFork className="w-3 h-3" />
+                                {t("drawer.checkpointForkBtn")}
+                              </button>
+                            </>
+                          )}
+                        </div>
+                        {isDiffOpen && checkpointDiff && (
+                          <pre className="p-2.5 rounded bg-zinc-950 border border-zinc-800 text-[11px] font-mono text-zinc-300 max-h-60 overflow-auto whitespace-pre-wrap">
+                            {checkpointDiff.diff}
+                          </pre>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               )}
             </div>
           )}

@@ -2,7 +2,14 @@
 import { dirname, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import type { PipelineTemplateId, Ticket, WorkerEngineId } from "@super-work/core";
+import type {
+  DagNodeMutationInput,
+  EnginePreference,
+  PipelineTemplateId,
+  StageKind,
+  Ticket,
+  WorkerEngineId,
+} from "@super-work/core";
 import { DaemonNotReachableError, SuperWorkHttpClient, type ParsedSseEvent } from "./client.ts";
 
 export { SuperWorkHttpClient, DaemonNotReachableError } from "./client.ts";
@@ -50,6 +57,10 @@ function parseCliArgs(argv: string[]): ParsedArgs {
     "window",
     "routine",
     "candidate",
+    "base",
+    "mode",
+    "prompt",
+    "stage",
   ]);
   const optionalEngineFlags = new Set(["arena"]);
   const engineValues = new Set(["claude", "codex", "opencode", "mock"]);
@@ -188,6 +199,7 @@ function extractEventTicketId(data: Record<string, unknown>): string | undefined
   return (
     (data.ticketId as string | undefined) ??
     ((data.ticket as { id?: string } | undefined)?.id) ??
+    ((data.checkpoint as { ticketId?: string } | undefined)?.ticketId) ??
     ((data.item as { ticketId?: string } | undefined)?.ticketId) ??
     ((data.entry as { ticketId?: string } | undefined)?.ticketId) ??
     ((data.signal as { ticketId?: string } | undefined)?.ticketId)
@@ -241,6 +253,12 @@ function formatEventLine(ev: ParsedSseEvent, watchedTicketId?: string): string {
   if (ev.event === "preview_updated") {
     const p = data.preview as { id?: string; ticketId?: string; status?: string; url?: string } | undefined;
     return `[preview_updated] ${p?.id ?? "?"} (${p?.ticketId ?? "?"}) status=${p?.status ?? "?"} ${p?.url ?? ""}`.trim();
+  }
+  if (ev.event === "checkpoint_created") {
+    const cp = data.checkpoint as
+      | { id?: string; ticketId?: string; stage?: string; commitSha?: string; label?: string }
+      | undefined;
+    return `[checkpoint_created] ${cp?.id ?? "?"} ticket=${cp?.ticketId ?? "?"} stage=${cp?.stage ?? "?"} sha=${cp?.commitSha?.slice(0, 8) ?? "?"} :: ${cp?.label ?? ""}`.trim();
   }
   return `${childPrefix}[${ev.event}] ${JSON.stringify(data).slice(0, 140)}`;
 }
@@ -333,17 +351,23 @@ async function waitForTicketCompletion(
 }
 
 function printHelp(stdout: (line: string) => void): void {
-  stdout(`super-work v0.8.0 CLI
+  stdout(`super-work v0.9.0 CLI
 
 Usage:
   super-work up [-d|--detach] [--port 4318] [--data-dir path]
   super-work mcp [--url http://localhost:4318] [--token <token>] [--no-auto-start]
   super-work status [--repo <id>] [--auto-start] [--json]
   super-work dispatch <title> [-d|--desc <text>] [--repo <id>] [--paths <csv>] [--depends-on <csv>]
-                      [--template fast|standard|strict] [--engine claude|codex|opencode|mock]
-                      [--arena [engine]] [--clarify] [--clarify-only] [--budget <usd>] [--wait] [--auto-start] [--json]
-  super-work epic <title> [-d|--desc <text>] [--repo <id>] [--template fast|standard|strict]
-                  [--engine ...] [--preview-only] [--per-subtask] [--wait] [--auto-start] [--json]
+                      [--template fast|standard|strict] [--engine auto|claude|codex|opencode|mock]
+                      [--tdd] [--pause-before-run] [--arena [engine]] [--clarify] [--clarify-only]
+                      [--budget <usd>] [--wait] [--auto-start] [--json]
+  super-work epic <title> [-d|--desc <text>] [--repo <id>] [--template fast|standard|strict] [--tdd]
+                  [--engine auto|...] [--preview-only] [--per-subtask] [--wait] [--auto-start] [--json]
+  super-work impact [--repo <id>] [--paths <csv>] [--auto-start] [--json]
+  super-work checkpoint [list <ticketId> | diff <ticketId> <cpId> [--base <cpId>] |
+                         restore <ticketId> <cpId> [--mode in_place|fork] [-m <prompt>] [--stage <stage>] [--engine <eng>]]
+  super-work dag [pause <ticketId> | resume <ticketId> | rerun <ticketId> |
+                  set <ticketId> [--engine auto|...] [--paths <csv>] [--depends-on <csv>] [-d <desc>] [--tdd|--no-tdd] [--breakpoint]]
   super-work inbox [list | approve <id> [--expand-mandate] [--local-merge] [--budget-add <usd>] [--winner <candId>] [-m <note>] | reject <id> [-m <note>]]
   super-work preview [list | start <ticketId> [--candidate <candId>] | stop <previewId>] [--repo <id>] [--json]
   super-work routine [list | add <name> -d <prompt> [--cron <expr> | --every <min>] [--window HH:MM-HH:MM] [--paths <csv>] [--budget <usd>] | run <id> | toggle <id> | runs [--routine <id>] | delete <id>]
@@ -543,7 +567,9 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
             .filter(Boolean)
         : undefined;
       const template = getStringFlag(flags, "template") as PipelineTemplateId | undefined;
-      const preferredEngine = getStringFlag(flags, "engine") as WorkerEngineId | undefined;
+      const preferredEngine = getStringFlag(flags, "engine") as EnginePreference | undefined;
+      const tddMode = flags.tdd !== undefined ? Boolean(flags.tdd) : undefined;
+      const pauseBeforeRun = flags["pause-before-run"] ? true : undefined;
       const budgetStr = getStringFlag(flags, "budget");
       const maxCostUsd = budgetStr ? Number(budgetStr) : undefined;
       const arenaFlag = flags.arena;
@@ -611,6 +637,8 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
             title,
             description: finalDescription,
             template: finalTemplate,
+            tddMode,
+            pauseBeforeRun,
             allowedPaths: finalPaths,
             dependsOn,
             preferredEngine,
@@ -657,7 +685,8 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
       }
       const description = getStringFlag(flags, "d", "desc", "description") ?? title;
       const template = getStringFlag(flags, "template") as PipelineTemplateId | undefined;
-      const preferredEngine = getStringFlag(flags, "engine") as WorkerEngineId | undefined;
+      const preferredEngine = getStringFlag(flags, "engine") as EnginePreference | undefined;
+      const tddMode = flags.tdd !== undefined ? Boolean(flags.tdd) : undefined;
       const budgetStr = getStringFlag(flags, "budget");
       const maxCostUsdPerSubtask = budgetStr ? Number(budgetStr) : undefined;
       const previewOnly = Boolean(flags["preview-only"]);
@@ -700,6 +729,7 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
             title,
             description,
             template,
+            tddMode,
             epicDeliveryMode: perSubtask ? "per_subtask" : "unified",
             preferredEngine,
             maxCostUsdPerSubtask: Number.isFinite(maxCostUsdPerSubtask)
@@ -1331,6 +1361,182 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
 
       stderr(`Unknown preview subcommand: ${subCmd}`);
       return 1;
+    }
+
+    if (cmd === "impact") {
+      const pathsRaw = getStringFlag(flags, "paths");
+      const paths = pathsRaw
+        ? pathsRaw
+            .split(",")
+            .map((p) => p.trim())
+            .filter(Boolean)
+        : ["**"];
+      const { report } = await withAutoStart(
+        baseUrl,
+        autoStart,
+        async () => {
+          const repoId = await resolveTargetRepoId(client, getStringFlag(flags, "repo"));
+          return client.analyzeRepoImpact(repoId, paths);
+        },
+        stdout,
+      );
+      if (asJson) {
+        stdout(JSON.stringify({ report }, null, 2));
+        return 0;
+      }
+      stdout(
+        `Symbol Impact Analysis: targets=${report.targetFiles.length}, direct=${report.directDependents.length}, transitive=${report.transitiveDependents.length}`,
+      );
+      if (report.directDependents.length > 0) {
+        stdout(`Direct Dependents (1-hop): ${report.directDependents.join(", ")}`);
+      }
+      if (report.transitiveDependents.length > 0) {
+        stdout(`Transitive Dependents (2+ hop): ${report.transitiveDependents.join(", ")}`);
+      }
+      if (report.contextPackMarkdown) {
+        stdout(report.contextPackMarkdown);
+      }
+      return 0;
+    }
+
+    if (cmd === "checkpoint") {
+      const subCmd = positionals[1] ?? "list";
+      const ticketId = positionals[2];
+      if (!ticketId) {
+        stderr("Error: ticketId is required. Usage: super-work checkpoint <list|diff|restore> <ticketId> [cpId]");
+        return 1;
+      }
+
+      if (subCmd === "list") {
+        const { checkpoints } = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.listCheckpoints(ticketId),
+          stdout,
+        );
+        if (asJson) {
+          stdout(JSON.stringify({ checkpoints }, null, 2));
+          return 0;
+        }
+        if (checkpoints.length === 0) {
+          stdout(`No checkpoints recorded for ticket ${ticketId}.`);
+          return 0;
+        }
+        for (const cp of checkpoints) {
+          stdout(
+            `[${cp.id}] (${cp.stage}${cp.cleanedAt ? " | CLEANED" : ""}) ${cp.commitSha.slice(0, 8)} ${cp.label}`,
+          );
+        }
+        return 0;
+      }
+
+      if (subCmd === "diff") {
+        const cpId = positionals[3];
+        if (!cpId) {
+          stderr("Error: cpId is required. Usage: super-work checkpoint diff <ticketId> <cpId> [--base <cpId>]");
+          return 1;
+        }
+        const baseCp = getStringFlag(flags, "base");
+        const res = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.getCheckpointDiff(ticketId, cpId, baseCp),
+          stdout,
+        );
+        if (asJson) {
+          stdout(JSON.stringify(res, null, 2));
+          return 0;
+        }
+        stdout(`Diff ${res.fromSha.slice(0, 8)}..${res.toSha.slice(0, 8)}:`);
+        stdout(res.diff || "(empty diff)");
+        return 0;
+      }
+
+      if (subCmd === "restore") {
+        const cpId = positionals[3];
+        if (!cpId) {
+          stderr("Error: cpId is required. Usage: super-work checkpoint restore <ticketId> <cpId>");
+          return 1;
+        }
+        const rawMode = getStringFlag(flags, "mode");
+        const mode = rawMode === "fork" ? "fork" : "in_place";
+        const prompt = getStringFlag(flags, "prompt", "m", "note");
+        const targetStage = getStringFlag(flags, "stage") as StageKind | undefined;
+        const preferredEngine = getStringFlag(flags, "engine") as EnginePreference | undefined;
+        const res = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () =>
+            client.restoreCheckpoint(ticketId, cpId, {
+              mode,
+              prompt,
+              targetStage,
+              preferredEngine,
+            }),
+          stdout,
+        );
+        stdout(
+          asJson
+            ? JSON.stringify(res, null, 2)
+            : `Restored checkpoint ${cpId} (${res.mode}) -> ticket ${res.ticket.id} [${res.ticket.status} stage=${res.ticket.currentStage}]`,
+        );
+        return 0;
+      }
+
+      stderr(`Unknown checkpoint subcommand: ${subCmd}`);
+      return 1;
+    }
+
+    if (cmd === "dag") {
+      const subCmd = positionals[1];
+      const ticketId = positionals[2];
+      if (!subCmd || !ticketId) {
+        stderr("Error: usage: super-work dag <pause|resume|rerun|set> <ticketId> [flags]");
+        return 1;
+      }
+
+      let payload: DagNodeMutationInput;
+      if (subCmd === "pause" || subCmd === "resume" || subCmd === "rerun") {
+        payload = { action: subCmd };
+      } else if (subCmd === "set") {
+        const pathsRaw = getStringFlag(flags, "paths");
+        const depsRaw = getStringFlag(flags, "depends-on");
+        payload = {
+          action: "update",
+          description: getStringFlag(flags, "d", "desc", "description"),
+          preferredEngine: getStringFlag(flags, "engine") as EnginePreference | undefined,
+          allowedPaths: pathsRaw
+            ? pathsRaw
+                .split(",")
+                .map((p) => p.trim())
+                .filter(Boolean)
+            : undefined,
+          dependsOn: depsRaw !== undefined
+            ? depsRaw
+                .split(",")
+                .map((d) => d.trim())
+                .filter(Boolean)
+            : undefined,
+          tddMode: flags["no-tdd"] ? false : flags.tdd ? true : undefined,
+          pauseBeforeRun: flags.breakpoint !== undefined ? Boolean(flags.breakpoint) : undefined,
+        };
+      } else {
+        stderr(`Unknown dag subcommand: ${subCmd}`);
+        return 1;
+      }
+
+      const { ticket } = await withAutoStart(
+        baseUrl,
+        autoStart,
+        () => client.mutateDagNode(ticketId, payload),
+        stdout,
+      );
+      stdout(
+        asJson
+          ? JSON.stringify({ ticket }, null, 2)
+          : `Updated DAG node ${ticket.id}: status=${ticket.status} stage=${ticket.currentStage} deps=[${ticket.dependsOn.join(",")}]`,
+      );
+      return 0;
     }
 
     stderr(`Unknown command: ${cmd}`);

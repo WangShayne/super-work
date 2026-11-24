@@ -159,6 +159,7 @@ export class ClaudeCodeDriver implements WorkerDriver {
       rootRepoPath: input.rootRepoPath,
       mode: input.sandboxMode ?? "balanced",
       forbiddenPaths: input.mandate.forbiddenPaths,
+      readOnlyPaths: input.readOnlyPaths,
       allowNetwork: input.mandate.allowNetwork,
       engine: "claude",
       baseEnv: createSanitizedClaudeEnv(),

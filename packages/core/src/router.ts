@@ -1,5 +1,6 @@
+import { classifyTaskCategory } from "./engine-router.ts";
 import { heuristicDecomposeEpic, sanitizeEpicSubtasks } from "./epic.ts";
-import { createDefaultMandate, mandateScopesOverlap } from "./mandate.ts";
+import { createDefaultMandate, mandateScopesOverlap, matchesPathScope } from "./mandate.ts";
 import { getFirstStage } from "./pipeline.ts";
 import { formatPlaybookContext } from "./playbook.ts";
 import type {
@@ -17,8 +18,10 @@ import type {
   Mandate,
   PipelineTemplateId,
   RepoConfig,
+  SymbolImpactReport,
   Thread,
   Ticket,
+  TicketImpactSummary,
   Trigger,
 } from "./types.ts";
 import { isTerminalTicketStatus, newId, nowIso } from "./utils.ts";
@@ -37,6 +40,10 @@ export class EventIntakeRouter {
     private readonly llm: ControlPlaneLLM,
     private readonly emit: (event: KernelEvent) => void,
     private readonly repoStructureProvider?: (rootPath: string) => Promise<string>,
+    private readonly symbolImpactProvider?: (
+      rootPath: string,
+      scopePatterns: string[],
+    ) => Promise<SymbolImpactReport>,
   ) {}
 
   private async resolveRepoStructure(repo: RepoConfig): Promise<string | undefined> {
@@ -356,29 +363,41 @@ export class EventIntakeRouter {
       allowedPaths: proposal.allowedPaths.length > 0 ? proposal.allowedPaths : ["**"],
       forbiddenPaths: repo.forbiddenPaths ?? [],
     });
-    const dependsOn = this.computeOverlappingDependencies(mandate, activeTickets);
+    const overlapDeps = this.computeOverlappingDependencies(mandate, activeTickets);
+    const semantic = await this.computeSemanticDependencies(repo, mandate, activeTickets);
+    const dependsOn = Array.from(new Set([...overlapDeps, ...semantic.semanticDepIds]));
     const template = proposal.template ?? repo.defaultTemplate;
+    const tddMode = Boolean(repo.defaultTddMode);
     const isObserve = repo.mode === "observe";
+    const ticketTitle = proposal.title || trigger.title;
+    const ticketDesc = proposal.description || trigger.rawText;
 
     const ticket: Ticket = {
       id: newId("tkt"),
       repoId: repo.id,
       threadId: thread.id,
       sourceTriggerId: trigger.id,
-      title: proposal.title || trigger.title,
-      description: proposal.description || trigger.rawText,
+      title: ticketTitle,
+      description: ticketDesc,
       status: isObserve ? "proposed" : dependsOn.length > 0 ? "waiting_deps" : "queued",
       template,
-      currentStage: getFirstStage(template),
+      currentStage: getFirstStage(template, tddMode),
       stageRetries: 0,
       mandate,
       dependsOn,
       nativeSessions: {},
+      tddMode: tddMode || undefined,
+      taskCategory: classifyTaskCategory(ticketTitle, ticketDesc, mandate.allowedPaths),
+      impactSummary: semantic.impactSummary,
       inlineMemory: {
-        goal: proposal.description || trigger.rawText,
+        goal: ticketDesc,
         acceptanceCriteria: proposal.acceptanceCriteria,
         stageNotes: [],
-        threadUpdates: [],
+        threadUpdates: semantic.transitiveWarnings.map((w) => ({
+          triggerId: newId("imp"),
+          message: w,
+          createdAt: ts,
+        })),
       },
       costUsd: 0,
       priority: proposal.priority ?? 1,
@@ -456,7 +475,10 @@ export class EventIntakeRouter {
       id: newId("thr"),
       repoId: repo.id,
       threadKey,
-      metadata: { source: "web" },
+      metadata: {
+        source: "web",
+        ...(input.startPoint ? { forkStartPoint: input.startPoint } : {}),
+      },
       createdAt: ts,
       updatedAt: ts,
     };
@@ -486,11 +508,15 @@ export class EventIntakeRouter {
 
     const activeTickets = await this.stateStore.listActiveTickets(repo.id);
     const overlapDeps = this.computeOverlappingDependencies(mandate, activeTickets);
-    if (overlapDeps.length > 0) {
+    const semantic = await this.computeSemanticDependencies(repo, mandate, activeTickets);
+    if (overlapDeps.length > 0 || semantic.semanticDepIds.length > 0) {
       hasPendingDeps = true;
     }
-    const dependsOn = Array.from(new Set([...explicitDeps, ...overlapDeps]));
+    const dependsOn = Array.from(
+      new Set([...explicitDeps, ...overlapDeps, ...semantic.semanticDepIds]),
+    );
     const template = input.template ?? repo.defaultTemplate;
+    const tddMode = input.tddMode ?? repo.defaultTddMode ?? false;
 
     const ticket: Ticket = {
       id: newId("tkt"),
@@ -501,22 +527,33 @@ export class EventIntakeRouter {
       description: input.description,
       status: hasPendingDeps ? "waiting_deps" : "queued",
       template,
-      currentStage: getFirstStage(template),
+      currentStage: getFirstStage(template, tddMode),
       stageRetries: 0,
       mandate,
       dependsOn,
       nativeSessions: {},
       preferredEngine: input.preferredEngine,
-      activeEngine: input.preferredEngine,
+      activeEngine:
+        input.preferredEngine && input.preferredEngine !== "auto"
+          ? input.preferredEngine
+          : undefined,
       arenaMode: input.arenaMode || undefined,
       arenaCompetitorEngine: input.arenaCompetitorEngine,
+      tddMode: tddMode || undefined,
+      pauseBeforeRun: input.pauseBeforeRun || undefined,
+      taskCategory: classifyTaskCategory(input.title, input.description, mandate.allowedPaths),
+      impactSummary: semantic.impactSummary,
       modelOverride: input.modelOverride?.trim() || undefined,
       effortOverride: input.effortOverride,
       inlineMemory: {
         goal: input.description,
         acceptanceCriteria: input.acceptanceCriteria ?? [],
         stageNotes: [],
-        threadUpdates: [],
+        threadUpdates: semantic.transitiveWarnings.map((w) => ({
+          triggerId: newId("imp"),
+          message: w,
+          createdAt: ts,
+        })),
       },
       costUsd: 0,
       priority: 1,
@@ -695,6 +732,8 @@ export class EventIntakeRouter {
       branchName: deliveryMode === "unified" ? `super-work/epic/${epicId}` : undefined,
       nativeSessions: {},
       preferredEngine: input.preferredEngine,
+      tddMode: (input.tddMode ?? repo.defaultTddMode) || undefined,
+      taskCategory: classifyTaskCategory(input.title, input.description, ["**"]),
       inlineMemory: {
         goal: input.description,
         acceptanceCriteria: plan.subtasks.map((s) => `[${s.key}] ${s.title}`),
@@ -758,11 +797,14 @@ export class EventIntakeRouter {
       const sameRepoPriorSubtasks = subtasks.filter(
         (existing) => existing.repoId === targetRepo.id && !explicitDeps.includes(existing.id),
       );
-      const existingOverlapDeps = this.computeOverlappingDependencies(subMandate, [
-        ...activeBefore,
-        ...sameRepoPriorSubtasks,
-      ]);
-      const dependsOn = Array.from(new Set([...explicitDeps, ...existingOverlapDeps]));
+      const sameRepoAll = [...activeBefore, ...sameRepoPriorSubtasks];
+      const existingOverlapDeps = this.computeOverlappingDependencies(subMandate, sameRepoAll);
+      const semantic = await this.computeSemanticDependencies(targetRepo, subMandate, sameRepoAll);
+      const dependsOn = Array.from(
+        new Set([...explicitDeps, ...existingOverlapDeps, ...semantic.semanticDepIds]),
+      );
+      const subTddMode = spec.tddMode ?? input.tddMode ?? targetRepo.defaultTddMode ?? false;
+      const subPreferredEngine = spec.preferredEngine ?? input.preferredEngine;
 
       const subTicket: Ticket = {
         id: newId("tkt"),
@@ -773,7 +815,7 @@ export class EventIntakeRouter {
         description: spec.description,
         status: dependsOn.length > 0 ? "waiting_deps" : "queued",
         template: spec.template,
-        currentStage: getFirstStage(spec.template),
+        currentStage: getFirstStage(spec.template, subTddMode),
         stageRetries: 0,
         mandate: subMandate,
         dependsOn,
@@ -781,15 +823,23 @@ export class EventIntakeRouter {
         isEpic: false,
         subtaskKey: spec.key,
         nativeSessions: {},
-        preferredEngine: input.preferredEngine,
-        activeEngine: input.preferredEngine,
+        preferredEngine: subPreferredEngine,
+        activeEngine:
+          subPreferredEngine && subPreferredEngine !== "auto" ? subPreferredEngine : undefined,
+        tddMode: subTddMode || undefined,
+        taskCategory: classifyTaskCategory(spec.title, spec.description, subMandate.allowedPaths),
+        impactSummary: semantic.impactSummary,
         modelOverride: input.modelOverride?.trim() || undefined,
         effortOverride: input.effortOverride,
         inlineMemory: {
           goal: spec.description,
           acceptanceCriteria: spec.acceptanceCriteria,
           stageNotes: [],
-          threadUpdates: [],
+          threadUpdates: semantic.transitiveWarnings.map((w) => ({
+            triggerId: newId("imp"),
+            message: w,
+            createdAt: subTs,
+          })),
         },
         costUsd: 0,
         priority: 1,
@@ -886,6 +936,66 @@ export class EventIntakeRouter {
     }
 
     return unblocked;
+  }
+
+  private async computeSemanticDependencies(
+    repo: RepoConfig,
+    mandate: Mandate,
+    activeTickets: Ticket[],
+  ): Promise<{
+    semanticDepIds: string[];
+    impactSummary?: TicketImpactSummary;
+    transitiveWarnings: string[];
+  }> {
+    if (!this.symbolImpactProvider || mandate.allowedPaths.includes("**")) {
+      return { semanticDepIds: [], transitiveWarnings: [] };
+    }
+    let report: SymbolImpactReport;
+    try {
+      report = await this.symbolImpactProvider(repo.rootPath, mandate.allowedPaths);
+    } catch {
+      return { semanticDepIds: [], transitiveWarnings: [] };
+    }
+    if (report.targetFiles.length === 0) {
+      return { semanticDepIds: [], transitiveWarnings: [] };
+    }
+
+    const semanticDepIds: string[] = [];
+    const transitiveWarnings: string[] = [];
+
+    for (const active of activeTickets) {
+      if (active.status === "proposed" || active.isEpic) continue;
+      if (active.mandate.allowedPaths.includes("**")) continue;
+
+      const matchesDirect =
+        report.directDependents.some((f) => matchesPathScope(f, active.mandate.allowedPaths)) ||
+        (active.impactSummary?.directDependents ?? []).some((f) =>
+          matchesPathScope(f, mandate.allowedPaths),
+        );
+      if (matchesDirect) {
+        semanticDepIds.push(active.id);
+        continue;
+      }
+
+      const matchesTransitive =
+        report.transitiveDependents.some((f) => matchesPathScope(f, active.mandate.allowedPaths)) ||
+        (active.impactSummary?.transitiveDependents ?? []).some((f) =>
+          matchesPathScope(f, mandate.allowedPaths),
+        );
+      if (matchesTransitive) {
+        transitiveWarnings.push(
+          `Transitive (>1 hop) symbol impact with active ticket ${active.id} (${active.title})`,
+        );
+      }
+    }
+
+    const impactSummary: TicketImpactSummary = {
+      directDependents: report.directDependents.slice(0, 20),
+      transitiveDependents: report.transitiveDependents.slice(0, 20),
+      semanticDepTicketIds: semanticDepIds,
+    };
+
+    return { semanticDepIds, impactSummary, transitiveWarnings };
   }
 
   private computeOverlappingDependencies(mandate: Mandate, activeTickets: Ticket[]): string[] {

@@ -258,6 +258,12 @@ export function InboxView({
                         {formatInboxKind(item.kind, locale)}
                       </span>
                       <span className="text-xs font-mono text-zinc-500">{item.ticketId}</span>
+                      {item.kind === "plan_approval" &&
+                        item.contextPayload.isDagBreakpoint === true && (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[10px] font-mono">
+                            {t("inbox.dagBreakpointTag")}
+                          </span>
+                        )}
                       {ticket && (
                         <span className="text-[11px] px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono">
                           {ticket.template} · {ticket.mandate.allowedPaths.join(", ")}
@@ -343,6 +349,30 @@ export function InboxView({
                                     />
                                   </a>
                                 ))}
+                              </div>
+                            )}
+                            {cand.visualDiffArtifactIds && cand.visualDiffArtifactIds.length > 0 && (
+                              <div className="space-y-1 pt-1">
+                                <div className="text-[10px] font-mono text-rose-300">
+                                  {t("inbox.visualDiffsTitle")}
+                                </div>
+                                <div className="grid grid-cols-1 gap-1.5">
+                                  {cand.visualDiffArtifactIds.slice(0, 2).map((aid) => (
+                                    <a
+                                      key={aid}
+                                      href={api.getArtifactRawUrl(aid)}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="block rounded border border-rose-500/30 overflow-hidden bg-zinc-900 hover:border-rose-400 transition"
+                                    >
+                                      <img
+                                        src={api.getArtifactRawUrl(aid)}
+                                        alt={`${cand.engine} visual diff`}
+                                        className="w-full max-h-36 object-contain bg-zinc-950"
+                                      />
+                                    </a>
+                                  ))}
+                                </div>
                               </div>
                             )}
                             {cand.worktreePath && (() => {

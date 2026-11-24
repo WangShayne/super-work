@@ -18,15 +18,19 @@ import type {
   RoutineSpec,
   SmokeCheckConfig,
   SpillArtifact,
+  StageKind,
   StageRun,
   StateStore,
+  TaskCategory,
   Thread,
   Ticket,
+  TicketCheckpoint,
+  TicketImpactSummary,
   TicketStatus,
   Trigger,
   WorkerEngineId,
 } from "@super-work/core";
-import { TERMINAL_TICKET_STATUSES } from "@super-work/core";
+import { TERMINAL_TICKET_STATUSES, buildEngineCategoryMatrix } from "@super-work/core";
 
 export function tokenizeFtsQuery(rawQuery: string): string | null {
   // Keep alphanumeric, underscore, and CJK characters; split into safe double-quoted OR terms
@@ -304,6 +308,24 @@ export class SqliteStateStore implements StateStore {
         value_json TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS ticket_checkpoints (
+        id TEXT PRIMARY KEY,
+        ticket_id TEXT NOT NULL,
+        repo_id TEXT NOT NULL,
+        stage_run_id TEXT,
+        stage TEXT NOT NULL,
+        engine TEXT,
+        label TEXT NOT NULL,
+        git_ref TEXT NOT NULL,
+        commit_sha TEXT NOT NULL,
+        changed_files_json TEXT NOT NULL DEFAULT '[]',
+        verification_passed INTEGER,
+        created_at TEXT NOT NULL,
+        cleaned_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_checkpoints_ticket
+        ON ticket_checkpoints(ticket_id, created_at ASC);
     `);
 
     const repoCols = this.db
@@ -361,6 +383,9 @@ export class SqliteStateStore implements StateStore {
     }
     if (!existingRepoCols.has("preview_command")) {
       this.db.run("ALTER TABLE repos ADD COLUMN preview_command TEXT;");
+    }
+    if (!existingRepoCols.has("default_tdd_mode")) {
+      this.db.run("ALTER TABLE repos ADD COLUMN default_tdd_mode INTEGER NOT NULL DEFAULT 0;");
     }
 
     const cols = this.db
@@ -444,6 +469,35 @@ export class SqliteStateStore implements StateStore {
     if (!existingCols.has("pending_epic_replan_json")) {
       this.db.run("ALTER TABLE tickets ADD COLUMN pending_epic_replan_json TEXT;");
     }
+    if (!existingCols.has("tdd_mode")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN tdd_mode INTEGER NOT NULL DEFAULT 0;");
+    }
+    if (!existingCols.has("locked_test_paths_json")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN locked_test_paths_json TEXT;");
+    }
+    if (!existingCols.has("spec_test_commit_sha")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN spec_test_commit_sha TEXT;");
+    }
+    if (!existingCols.has("spec_test_challenge_count")) {
+      this.db.run(
+        "ALTER TABLE tickets ADD COLUMN spec_test_challenge_count INTEGER NOT NULL DEFAULT 0;",
+      );
+    }
+    if (!existingCols.has("task_category")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN task_category TEXT;");
+    }
+    if (!existingCols.has("routing_rationale")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN routing_rationale TEXT;");
+    }
+    if (!existingCols.has("auto_arena_escalated")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN auto_arena_escalated INTEGER NOT NULL DEFAULT 0;");
+    }
+    if (!existingCols.has("impact_summary_json")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN impact_summary_json TEXT;");
+    }
+    if (!existingCols.has("pause_before_run")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN pause_before_run INTEGER NOT NULL DEFAULT 0;");
+    }
 
     const playbookCols = this.db
       .query("PRAGMA table_info(playbook_entries)")
@@ -465,14 +519,14 @@ export class SqliteStateStore implements StateStore {
     this.db
       .query(
         `INSERT INTO repos (
-          id, name, root_path, base_branch, mode, github_repo, default_template,
+          id, name, root_path, base_branch, mode, github_repo, default_template, default_tdd_mode,
           preferred_implement_engine, preferred_review_engine, fallback_engines_json, auto_cleanup_worktree,
           verification_commands_json, setup_commands_json, smoke_check_json, preview_command, sandbox_mode, forbidden_paths_json,
           conventions, contract_synced_hash, contract_synced_at,
           default_delivery_channel,
           max_concurrent_workers, daily_budget_usd, daily_budget_override_usd, daily_budget_override_date,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           root_path = excluded.root_path,
@@ -480,6 +534,7 @@ export class SqliteStateStore implements StateStore {
           mode = excluded.mode,
           github_repo = excluded.github_repo,
           default_template = excluded.default_template,
+          default_tdd_mode = excluded.default_tdd_mode,
           preferred_implement_engine = excluded.preferred_implement_engine,
           preferred_review_engine = excluded.preferred_review_engine,
           fallback_engines_json = excluded.fallback_engines_json,
@@ -508,6 +563,7 @@ export class SqliteStateStore implements StateStore {
         repo.mode,
         repo.githubRepo ?? null,
         repo.defaultTemplate,
+        repo.defaultTddMode ? 1 : 0,
         repo.preferredImplementEngine,
         repo.preferredReviewEngine,
         repo.fallbackEngines ? JSON.stringify(repo.fallbackEngines) : null,
@@ -630,10 +686,12 @@ export class SqliteStateStore implements StateStore {
           worktree_path, branch_name, worktree_cleaned_at,
           native_sessions_json, preferred_engine, active_engine, failed_engines_json,
           arena_mode, arena_competitor_engine, arena_candidates_json, arena_winner_id,
+          tdd_mode, locked_test_paths_json, spec_test_commit_sha, spec_test_challenge_count,
+          task_category, routing_rationale, auto_arena_escalated, impact_summary_json, pause_before_run,
           routine_id, epic_replan_count, epic_replan_history_json, pending_epic_replan_json,
           model_override, effort_override,
           inline_memory_json, handover_digest_json, cost_usd, priority, error_message, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           title = excluded.title,
           description = excluded.description,
@@ -665,6 +723,15 @@ export class SqliteStateStore implements StateStore {
           arena_competitor_engine = excluded.arena_competitor_engine,
           arena_candidates_json = excluded.arena_candidates_json,
           arena_winner_id = excluded.arena_winner_id,
+          tdd_mode = excluded.tdd_mode,
+          locked_test_paths_json = excluded.locked_test_paths_json,
+          spec_test_commit_sha = excluded.spec_test_commit_sha,
+          spec_test_challenge_count = excluded.spec_test_challenge_count,
+          task_category = excluded.task_category,
+          routing_rationale = excluded.routing_rationale,
+          auto_arena_escalated = excluded.auto_arena_escalated,
+          impact_summary_json = excluded.impact_summary_json,
+          pause_before_run = excluded.pause_before_run,
           routine_id = excluded.routine_id,
           epic_replan_count = excluded.epic_replan_count,
           epic_replan_history_json = excluded.epic_replan_history_json,
@@ -713,6 +780,15 @@ export class SqliteStateStore implements StateStore {
         ticket.arenaCompetitorEngine ?? null,
         ticket.arenaCandidates ? JSON.stringify(ticket.arenaCandidates) : null,
         ticket.arenaWinnerId ?? null,
+        ticket.tddMode ? 1 : 0,
+        ticket.lockedTestPaths ? JSON.stringify(ticket.lockedTestPaths) : null,
+        ticket.specTestCommitSha ?? null,
+        ticket.specTestChallengeCount ?? 0,
+        ticket.taskCategory ?? null,
+        ticket.routingRationale ?? null,
+        ticket.autoArenaEscalated ? 1 : 0,
+        ticket.impactSummary ? JSON.stringify(ticket.impactSummary) : null,
+        ticket.pauseBeforeRun ? 1 : 0,
         ticket.routineId ?? null,
         ticket.epicReplanCount ?? 0,
         ticket.epicReplanHistory ? JSON.stringify(ticket.epicReplanHistory) : null,
@@ -1168,6 +1244,27 @@ export class SqliteStateStore implements StateStore {
       avgDurationMs: Number(r.avg_duration_ms ?? 0),
     }));
 
+    const historicalTickets = await this.listTickets(repoId ? { repoId } : undefined);
+    const stageRunRows = (
+      repoId
+        ? this.db
+            .query(
+              "SELECT sr.* FROM stage_runs sr JOIN tickets t ON t.id = sr.ticket_id WHERE t.repo_id = ? ORDER BY sr.started_at ASC",
+            )
+            .all(repoId)
+        : this.db.query("SELECT * FROM stage_runs ORDER BY started_at ASC").all()
+    ) as Array<Record<string, unknown>>;
+    const casebookRows = (
+      repoId
+        ? this.db.query("SELECT * FROM casebook_entries WHERE repo_id = ?").all(repoId)
+        : this.db.query("SELECT * FROM casebook_entries").all()
+    ) as Array<Record<string, unknown>>;
+    const engineMatrix = buildEngineCategoryMatrix({
+      tickets: historicalTickets,
+      stageRuns: stageRunRows.map(mapStageRunRow),
+      casebookEntries: casebookRows.map(mapCasebookRow),
+    });
+
     return {
       repoId,
       todayDate,
@@ -1186,6 +1283,7 @@ export class SqliteStateStore implements StateStore {
       },
       deliveryRate,
       byEngine,
+      engineMatrix,
     };
   }
 
@@ -1572,6 +1670,58 @@ export class SqliteStateStore implements StateStore {
     tx();
   }
 
+  // --- Worktree Checkpoints (D.2) ---
+  async saveCheckpoint(cp: TicketCheckpoint): Promise<void> {
+    this.db
+      .query(
+        `INSERT INTO ticket_checkpoints (
+          id, ticket_id, repo_id, stage_run_id, stage, engine, label, git_ref,
+          commit_sha, changed_files_json, verification_passed, created_at, cleaned_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          label = excluded.label,
+          verification_passed = excluded.verification_passed,
+          cleaned_at = excluded.cleaned_at`,
+      )
+      .run(
+        cp.id,
+        cp.ticketId,
+        cp.repoId,
+        cp.stageRunId ?? null,
+        cp.stage,
+        cp.engine ?? null,
+        cp.label,
+        cp.gitRef,
+        cp.commitSha,
+        JSON.stringify(cp.changedFiles ?? []),
+        cp.verificationPassed === undefined ? null : cp.verificationPassed ? 1 : 0,
+        cp.createdAt,
+        cp.cleanedAt ?? null,
+      );
+  }
+
+  async getCheckpoint(id: string): Promise<TicketCheckpoint | null> {
+    const row = this.db
+      .query("SELECT * FROM ticket_checkpoints WHERE id = ?")
+      .get(id) as Record<string, unknown> | null;
+    return row ? mapCheckpointRow(row) : null;
+  }
+
+  async listCheckpoints(ticketId: string): Promise<TicketCheckpoint[]> {
+    const rows = this.db
+      .query("SELECT * FROM ticket_checkpoints WHERE ticket_id = ? ORDER BY created_at ASC")
+      .all(ticketId) as Array<Record<string, unknown>>;
+    return rows.map(mapCheckpointRow);
+  }
+
+  async markCheckpointsCleaned(ticketId: string, cleanedAt: string): Promise<void> {
+    this.db
+      .query(
+        "UPDATE ticket_checkpoints SET cleaned_at = ? WHERE ticket_id = ? AND cleaned_at IS NULL",
+      )
+      .run(cleanedAt, ticketId);
+  }
+
   // --- System Settings ---
   async getSystemSetting<T>(key: string): Promise<T | null> {
     const row = this.db
@@ -1607,6 +1757,7 @@ function mapRepoRow(r: Record<string, unknown>): RepoConfig {
     mode: r.mode as RepoConfig["mode"],
     githubRepo: r.github_repo ? String(r.github_repo) : undefined,
     defaultTemplate: r.default_template as RepoConfig["defaultTemplate"],
+    defaultTddMode: Boolean(r.default_tdd_mode),
     preferredImplementEngine: r.preferred_implement_engine as RepoConfig["preferredImplementEngine"],
     preferredReviewEngine: r.preferred_review_engine as RepoConfig["preferredReviewEngine"],
     fallbackEngines: r.fallback_engines_json
@@ -1734,6 +1885,22 @@ function mapTicketRow(r: Record<string, unknown>): Ticket {
       ? (JSON.parse(String(r.arena_candidates_json)) as ArenaCandidateResult[])
       : undefined,
     arenaWinnerId: r.arena_winner_id ? String(r.arena_winner_id) : undefined,
+    tddMode: Boolean(r.tdd_mode),
+    lockedTestPaths: r.locked_test_paths_json
+      ? (JSON.parse(String(r.locked_test_paths_json)) as string[])
+      : undefined,
+    specTestCommitSha: r.spec_test_commit_sha ? String(r.spec_test_commit_sha) : undefined,
+    specTestChallengeCount:
+      r.spec_test_challenge_count !== null && r.spec_test_challenge_count !== undefined
+        ? Number(r.spec_test_challenge_count)
+        : undefined,
+    taskCategory: r.task_category ? (String(r.task_category) as TaskCategory) : undefined,
+    routingRationale: r.routing_rationale ? String(r.routing_rationale) : undefined,
+    autoArenaEscalated: Boolean(r.auto_arena_escalated),
+    impactSummary: r.impact_summary_json
+      ? (JSON.parse(String(r.impact_summary_json)) as TicketImpactSummary)
+      : undefined,
+    pauseBeforeRun: Boolean(r.pause_before_run),
     routineId: r.routine_id ? String(r.routine_id) : undefined,
     epicReplanCount:
       r.epic_replan_count !== null && r.epic_replan_count !== undefined
@@ -1917,5 +2084,28 @@ function mapCasebookRow(r: Record<string, unknown>): CasebookEntry {
     lastMatchedAt: r.last_matched_at ? String(r.last_matched_at) : undefined,
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
+  };
+}
+
+function mapCheckpointRow(r: Record<string, unknown>): TicketCheckpoint {
+  return {
+    id: String(r.id),
+    ticketId: String(r.ticket_id),
+    repoId: String(r.repo_id),
+    stageRunId: r.stage_run_id ? String(r.stage_run_id) : undefined,
+    stage: String(r.stage) as StageKind | "baseline",
+    engine: r.engine ? (String(r.engine) as WorkerEngineId) : undefined,
+    label: String(r.label),
+    gitRef: String(r.git_ref),
+    commitSha: String(r.commit_sha),
+    changedFiles: r.changed_files_json
+      ? (JSON.parse(String(r.changed_files_json)) as string[])
+      : [],
+    verificationPassed:
+      r.verification_passed === null || r.verification_passed === undefined
+        ? undefined
+        : Boolean(r.verification_passed),
+    createdAt: String(r.created_at),
+    cleanedAt: r.cleaned_at ? String(r.cleaned_at) : undefined,
   };
 }

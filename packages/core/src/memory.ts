@@ -262,9 +262,17 @@ function stageInstructionFor(stage: StageKind): string {
         "Produce a concise, actionable implementation plan covering files to modify, edge cases, and verification commands.",
         "Do NOT edit files or run destructive commands in this stage.",
       ].join("\n");
+    case "spec_test":
+      return [
+        "TDD RED-GREEN CONTRACT PHASE (`spec_test`): Write ONLY failing/comprehensive automated test files (`*.test.*`, `*.spec.*`, `test/**`, `__tests__/**`) covering every acceptance criterion and edge case.",
+        "Do NOT modify production source files in this stage; focus purely on testable behavioral contracts.",
+        "These tests will be LOCKED read-only during implementation so the coding worker must truly satisfy them.",
+      ].join("\n");
     case "implement":
       return [
         "Implement the requested changes strictly inside the allowed paths.",
+        "If locked `spec_test` test files exist in this worktree, they are READ-ONLY—satisfy them via genuine production code without modifying or deleting test assertions.",
+        "Only if a pre-written spec test contains a demonstrably contradictory assertion against the task spec, output a single line `SPEC_TEST_CHALLENGE: <concise reason>`.",
         "Run relevant unit/typecheck tests locally to verify your implementation.",
         "Do NOT run git push or create PRs directly. Leave clean changes ready for review.",
       ].join("\n");

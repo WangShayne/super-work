@@ -1,5 +1,22 @@
 import { useMemo, useState } from "react";
-import { AlertCircle, CheckCircle2, Clock, FileCode2, FolderGit2, GitPullRequest, Layers, Lock, Search, Sparkles, X } from "lucide-react";
+import {
+  AlertCircle,
+  CheckCircle2,
+  Clock,
+  Columns3,
+  FileCode2,
+  FolderGit2,
+  GitFork,
+  GitPullRequest,
+  Layers,
+  Lock,
+  Pause,
+  Search,
+  Sparkles,
+  Swords,
+  X,
+} from "lucide-react";
+import { DagCanvas } from "../components/DagCanvas.tsx";
 import { formatStage, formatTicketStatus, type TranslationKey, useI18n } from "../i18n.tsx";
 import type { RepoConfig, Ticket, TicketStatus } from "../types.ts";
 
@@ -8,7 +25,9 @@ interface BoardViewProps {
   allTickets?: Ticket[];
   repos?: RepoConfig[];
   selectedRepoId?: string;
+  availableEngines?: string[];
   onSelectTicket: (ticketId: string) => void;
+  onRefresh?: () => void;
 }
 
 interface Swimlane {
@@ -28,7 +47,7 @@ const SWIMLANES: Swimlane[] = [
   {
     id: "queued",
     titleKey: "board.lane.queued",
-    statuses: ["queued", "waiting_deps", "planning", "awaiting_plan_approval"],
+    statuses: ["queued", "waiting_deps", "planning", "spec_testing", "awaiting_plan_approval"],
     accent: "border-t-sky-500",
   },
   {
@@ -60,6 +79,7 @@ function statusBadgeStyle(status: TicketStatus): string {
       return "bg-rose-500/15 text-rose-300 border-rose-500/30";
     case "implementing":
     case "planning":
+    case "spec_testing":
     case "reviewing":
     case "rebasing":
       return "bg-amber-500/15 text-amber-300 border-amber-500/30";
@@ -77,12 +97,15 @@ export function BoardView({
   allTickets,
   repos = [],
   selectedRepoId,
+  availableEngines = [],
   onSelectTicket,
+  onRefresh,
 }: BoardViewProps) {
   const { locale, t } = useI18n();
   const [searchQuery, setSearchQuery] = useState("");
   const [hideSubtasks, setHideSubtasks] = useState(false);
   const [onlyCrossOrHandover, setOnlyCrossOrHandover] = useState(false);
+  const [viewMode, setViewMode] = useState<"swimlane" | "dag">("swimlane");
 
   const childSource = allTickets ?? tickets;
   const reposById = useMemo(() => new Map(repos.map((r) => [r.id, r])), [repos]);
@@ -175,9 +198,45 @@ export function BoardView({
           >
             {t("board.filterCrossRepo")}
           </button>
+
+          <div className="inline-flex items-center rounded-md border border-zinc-800 bg-zinc-950 p-0.5 ml-1">
+            <button
+              type="button"
+              onClick={() => setViewMode("swimlane")}
+              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded text-[11px] transition ${
+                viewMode === "swimlane"
+                  ? "bg-indigo-500/20 text-indigo-200 border border-indigo-500/30"
+                  : "text-zinc-400 hover:text-zinc-200"
+              }`}
+            >
+              <Columns3 className="w-3 h-3" />
+              {t("board.viewSwimlane")}
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode("dag")}
+              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded text-[11px] transition ${
+                viewMode === "dag"
+                  ? "bg-indigo-500/20 text-indigo-200 border border-indigo-500/30"
+                  : "text-zinc-400 hover:text-zinc-200"
+              }`}
+            >
+              <GitFork className="w-3 h-3" />
+              {t("board.viewDag")}
+            </button>
+          </div>
         </div>
       </div>
 
+      {viewMode === "dag" ? (
+        <DagCanvas
+          tickets={filteredTickets}
+          repos={repos}
+          availableEngines={availableEngines}
+          onInspectTicket={onSelectTicket}
+          onMutated={onRefresh}
+        />
+      ) : (
       <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-5 gap-4 min-w-[980px]">
         {SWIMLANES.map((lane) => {
           const laneTickets = filteredTickets.filter((tkt) => lane.statuses.includes(tkt.status));
@@ -202,9 +261,13 @@ export function BoardView({
                       100,
                       Math.round((tkt.costUsd / Math.max(0.01, tkt.mandate.maxCostUsd)) * 100),
                     );
-                    const isRunning = ["planning", "implementing", "reviewing", "rebasing"].includes(
-                      tkt.status,
-                    );
+                    const isRunning = [
+                      "planning",
+                      "spec_testing",
+                      "implementing",
+                      "reviewing",
+                      "rebasing",
+                    ].includes(tkt.status);
                     const childTickets = tkt.isEpic
                       ? childSource.filter((c) => c.parentTicketId === tkt.id)
                       : [];
@@ -294,6 +357,29 @@ export function BoardView({
                               {tkt.activeEngine}
                             </span>
                           )}
+                          {tkt.tddMode && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-rose-500/10 border border-rose-500/30 text-rose-300 text-[10px] font-mono">
+                              <Lock className="w-2.5 h-2.5" />
+                              {t("board.badgeTdd")}
+                            </span>
+                          )}
+                          {tkt.pauseBeforeRun && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[10px] font-mono">
+                              <Pause className="w-2.5 h-2.5" />
+                              {t("board.badgeBreakpoint")}
+                            </span>
+                          )}
+                          {tkt.autoArenaEscalated && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-fuchsia-500/10 border border-fuchsia-500/30 text-fuchsia-300 text-[10px] font-mono">
+                              <Swords className="w-2.5 h-2.5" />
+                              {t("board.badgeAutoArena")}
+                            </span>
+                          )}
+                          {tkt.impactSummary && tkt.impactSummary.directDependents.length > 0 && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 text-[10px] font-mono">
+                              {t("board.badgeImpact")} ({tkt.impactSummary.directDependents.length})
+                            </span>
+                          )}
                           {tkt.mandate.allowedPaths.slice(0, 2).map((p) => (
                             <span
                               key={p}
@@ -343,6 +429,7 @@ export function BoardView({
           );
         })}
       </div>
+      )}
     </div>
   );
 }

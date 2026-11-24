@@ -230,6 +230,7 @@ export interface SeatbeltProfileInput {
   sandboxTempDir: string;
   gitAdminDirs?: string[];
   forbiddenPaths?: string[];
+  readOnlyPaths?: string[];
   allowNetwork?: boolean;
   mode: Exclude<SandboxMode, "off">;
   homeDir?: string;
@@ -347,6 +348,37 @@ export function buildMacosSeatbeltProfile(input: SeatbeltProfileInput): string {
     );
   }
 
+  // 3b. Read-only protected paths (e.g. locked A.1 spec_test files): readable & runnable, never writable
+  const roSubpaths: string[] = [];
+  const roRegexes: string[] = [];
+  for (const rawPat of input.readOnlyPaths ?? []) {
+    const pat = rawPat.trim();
+    if (!pat) continue;
+    if (pat.includes("*") || pat.includes("?")) {
+      for (const wt of worktreeVariants) {
+        roRegexes.push(...globPatternToWorktreeRegexes(wt, pat));
+      }
+    } else {
+      for (const wt of worktreeVariants) {
+        roSubpaths.push(resolve(wt, pat));
+      }
+    }
+  }
+  if (roSubpaths.length > 0) {
+    lines.push(
+      `(deny file-write* ${Array.from(new Set(roSubpaths))
+        .map((p) => `(subpath "${escapeSbplString(p)}")`)
+        .join(" ")})`,
+    );
+  }
+  if (roRegexes.length > 0) {
+    lines.push(
+      `(deny file-write* ${Array.from(new Set(roRegexes))
+        .map((rx) => `(regex #"${rx.replace(/"/g, '\\"')}")`)
+        .join(" ")})`,
+    );
+  }
+
   // 4. Network isolation under strict mode or explicit allowNetwork === false
   if (input.mode === "strict" || input.allowNetwork === false) {
     lines.push("(deny network*)");
@@ -361,6 +393,7 @@ export interface WrapSandboxOptions {
   rootRepoPath?: string;
   mode?: SandboxMode;
   forbiddenPaths?: string[];
+  readOnlyPaths?: string[];
   allowNetwork?: boolean;
   engine: SanitizedEnvOptions["engine"];
   baseEnv?: NodeJS.ProcessEnv;
@@ -426,6 +459,7 @@ export function wrapCommandWithOsSandbox(options: WrapSandboxOptions): WrappedSa
       sandboxTempDir,
       gitAdminDirs,
       forbiddenPaths: options.forbiddenPaths,
+      readOnlyPaths: options.readOnlyPaths,
       allowNetwork: options.allowNetwork,
       mode,
     });
@@ -460,6 +494,14 @@ export function wrapCommandWithOsSandbox(options: WrapSandboxOptions): WrappedSa
     for (const gd of gitDirs) {
       if (existsSync(gd)) {
         args.push("--bind", gd, gd);
+      }
+    }
+    for (const roPat of options.readOnlyPaths ?? []) {
+      const clean = roPat.trim();
+      if (!clean || clean.includes("*") || clean.includes("?")) continue;
+      const absRo = resolve(wt, clean);
+      if (existsSync(absRo)) {
+        args.push("--ro-bind", absRo, absRo);
       }
     }
     if (mode === "strict" || options.allowNetwork === false) {

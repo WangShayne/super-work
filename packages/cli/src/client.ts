@@ -1,5 +1,7 @@
 import type {
   CasebookEntry,
+  DagNodeMutationInput,
+  EnginePreference,
   EpicDecompositionPlan,
   EpicDeliveryMode,
   HandoverDigest,
@@ -12,13 +14,16 @@ import type {
   RepoConfig,
   RepoContractFile,
   RepoMetricsSummary,
+  RestoreCheckpointInput,
   RoutineRun,
   RoutineScheduleKind,
   RoutineSpec,
   SpecClarificationResult,
   SpillArtifact,
   StageRun,
+  SymbolImpactReport,
   Ticket,
+  TicketCheckpoint,
   WorkerEngineId,
 } from "@super-work/core";
 
@@ -118,6 +123,7 @@ export class SuperWorkHttpClient {
     inboxItems: InboxItem[];
     outboxEntries: OutboxEntry[];
     diff: string;
+    checkpoints?: TicketCheckpoint[];
     subtasks?: Ticket[];
     arenaCandidateDiffs?: Record<string, string>;
     upstreamDependencies?: Array<{
@@ -193,16 +199,61 @@ export class SuperWorkHttpClient {
     title: string;
     description: string;
     template?: PipelineTemplateId;
+    tddMode?: boolean;
+    pauseBeforeRun?: boolean;
     allowedPaths?: string[];
     dependsOn?: string[];
     maxCostUsd?: number;
-    preferredEngine?: WorkerEngineId;
+    preferredEngine?: EnginePreference;
     arenaMode?: boolean;
     arenaCompetitorEngine?: WorkerEngineId;
     acceptanceCriteria?: string[];
   }): Promise<{ ticket: Ticket }> {
     return this.request<{ ticket: Ticket }>("/api/tickets", {
       method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  analyzeRepoImpact(repoId: string, paths: string[]): Promise<{ report: SymbolImpactReport }> {
+    return this.request(`/api/repos/${encodeURIComponent(repoId)}/impact`, {
+      method: "POST",
+      body: JSON.stringify({ paths }),
+    });
+  }
+
+  listCheckpoints(ticketId: string): Promise<{ checkpoints: TicketCheckpoint[] }> {
+    return this.request(`/api/tickets/${encodeURIComponent(ticketId)}/checkpoints`);
+  }
+
+  getCheckpointDiff(
+    ticketId: string,
+    cpId: string,
+    baseCpId?: string,
+  ): Promise<{ diff: string; fromSha: string; toSha: string }> {
+    const qs = baseCpId ? `?base=${encodeURIComponent(baseCpId)}` : "";
+    return this.request(
+      `/api/tickets/${encodeURIComponent(ticketId)}/checkpoints/${encodeURIComponent(cpId)}/diff${qs}`,
+    );
+  }
+
+  restoreCheckpoint(
+    ticketId: string,
+    cpId: string,
+    payload?: RestoreCheckpointInput,
+  ): Promise<{ mode: "in_place" | "fork"; ticket: Ticket }> {
+    return this.request(
+      `/api/tickets/${encodeURIComponent(ticketId)}/checkpoints/${encodeURIComponent(cpId)}/restore`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload ?? {}),
+      },
+    );
+  }
+
+  mutateDagNode(ticketId: string, payload: DagNodeMutationInput): Promise<{ ticket: Ticket }> {
+    return this.request(`/api/tickets/${encodeURIComponent(ticketId)}/dag-node`, {
+      method: "PATCH",
       body: JSON.stringify(payload),
     });
   }
@@ -370,8 +421,9 @@ export class SuperWorkHttpClient {
     title: string;
     description: string;
     template?: PipelineTemplateId;
+    tddMode?: boolean;
     epicDeliveryMode?: EpicDeliveryMode;
-    preferredEngine?: WorkerEngineId;
+    preferredEngine?: EnginePreference;
     maxCostUsdPerSubtask?: number;
   }): Promise<{ epic: Ticket; subtasks: Ticket[] }> {
     return this.request<{ epic: Ticket; subtasks: Ticket[] }>("/api/epics", {

@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import {
   countDiffLines,
@@ -8,7 +8,14 @@ import {
 } from "./arena.ts";
 import { buildCasebookEntryFromTicket, selectRelevantCasesForContext } from "./casebook.ts";
 import {
+  computeEngineRoutingDecision,
+  isSpecTestFilePath,
+  isUiIntentTicket,
+  parseSpecTestChallenge,
+} from "./engine-router.ts";
+import {
   classifyEpicReplanApproval,
+  detectTicketDependencyCycle,
   evaluateHeuristicEpicReplan,
   sanitizeEpicSubtasks,
 } from "./epic.ts";
@@ -66,6 +73,7 @@ import { EventIntakeRouter, type IngestResult } from "./router.ts";
 import type {
   ArenaCandidateResult,
   CasebookEntry,
+  DagNodeMutationInput,
   EpicDecompositionPlan,
   EpicReplanProposal,
   HandoverDigest,
@@ -79,18 +87,22 @@ import type {
   PreviewSession,
   RepoConfig,
   RepoContractFile,
+  RestoreCheckpointInput,
   ReviewReport,
   RoutineRun,
   RoutineScheduleKind,
   RoutineSpec,
+  SmokeCheckResult,
   SpecClarificationInput,
   SpecClarificationResult,
   SpillArtifact,
   StageKind,
   StageRun,
+  SymbolImpactReport,
   SystemSetupConfig,
   Thread,
   Ticket,
+  TicketCheckpoint,
   Trigger,
   VerificationRunResult,
   WatchdogDecision,
@@ -118,6 +130,7 @@ export interface SuperWorkKernelDeps {
   drivers: WorkerDriver[];
   outboxExecutor: OutboxExecutor;
   previewProvider?: PreviewProvider;
+  dataDir?: string;
   config?: Partial<KernelConfig>;
 }
 
@@ -143,6 +156,7 @@ export class SuperWorkKernel {
   readonly watchdog: TwoTierWatchdog;
   readonly outbox: OutboxProcessor;
   readonly previewProvider?: PreviewProvider;
+  readonly dataDir: string;
 
   private readonly drivers = new Map<WorkerEngineId, WorkerDriver>();
   private readonly listeners = new Set<(event: KernelEvent) => void>();
@@ -170,6 +184,7 @@ export class SuperWorkKernel {
     this.workspace = deps.workspace;
     this.llm = deps.llm;
     this.previewProvider = deps.previewProvider;
+    this.dataDir = deps.dataDir ?? ".super-work";
     this.previewProvider?.subscribe?.((preview) => {
       this.emitEvent({ type: "preview_updated", preview, timestamp: nowIso() });
     });
@@ -185,6 +200,7 @@ export class SuperWorkKernel {
       deps.llm,
       emit,
       deps.workspace.getRepoStructureSummary?.bind(deps.workspace),
+      deps.workspace.analyzeSymbolImpact?.bind(deps.workspace),
     );
     this.watchdog = new TwoTierWatchdog(deps.llm, this.config.watchdog);
     this.outbox = new OutboxProcessor(
@@ -334,6 +350,7 @@ export class SuperWorkKernel {
     const ts = nowIso();
     const interruptedStatuses = new Set<Ticket["status"]>([
       "planning",
+      "spec_testing",
       "implementing",
       "reviewing",
       "rebasing",
@@ -466,6 +483,8 @@ export class SuperWorkKernel {
     const updatedRepo: RepoConfig = {
       ...repo,
       defaultTemplate: contract.defaultTemplate ?? repo.defaultTemplate,
+      defaultTddMode:
+        contract.defaultTddMode !== undefined ? Boolean(contract.defaultTddMode) : repo.defaultTddMode,
       verificationCommands:
         contract.verificationCommands !== undefined
           ? contract.verificationCommands.map((s) => String(s).trim()).filter(Boolean)
@@ -561,6 +580,7 @@ export class SuperWorkKernel {
     const contract: RepoContractFile = {
       version: 1,
       defaultTemplate: repo.defaultTemplate,
+      ...(repo.defaultTddMode !== undefined ? { defaultTddMode: repo.defaultTddMode } : {}),
       verificationCommands: repo.verificationCommands ?? [],
       setupCommands: repo.setupCommands ?? [],
       ...(repo.smokeCheck ? { smokeCheck: repo.smokeCheck } : {}),
@@ -1058,6 +1078,11 @@ export class SuperWorkKernel {
     }
 
     const ts = nowIso();
+    if (repo) {
+      await this.workspace.cleanupTicketCheckpoints?.(repo.rootPath, ticket.id).catch(() => {});
+      await this.stateStore.markCheckpointsCleaned(ticket.id, ts).catch(() => {});
+    }
+
     const updated: Ticket = {
       ...ticket,
       worktreePath: undefined,
@@ -1185,6 +1210,29 @@ export class SuperWorkKernel {
         casebookEntries,
         playbookEntries,
       });
+    }
+
+    if (
+      this.workspace.analyzeSymbolImpact &&
+      spec.suggestedAllowedPaths.length > 0 &&
+      !spec.suggestedAllowedPaths.includes("**")
+    ) {
+      const symbolImpact = await this.workspace
+        .analyzeSymbolImpact(repo.rootPath, spec.suggestedAllowedPaths)
+        .catch(() => undefined);
+      if (symbolImpact) {
+        spec = {
+          ...spec,
+          ...(symbolImpact.directDependents.length > 0
+            ? { directDependents: symbolImpact.directDependents.slice(0, 12) }
+            : {}),
+          ...(symbolImpact.transitiveDependents.length > 0
+            ? { transitiveDependents: symbolImpact.transitiveDependents.slice(0, 12) }
+            : {}),
+          recommendedTddMode:
+            spec.recommendedTddMode || symbolImpact.directDependents.length >= 3,
+        };
+      }
     }
 
     return applyClarificationAnswers(spec, input.answers);
@@ -1341,7 +1389,7 @@ export class SuperWorkKernel {
         nextTicket = {
           ...nextTicket,
           status: hasPendingDeps ? "waiting_deps" : "queued",
-          currentStage: getFirstStage(ticket.template),
+          currentStage: getFirstStage(ticket.template, ticket.tddMode),
           inlineMemory: {
             ...nextTicket.inlineMemory,
             activeHint: note || nextTicket.inlineMemory.activeHint,
@@ -1351,11 +1399,16 @@ export class SuperWorkKernel {
         nextTicket = { ...nextTicket, status: "cancelled", errorMessage: note ?? "Proposal rejected" };
       }
     } else if (item.kind === "plan_approval") {
+      const isDagBreakpoint = item.contextPayload.isDagBreakpoint === true;
       if (decision === "approved") {
         nextTicket = {
           ...nextTicket,
           status: "queued",
-          currentStage: "implement",
+          pauseBeforeRun: false,
+          currentStage: isDagBreakpoint
+            ? ticket.currentStage
+            : (getNextStage(ticket.template, "plan", ticket.tddMode) ?? "implement"),
+          errorMessage: undefined,
           inlineMemory: {
             ...nextTicket.inlineMemory,
             activeHint: note || nextTicket.inlineMemory.activeHint,
@@ -1365,14 +1418,21 @@ export class SuperWorkKernel {
         nextTicket = {
           ...nextTicket,
           status: "queued",
-          currentStage: "plan",
+          pauseBeforeRun: false,
+          currentStage: isDagBreakpoint ? ticket.currentStage : "plan",
+          errorMessage: undefined,
           inlineMemory: {
             ...nextTicket.inlineMemory,
-            activeHint: `Plan rejected with feedback: ${note}`,
+            activeHint: isDagBreakpoint ? note : `Plan rejected with feedback: ${note}`,
           },
         };
       } else {
-        nextTicket = { ...nextTicket, status: "cancelled", errorMessage: "Plan rejected" };
+        nextTicket = {
+          ...nextTicket,
+          pauseBeforeRun: false,
+          status: "cancelled",
+          errorMessage: isDagBreakpoint ? "DAG breakpoint rejected" : "Plan rejected",
+        };
       }
     } else if (item.kind === "outbox_signoff") {
       const outboxId = item.contextPayload.outboxId as string | undefined;
@@ -1430,15 +1490,18 @@ export class SuperWorkKernel {
           existsSync(ticket.worktreePath)
         ) {
           const repo = await this.stateStore.getRepo(ticket.repoId);
+          const resolvedEngine: WorkerEngineId =
+            ticket.activeEngine ??
+            (repo
+              ? selectEngineForStage(repo, "implement", ticket.preferredEngine)
+              : ticket.preferredEngine && ticket.preferredEngine !== "auto"
+                ? ticket.preferredEngine
+                : "mock");
           const syntheticRun: StageRun = {
             id: newId("run"),
             ticketId: ticket.id,
             stage: "implement",
-            engine:
-              ticket.activeEngine ??
-              ticket.preferredEngine ??
-              repo?.preferredImplementEngine ??
-              "mock",
+            engine: resolvedEngine,
             status: "running",
             costUsd: 0,
             startedAt: ts,
@@ -1482,7 +1545,7 @@ export class SuperWorkKernel {
 
             const afterStage = ticket.prNumber
               ? "rebase"
-              : getNextStage(ticket.template, "implement");
+              : getNextStage(ticket.template, "implement", ticket.tddMode);
             const withNote: Ticket = {
               ...nextTicket,
               inlineMemory: {
@@ -1739,7 +1802,7 @@ export class SuperWorkKernel {
       if (this.stopped) break;
       if (launched >= capacity) break;
       const repo = reposById.get(ticket.repoId);
-      const stage = ticket.currentStage || getFirstStage(ticket.template);
+      const stage = ticket.currentStage || getFirstStage(ticket.template, ticket.tddMode);
 
       if (repo?.maxConcurrentWorkers && repo.maxConcurrentWorkers > 0) {
         const curRepoActive = activeByRepo.get(repo.id) ?? 0;
@@ -1898,6 +1961,54 @@ export class SuperWorkKernel {
     }
   }
 
+  private async captureTicketCheckpoint(
+    ticket: Ticket,
+    repo: RepoConfig,
+    worktreePath: string,
+    opts: {
+      stage: StageKind | "baseline";
+      stageRunId?: string;
+      engine?: WorkerEngineId;
+      label: string;
+      changedFiles: string[];
+      verificationPassed?: boolean;
+    },
+  ): Promise<TicketCheckpoint | null> {
+    if (!this.workspace.captureWorktreeCheckpoint) return null;
+    try {
+      const cpId = newId("cp");
+      const snap = await this.workspace.captureWorktreeCheckpoint({
+        worktreePath,
+        ticketId: ticket.id,
+        checkpointId: cpId,
+        label: opts.label,
+      });
+      const checkpoint: TicketCheckpoint = {
+        id: cpId,
+        ticketId: ticket.id,
+        repoId: repo.id,
+        stageRunId: opts.stageRunId,
+        stage: opts.stage,
+        engine: opts.engine,
+        label: opts.label,
+        gitRef: snap.gitRef,
+        commitSha: snap.commitSha,
+        changedFiles: opts.changedFiles,
+        verificationPassed: opts.verificationPassed,
+        createdAt: nowIso(),
+      };
+      await this.stateStore.saveCheckpoint(checkpoint);
+      this.emitEvent({
+        type: "checkpoint_created",
+        checkpoint,
+        timestamp: checkpoint.createdAt,
+      });
+      return checkpoint;
+    } catch {
+      return null;
+    }
+  }
+
   private async runTicketStage(ticketId: string): Promise<void> {
     let ticket = await this.stateStore.getTicket(ticketId);
     if (!ticket || ticket.status !== "queued") return;
@@ -1905,8 +2016,90 @@ export class SuperWorkKernel {
     const repo = await this.stateStore.getRepo(ticket.repoId);
     if (!repo) return;
 
-    const stage = ticket.currentStage || getFirstStage(ticket.template);
+    const stage = ticket.currentStage || getFirstStage(ticket.template, ticket.tddMode);
+
+    if (ticket.pauseBeforeRun) {
+      const pauseTs = nowIso();
+      const paused: Ticket = {
+        ...ticket,
+        pauseBeforeRun: false,
+        status: "needs_human",
+        errorMessage: `Paused at DAG breakpoint before '${stage}' stage`,
+        updatedAt: pauseTs,
+      };
+      await this.stateStore.saveTicket(paused);
+      this.emitEvent({ type: "ticket_updated", ticket: paused, timestamp: pauseTs });
+      const bpInbox: InboxItem = {
+        id: newId("inb"),
+        repoId: repo.id,
+        ticketId: ticket.id,
+        kind: "plan_approval",
+        status: "pending",
+        title: `DAG Breakpoint: ${ticket.title}`,
+        summary: `Execution paused before '${stage}' stage per DAG breakpoint. Approve to resume (optionally include steering guidance).`,
+        contextPayload: { isDagBreakpoint: true, stage },
+        createdAt: pauseTs,
+      };
+      await this.stateStore.saveInboxItem(bpInbox);
+      this.emitEvent({ type: "inbox_created", item: bpInbox, timestamp: pauseTs });
+      return;
+    }
+
     const availableEngines = await this.getAvailableEngines();
+
+    const wantsAutoRouting =
+      ticket.preferredEngine === "auto" ||
+      (!ticket.preferredEngine && repo.preferredImplementEngine === "auto");
+    if (wantsAutoRouting && !ticket.activeEngine && (stage === "spec_test" || stage === "implement")) {
+      const currentTicket = ticket;
+      const failedSet = currentTicket.failedEngines ?? [];
+      const eligibleEngines = availableEngines.filter((e) => !failedSet.includes(e));
+      const [repoTickets, casebookEntries] = await Promise.all([
+        this.stateStore.listTickets({ repoId: repo.id }),
+        this.stateStore.listCasebookEntries(repo.id, { includeReverted: true }),
+      ]);
+      const historicalTickets = repoTickets.filter((t) => t.id !== currentTicket.id);
+      const runsLists = await Promise.all(
+        historicalTickets.map((t) => this.stateStore.listStageRuns(t.id)),
+      );
+      const oneHourAgoMs = Date.now() - 3_600_000;
+      const recentAutoArenaCountLastHour = historicalTickets.filter(
+        (t) => t.autoArenaEscalated && Date.parse(t.createdAt) >= oneHourAgoMs,
+      ).length;
+      const today = utcTodayString();
+      const effectiveDailyBudgetUsd = getEffectiveDailyBudget(repo, today);
+      const todaySpendUsd =
+        effectiveDailyBudgetUsd !== undefined
+          ? await this.stateStore.getDailyRepoSpendUsd(repo.id, today)
+          : 0;
+      const routing = computeEngineRoutingDecision({
+        repo,
+        ticket,
+        availableEngines: eligibleEngines.length > 0 ? eligibleEngines : availableEngines,
+        historicalTickets,
+        historicalStageRuns: runsLists.flat(),
+        casebookEntries,
+        todaySpendUsd,
+        effectiveDailyBudgetUsd,
+        recentAutoArenaCountLastHour,
+      });
+      ticket = {
+        ...ticket,
+        activeEngine: routing.chosenEngine,
+        taskCategory: routing.category,
+        routingRationale: routing.rationale,
+        ...(stage === "implement" && routing.autoUpgradeArena && !ticket.arenaMode
+          ? {
+              arenaMode: true,
+              arenaCompetitorEngine: routing.competitorEngine,
+              autoArenaEscalated: true,
+            }
+          : {}),
+        updatedAt: nowIso(),
+      };
+      await this.stateStore.saveTicket(ticket);
+      this.emitEvent({ type: "ticket_updated", ticket, timestamp: ticket.updatedAt });
+    }
 
     if (ticket.arenaMode && stage === "implement" && !ticket.arenaWinnerId) {
       const arenaHandled = await this.runArenaImplementStage(ticket, repo, availableEngines);
@@ -1921,8 +2114,12 @@ export class SuperWorkKernel {
       const lastImplRun = [...priorRuns]
         .reverse()
         .find((r) => r.stage === "implement" && r.status === "completed");
-      const implementEngine =
+      const rawImplPref =
         lastImplRun?.engine ?? ticket.preferredEngine ?? repo.preferredImplementEngine;
+      const implementEngine: WorkerEngineId =
+        rawImplPref === "auto"
+          ? selectEngineForStage(repo, "implement")
+          : rawImplPref;
       chosenEngine = selectReviewEngine({
         repo,
         implementEngine,
@@ -1965,12 +2162,17 @@ export class SuperWorkKernel {
     // Prepare isolated worktree workspace (and merge upstream dependency branches on initial creation)
     const { effectiveBaseBranch } = await this.getEffectiveBaseInfo(ticket, repo);
     const hadWorktree = Boolean(ticket.worktreePath);
+    const threadObj = !hadWorktree ? await this.stateStore.getThread(ticket.threadId) : null;
+    const forkStartPoint =
+      typeof threadObj?.metadata?.forkStartPoint === "string"
+        ? threadObj.metadata.forkStartPoint
+        : undefined;
     const lockedTicket = ticket;
     let ws: { worktreePath: string; branchName: string };
     try {
       ws = await this.runWithRepoWorkspaceLock(repo.id, () =>
         this.workspace.prepareWorkspace(lockedTicket, repo, {
-          startPoint: effectiveBaseBranch,
+          startPoint: forkStartPoint ?? effectiveBaseBranch,
         }),
       );
     } catch (err) {
@@ -2021,6 +2223,16 @@ export class SuperWorkKernel {
     await this.stateStore.saveStageRun(stageRun);
     this.emitEvent({ type: "ticket_updated", ticket, timestamp: ticket.updatedAt });
     this.emitEvent({ type: "stage_started", ticketId: ticket.id, stageRun, timestamp: stageRun.startedAt });
+
+    if (!hadWorktree) {
+      await this.captureTicketCheckpoint(ticket, repo, ws.worktreePath, {
+        stage: "baseline",
+        label: forkStartPoint
+          ? `Forked baseline (${forkStartPoint.slice(0, 8)})`
+          : `Initial baseline (${effectiveBaseBranch})`,
+        changedFiles: [],
+      });
+    }
 
     // For rebase stage: attempt rebase onto baseBranch first; only run worker if conflict needs resolution!
     if (stage === "rebase") {
@@ -2114,6 +2326,7 @@ export class SuperWorkKernel {
           effort: effectiveEffort,
           sandboxMode: repo.sandboxMode ?? "balanced",
           rootRepoPath: repo.rootPath,
+          readOnlyPaths: stage === "implement" ? ticket.lockedTestPaths : undefined,
         },
         abortController.signal,
       );
@@ -2364,10 +2577,121 @@ export class SuperWorkKernel {
       return;
     }
 
-    // Post-turn Mandate Guardrail via Git Diff
+    if (stage === "spec_test") {
+      await this.handleSpecTestPostTurn({
+        ticket,
+        repo,
+        stageRun,
+        worktreePath: ws.worktreePath,
+        effectiveBaseBranch,
+        driverEngine: driver.engine,
+        collectedEvents,
+        completedEvent,
+        discoveredSessionId,
+        stageCostUsd,
+      });
+      return;
+    }
+
+    // Post-turn Mandate Guardrail & Locked Spec-Test Integrity Check via Git Diff
     const changedFiles = await this.workspace.getChangedFiles(ws.worktreePath, effectiveBaseBranch);
     const diffText = await this.workspace.getDiff(ws.worktreePath, effectiveBaseBranch);
-    const mandateCheck = validateChangedFilesAgainstMandate(changedFiles, ticket.mandate);
+    const textChunks = collectedEvents
+      .filter((e): e is Extract<WorkerStreamEvent, { type: "text" }> => e.type === "text")
+      .map((e) => e.text)
+      .join("\n");
+    const summary = completedEvent?.summary || textChunks || `${stage} completed`;
+
+    let tamperedLockedTests: string[] = [];
+    if (
+      stage === "implement" &&
+      ticket.lockedTestPaths &&
+      ticket.lockedTestPaths.length > 0 &&
+      ticket.specTestCommitSha &&
+      this.workspace.getChangedFilesSince
+    ) {
+      const changedSinceSpec = await this.workspace.getChangedFilesSince(
+        ws.worktreePath,
+        ticket.specTestCommitSha,
+      );
+      tamperedLockedTests = changedSinceSpec.filter((f) => ticket.lockedTestPaths!.includes(f));
+      if (tamperedLockedTests.length > 0) {
+        await this.workspace.revertPathsToCommit?.(
+          ws.worktreePath,
+          ticket.specTestCommitSha,
+          tamperedLockedTests,
+        );
+      }
+    }
+
+    const challengeReason =
+      stage === "implement" && ticket.tddMode
+        ? parseSpecTestChallenge(`${summary}\n${textChunks}`)
+        : null;
+
+    if (tamperedLockedTests.length > 0 && !challengeReason) {
+      const tamperSummary = `Locked spec_test file(s) modified during implement and reverted: ${tamperedLockedTests.join(", ")}`;
+      const failedRun: StageRun = {
+        ...stageRun,
+        status: "failed",
+        nativeSessionId: discoveredSessionId,
+        costUsd: stageCostUsd,
+        completedAt: nowIso(),
+        summary: tamperSummary,
+      };
+      await this.stateStore.saveStageRun(failedRun);
+      const { note: tNote } = await this.memory.recordStageSpillAndNote({
+        ticket,
+        stageRun: failedRun,
+        events: collectedEvents,
+        changedFiles: tamperedLockedTests,
+        diffText,
+        summary: tamperSummary,
+        verificationPassed: false,
+      });
+      const updatedTamperSessions =
+        discoveredSessionId ? { ...ticket.nativeSessions, [driver.engine]: discoveredSessionId } : ticket.nativeSessions;
+
+      if (ticket.stageRetries < ticket.mandate.maxStageRetries) {
+        const retrying: Ticket = {
+          ...ticket,
+          status: "queued",
+          stageRetries: ticket.stageRetries + 1,
+          costUsd: ticket.costUsd + stageCostUsd,
+          nativeSessions: updatedTamperSessions,
+          inlineMemory: {
+            ...ticket.inlineMemory,
+            stageNotes: [...ticket.inlineMemory.stageNotes, tNote],
+            activeHint: `${tamperSummary}. Locked test files are read-only; fix production code or emit SPEC_TEST_CHALLENGE: <reason> if the spec test itself is flawed.`,
+          },
+          updatedAt: nowIso(),
+        };
+        await this.stateStore.saveTicket(retrying);
+        this.emitEvent({ type: "ticket_updated", ticket: retrying, timestamp: retrying.updatedAt });
+      } else {
+        await this.escalateTicket(
+          {
+            ...ticket,
+            costUsd: ticket.costUsd + stageCostUsd,
+            nativeSessions: updatedTamperSessions,
+            inlineMemory: {
+              ...ticket.inlineMemory,
+              stageNotes: [...ticket.inlineMemory.stageNotes, tNote],
+            },
+          },
+          "mandate_violation",
+          tamperSummary,
+          { tamperedLockedTests, interruptedStage: stage },
+        );
+      }
+      return;
+    }
+
+    const filesForMandate =
+      ticket.lockedTestPaths && ticket.lockedTestPaths.length > 0
+        ? changedFiles.filter((f) => !ticket.lockedTestPaths!.includes(f))
+        : changedFiles;
+    const mandateCheck = validateChangedFilesAgainstMandate(filesForMandate, ticket.mandate);
 
     if (!mandateCheck.ok) {
       const hasForbidden = mandateCheck.forbiddenViolations.length > 0;
@@ -2427,12 +2751,79 @@ export class SuperWorkKernel {
       return;
     }
 
-    // Extract text summary
-    const textChunks = collectedEvents
-      .filter((e): e is Extract<WorkerStreamEvent, { type: "text" }> => e.type === "text")
-      .map((e) => e.text)
-      .join("\n");
-    const summary = completedEvent?.summary || textChunks || `${stage} completed`;
+    if (challengeReason) {
+      const canRewind = (ticket.specTestChallengeCount ?? 0) < 1;
+      const chRun: StageRun = {
+        ...stageRun,
+        status: canRewind ? "completed" : "failed",
+        nativeSessionId: discoveredSessionId,
+        costUsd: stageCostUsd,
+        completedAt: nowIso(),
+        summary: `SPEC_TEST_CHALLENGE: ${challengeReason}`,
+      };
+      const { note: chNote } = await this.memory.recordStageSpillAndNote({
+        ticket,
+        stageRun: chRun,
+        events: collectedEvents,
+        changedFiles,
+        diffText,
+        summary: chRun.summary!,
+        verificationPassed: false,
+      });
+      chRun.spillTranscriptId = chNote.spillArtifactIds[0];
+      await this.stateStore.saveStageRun(chRun);
+      this.emitEvent({
+        type: "stage_completed",
+        ticketId: ticket.id,
+        stageRun: chRun,
+        note: chNote,
+        timestamp: chRun.completedAt!,
+      });
+
+      const updatedChallengeSessions = discoveredSessionId
+        ? { ...ticket.nativeSessions, [driver.engine]: discoveredSessionId }
+        : ticket.nativeSessions;
+
+      if (canRewind) {
+        const rewound: Ticket = {
+          ...ticket,
+          status: "queued",
+          currentStage: "spec_test",
+          stageRetries: 0,
+          specTestChallengeCount: (ticket.specTestChallengeCount ?? 0) + 1,
+          lockedTestPaths: undefined,
+          activeEngine: undefined,
+          failedEngines: [],
+          costUsd: ticket.costUsd + stageCostUsd,
+          nativeSessions: updatedChallengeSessions,
+          inlineMemory: {
+            ...ticket.inlineMemory,
+            stageNotes: [...ticket.inlineMemory.stageNotes, chNote],
+            activeHint: `[SPEC_TEST_CHALLENGE from implement] Review and repair the specification tests if justified: ${challengeReason}`,
+          },
+          updatedAt: nowIso(),
+        };
+        await this.stateStore.saveTicket(rewound);
+        this.emitEvent({ type: "ticket_updated", ticket: rewound, timestamp: rewound.updatedAt });
+        return;
+      }
+
+      await this.escalateTicket(
+        {
+          ...ticket,
+          costUsd: ticket.costUsd + stageCostUsd,
+          nativeSessions: updatedChallengeSessions,
+          inlineMemory: {
+            ...ticket.inlineMemory,
+            stageNotes: [...ticket.inlineMemory.stageNotes, chNote],
+          },
+        },
+        "watchdog_escalation",
+        `SPEC_TEST_CHALLENGE raised again after max 1 rewind: ${challengeReason}`,
+        { stageRunId: chRun.id, challengeReason },
+      );
+      return;
+    }
 
     let reviewApproved: boolean | undefined;
     let reviewReport: ReviewReport | undefined;
@@ -2492,6 +2883,14 @@ export class SuperWorkKernel {
         });
         failedRun.spillTranscriptId = failNote.spillArtifactIds[0];
         await this.stateStore.saveStageRun(failedRun);
+        await this.captureTicketCheckpoint(ticket, repo, ws.worktreePath, {
+          stage: "implement",
+          stageRunId: failedRun.id,
+          engine: driver.engine,
+          label: `Implement attempt #${ticket.stageRetries + 1} (failed gate)`,
+          changedFiles,
+          verificationPassed: false,
+        });
         this.emitEvent({
           type: "stage_completed",
           ticketId: ticket.id,
@@ -2665,6 +3064,14 @@ export class SuperWorkKernel {
 
     if (stage === "implement") {
       await this.workspace.commitAll(ws.worktreePath, `super-work(${ticket.id}): ${ticket.title}`);
+      await this.captureTicketCheckpoint(ticket, repo, ws.worktreePath, {
+        stage: "implement",
+        stageRunId: finishedRun.id,
+        engine: driver.engine,
+        label: "Implement verified & committed",
+        changedFiles,
+        verificationPassed: true,
+      });
     }
 
     if (stage === "review" && reviewApproved === false) {
@@ -2708,7 +3115,7 @@ export class SuperWorkKernel {
     const nextStage: StageKind | null =
       stage === "implement" && ticket.prNumber
         ? "rebase"
-        : getNextStage(ticket.template, stage);
+        : getNextStage(ticket.template, stage, ticket.tddMode);
     if (!nextStage) {
       await this.enqueueDeliveryOutbox({
         ...ticket,
@@ -2734,6 +3141,267 @@ export class SuperWorkKernel {
     };
     await this.stateStore.saveTicket(advancing);
     this.emitEvent({ type: "ticket_updated", ticket: advancing, timestamp: advancing.updatedAt });
+  }
+
+  private async handleSpecTestPostTurn(input: {
+    ticket: Ticket;
+    repo: RepoConfig;
+    stageRun: StageRun;
+    worktreePath: string;
+    effectiveBaseBranch: string;
+    driverEngine: WorkerEngineId;
+    collectedEvents: WorkerStreamEvent[];
+    completedEvent: Extract<WorkerStreamEvent, { type: "completed" }> | null;
+    discoveredSessionId?: string;
+    stageCostUsd: number;
+  }): Promise<void> {
+    const {
+      ticket,
+      repo,
+      stageRun,
+      worktreePath,
+      effectiveBaseBranch,
+      driverEngine,
+      collectedEvents,
+      completedEvent,
+      discoveredSessionId,
+      stageCostUsd,
+    } = input;
+
+    const changedFiles = await this.workspace.getChangedFiles(worktreePath, effectiveBaseBranch);
+    const diffText = await this.workspace.getDiff(worktreePath, effectiveBaseBranch);
+    const textChunks = collectedEvents
+      .filter((e): e is Extract<WorkerStreamEvent, { type: "text" }> => e.type === "text")
+      .map((e) => e.text)
+      .join("\n");
+    const summary = completedEvent?.summary || textChunks || "spec_test completed";
+
+    const forbiddenViolations = validateChangedFilesAgainstMandate(changedFiles, {
+      ...ticket.mandate,
+      allowedPaths: ["**"],
+    }).forbiddenViolations;
+    const nonTestFiles = changedFiles.filter((f) => !isSpecTestFilePath(f));
+    const updatedSessions = discoveredSessionId
+      ? { ...ticket.nativeSessions, [driverEngine]: discoveredSessionId }
+      : ticket.nativeSessions;
+
+    if (forbiddenViolations.length > 0 || nonTestFiles.length > 0) {
+      const toRevert = Array.from(new Set([...forbiddenViolations, ...nonTestFiles]));
+      await this.workspace.revertPaths(worktreePath, toRevert);
+      const failSummary = `spec_test may only create/modify test files; reverted: ${toRevert.join(", ")}`;
+      const failedRun: StageRun = {
+        ...stageRun,
+        status: "failed",
+        nativeSessionId: discoveredSessionId,
+        costUsd: stageCostUsd,
+        completedAt: nowIso(),
+        summary: failSummary,
+      };
+      await this.stateStore.saveStageRun(failedRun);
+      const { note: errNote } = await this.memory.recordStageSpillAndNote({
+        ticket,
+        stageRun: failedRun,
+        events: collectedEvents,
+        changedFiles: toRevert,
+        diffText,
+        summary: failSummary,
+        verificationPassed: false,
+      });
+
+      if (forbiddenViolations.length === 0 && ticket.stageRetries < ticket.mandate.maxStageRetries) {
+        const retrying: Ticket = {
+          ...ticket,
+          status: "queued",
+          stageRetries: ticket.stageRetries + 1,
+          costUsd: ticket.costUsd + stageCostUsd,
+          nativeSessions: updatedSessions,
+          inlineMemory: {
+            ...ticket.inlineMemory,
+            stageNotes: [...ticket.inlineMemory.stageNotes, errNote],
+            activeHint: `spec_test stage may ONLY write test files (*.test.*, *.spec.*, test/**, tests/**, __tests__/**). Reverted non-test files: ${nonTestFiles.join(", ")}. Write failing tests only.`,
+          },
+          updatedAt: nowIso(),
+        };
+        await this.stateStore.saveTicket(retrying);
+        this.emitEvent({ type: "ticket_updated", ticket: retrying, timestamp: retrying.updatedAt });
+      } else {
+        await this.escalateTicket(
+          {
+            ...ticket,
+            costUsd: ticket.costUsd + stageCostUsd,
+            nativeSessions: updatedSessions,
+            inlineMemory: {
+              ...ticket.inlineMemory,
+              stageNotes: [...ticket.inlineMemory.stageNotes, errNote],
+            },
+          },
+          "mandate_violation",
+          failSummary,
+          { violations: toRevert, forbiddenViolations, nonTestFiles, interruptedStage: "spec_test" },
+        );
+      }
+      return;
+    }
+
+    const testFiles = changedFiles.filter((f) => isSpecTestFilePath(f));
+    if (testFiles.length === 0) {
+      const emptySummary = "spec_test produced no test files to lock.";
+      const failedRun: StageRun = {
+        ...stageRun,
+        status: "failed",
+        nativeSessionId: discoveredSessionId,
+        costUsd: stageCostUsd,
+        completedAt: nowIso(),
+        summary: emptySummary,
+      };
+      await this.stateStore.saveStageRun(failedRun);
+      const { note: emptyNote } = await this.memory.recordStageSpillAndNote({
+        ticket,
+        stageRun: failedRun,
+        events: collectedEvents,
+        changedFiles: [],
+        diffText,
+        summary: emptySummary,
+        verificationPassed: false,
+      });
+
+      if (ticket.stageRetries < ticket.mandate.maxStageRetries) {
+        const retrying: Ticket = {
+          ...ticket,
+          status: "queued",
+          stageRetries: ticket.stageRetries + 1,
+          costUsd: ticket.costUsd + stageCostUsd,
+          nativeSessions: updatedSessions,
+          inlineMemory: {
+            ...ticket.inlineMemory,
+            stageNotes: [...ticket.inlineMemory.stageNotes, emptyNote],
+            activeHint:
+              "spec_test stage created zero test files. Write at least one failing test file encoding the acceptance criteria.",
+          },
+          updatedAt: nowIso(),
+        };
+        await this.stateStore.saveTicket(retrying);
+        this.emitEvent({ type: "ticket_updated", ticket: retrying, timestamp: retrying.updatedAt });
+      } else {
+        await this.escalateTicket(
+          {
+            ...ticket,
+            costUsd: ticket.costUsd + stageCostUsd,
+            nativeSessions: updatedSessions,
+            inlineMemory: {
+              ...ticket.inlineMemory,
+              stageNotes: [...ticket.inlineMemory.stageNotes, emptyNote],
+            },
+          },
+          "watchdog_escalation",
+          emptySummary,
+          { stageRunId: failedRun.id },
+        );
+      }
+      return;
+    }
+
+    const extraArtifacts: SpillArtifact[] = [];
+    let redProbeHint = `Locked spec_test file(s): ${testFiles.join(", ")}. Implement ONLY production code to pass these tests.`;
+    const commands = (repo.verificationCommands ?? []).map((c) => c.trim()).filter(Boolean);
+    if (commands.length > 0) {
+      const redRes = await this.workspace.runVerificationCommands(
+        worktreePath,
+        commands,
+        ticket.mandate.maxDurationSec,
+        {
+          sandboxMode: repo.sandboxMode ?? "balanced",
+          forbiddenPaths: ticket.mandate.forbiddenPaths,
+          allowNetwork: ticket.mandate.allowNetwork,
+          rootRepoPath: repo.rootPath,
+        },
+      );
+      const logBody = redRes.results
+        .map(
+          (r) =>
+            `$ ${r.command}\n[exit=${r.exitCode}, duration=${r.durationMs}ms]\n${r.output || "(no output)"}\n`,
+        )
+        .join("\n---\n");
+      const probeArtifact = await this.artifactStore.writeSpill(
+        {
+          ticketId: ticket.id,
+          stageRunId: stageRun.id,
+          kind: "test_log",
+          summary: `Red-first probe (${redRes.ok ? "GREEN advisory" : "RED expected fail"})`,
+          ext: "log",
+        },
+        logBody || redRes.summary,
+      );
+      await this.stateStore.saveArtifact(probeArtifact, `${redRes.summary}\n${logBody}`);
+      extraArtifacts.push(probeArtifact);
+      redProbeHint = redRes.ok
+        ? `Red-first probe passed early (advisory). Implement remaining behavior cleanly without modifying locked tests: ${testFiles.join(", ")}.`
+        : `Red-first probe failed as expected (RED phase) on ${redRes.failedCommand ?? "tests"}. Locked read-only spec tests: ${testFiles.join(", ")}. Implement code until checks pass.`;
+    }
+
+    await this.workspace.commitAll(worktreePath, `super-work(${ticket.id}/spec_test): lock spec tests`);
+    const specTestCommitSha = this.workspace.getHeadCommitSha
+      ? await this.workspace.getHeadCommitSha(worktreePath).catch(() => undefined)
+      : undefined;
+
+    const finishedRun: StageRun = {
+      ...stageRun,
+      status: "completed",
+      nativeSessionId: discoveredSessionId,
+      costUsd: stageCostUsd,
+      completedAt: nowIso(),
+      summary: `${summary}\nLocked ${testFiles.length} spec test file(s).`,
+    };
+    const { note } = await this.memory.recordStageSpillAndNote({
+      ticket,
+      stageRun: finishedRun,
+      events: collectedEvents,
+      changedFiles: testFiles,
+      diffText,
+      summary: finishedRun.summary!,
+      verificationPassed: true,
+      extraArtifacts: extraArtifacts.length > 0 ? extraArtifacts : undefined,
+    });
+    finishedRun.spillTranscriptId = note.spillArtifactIds[0];
+    await this.stateStore.saveStageRun(finishedRun);
+    this.emitEvent({
+      type: "stage_completed",
+      ticketId: ticket.id,
+      stageRun: finishedRun,
+      note,
+      timestamp: finishedRun.completedAt!,
+    });
+
+    await this.captureTicketCheckpoint(ticket, repo, worktreePath, {
+      stage: "spec_test",
+      stageRunId: finishedRun.id,
+      engine: driverEngine,
+      label: `Locked ${testFiles.length} spec test file(s)`,
+      changedFiles: testFiles,
+      verificationPassed: true,
+    });
+
+    const nextStage = getNextStage(ticket.template, "spec_test", ticket.tddMode) ?? "implement";
+    const nextTicket: Ticket = {
+      ...ticket,
+      status: "queued",
+      currentStage: nextStage,
+      stageRetries: 0,
+      lockedTestPaths: testFiles,
+      specTestCommitSha,
+      costUsd: ticket.costUsd + stageCostUsd,
+      nativeSessions: updatedSessions,
+      activeEngine: undefined,
+      failedEngines: [],
+      inlineMemory: {
+        ...ticket.inlineMemory,
+        stageNotes: [...ticket.inlineMemory.stageNotes, note],
+        activeHint: redProbeHint,
+      },
+      updatedAt: nowIso(),
+    };
+    await this.stateStore.saveTicket(nextTicket);
+    this.emitEvent({ type: "ticket_updated", ticket: nextTicket, timestamp: nextTicket.updatedAt });
   }
 
   private async handleRebaseStage(ticket: Ticket, repo: RepoConfig, stageRun: StageRun): Promise<void> {
@@ -2852,6 +3520,14 @@ export class SuperWorkKernel {
     });
     finishedRun.spillTranscriptId = note.spillArtifactIds[0];
     await this.stateStore.saveStageRun(finishedRun);
+    await this.captureTicketCheckpoint(ticket, repo, worktreePath, {
+      stage: "rebase",
+      stageRunId: finishedRun.id,
+      engine: stageRun.engine,
+      label: `Rebased cleanly onto ${effectiveBaseBranch}`,
+      changedFiles,
+      verificationPassed: true,
+    });
     this.emitEvent({
       type: "stage_completed",
       ticketId: ticket.id,
@@ -2872,6 +3548,8 @@ export class SuperWorkKernel {
         }),
       );
       const deliveredTs = nowIso();
+      await this.workspace.cleanupTicketCheckpoints?.(repo.rootPath, ticket.id).catch(() => {});
+      await this.stateStore.markCheckpointsCleaned(ticket.id, deliveredTs).catch(() => {});
       let deliveredSubtask: Ticket = {
         ...ticket,
         status: "delivered",
@@ -2907,6 +3585,99 @@ export class SuperWorkKernel {
     );
   }
 
+  private async ensureVisualBaselineDir(
+    repo: RepoConfig,
+    smokeCfg: NonNullable<RepoConfig["smokeCheck"]>,
+  ): Promise<string | undefined> {
+    if (!smokeCfg.browserCheck?.enabled) return undefined;
+    const diffMode = smokeCfg.browserCheck.visualDiffMode ?? "auto";
+    if (diffMode === "off") return undefined;
+    if (!this.workspace.getHeadCommitSha || !this.workspace.runSmokeCheck) return undefined;
+
+    const baseSha = await this.workspace
+      .getHeadCommitSha(repo.rootPath, repo.baseBranch)
+      .catch(() => "");
+    if (!baseSha) return undefined;
+
+    const cacheDir = resolve(this.dataDir, "visual-baselines", repo.id, baseSha);
+    if (existsSync(join(cacheDir, "route_0.png"))) {
+      return cacheDir;
+    }
+    if (existsSync(join(cacheDir, ".skip"))) {
+      return undefined;
+    }
+
+    const tempId = `vbase_${repo.id.slice(-6)}_${baseSha.slice(0, 8)}_${Date.now().toString(36)}`;
+    const tempBranch = `super-work/${tempId}`;
+    const syntheticTicket: Ticket = {
+      id: tempId,
+      repoId: repo.id,
+      threadId: `thr_${tempId}`,
+      sourceTriggerId: `trg_${tempId}`,
+      title: `[Visual Baseline] ${baseSha.slice(0, 8)}`,
+      description: "Lazy visual diff baseline capture",
+      status: "implementing",
+      template: "fast",
+      currentStage: "implement",
+      stageRetries: 0,
+      mandate: createDefaultMandate(),
+      dependsOn: [],
+      branchName: tempBranch,
+      nativeSessions: {},
+      inlineMemory: {
+        goal: "Baseline screenshot capture",
+        acceptanceCriteria: [],
+        stageNotes: [],
+        threadUpdates: [],
+      },
+      costUsd: 0,
+      priority: 0,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+
+    let ws: { worktreePath: string; branchName: string };
+    try {
+      ws = await this.runWithRepoWorkspaceLock(repo.id, () =>
+        this.workspace.prepareWorkspace(syntheticTicket, repo, { startPoint: baseSha }),
+      );
+    } catch {
+      return undefined;
+    }
+
+    try {
+      if (existsSync(join(cacheDir, "route_0.png"))) {
+        return cacheDir;
+      }
+      if (existsSync(join(cacheDir, ".skip"))) {
+        return undefined;
+      }
+      const baseSmoke = await this.workspace.runSmokeCheck(ws.worktreePath, smokeCfg);
+      mkdirSync(cacheDir, { recursive: true });
+      if (baseSmoke.ok && baseSmoke.rawScreenshots && baseSmoke.rawScreenshots.length > 0) {
+        for (const shot of baseSmoke.rawScreenshots) {
+          writeFileSync(join(cacheDir, `route_${shot.routeIndex}.png`), shot.bytes);
+        }
+        return cacheDir;
+      }
+      writeFileSync(join(cacheDir, ".skip"), baseSmoke.summary || "no baseline screenshot");
+      return undefined;
+    } catch {
+      try {
+        mkdirSync(cacheDir, { recursive: true });
+        writeFileSync(join(cacheDir, ".skip"), "baseline capture error");
+      } catch {
+        // Ignore cache write errors
+      }
+      return undefined;
+    } finally {
+      await this.runWithRepoWorkspaceLock(repo.id, async () => {
+        await this.workspace.cleanupWorkspace(ws.worktreePath, repo.rootPath).catch(() => {});
+        await this.workspace.deleteBranch?.(repo.rootPath, ws.branchName).catch(() => {});
+      });
+    }
+  }
+
   private async runRepoVerificationGate(
     ticket: Ticket,
     repo: RepoConfig,
@@ -2926,6 +3697,7 @@ export class SuperWorkKernel {
         {
           sandboxMode: repo.sandboxMode ?? "balanced",
           forbiddenPaths: ticket.mandate.forbiddenPaths,
+          readOnlyPaths: stageRun.stage === "implement" ? ticket.lockedTestPaths : undefined,
           allowNetwork: ticket.mandate.allowNetwork,
           rootRepoPath: repo.rootPath,
         },
@@ -2985,7 +3757,10 @@ export class SuperWorkKernel {
       return { passed: true, artifacts, result: staticResult };
     }
 
-    const smokeRes = await this.workspace.runSmokeCheck!(worktreePath, smokeCfg!);
+    const smokeRes = await this.workspace.runSmokeCheck!(worktreePath, smokeCfg!, {
+      resolveBaselineScreenshotsDir: () =>
+        this.ensureVisualBaselineDir(repo, smokeCfg!).catch(() => undefined),
+    });
 
     if (
       smokeRes.rawScreenshots &&
@@ -3018,11 +3793,78 @@ export class SuperWorkKernel {
         }
       }
     }
-    const sanitizedSmokeRes = {
+
+    if (
+      smokeRes.rawVisualDiffs &&
+      smokeRes.rawVisualDiffs.length > 0 &&
+      this.artifactStore.writeBinarySpill
+    ) {
+      for (const vd of smokeRes.rawVisualDiffs) {
+        try {
+          const vdArt = await this.artifactStore.writeBinarySpill(
+            {
+              ticketId: ticket.id,
+              stageRunId: stageRun.id,
+              kind: "visual_diff",
+              summary: `Visual diff (${vd.path}, ${(vd.diffRatio * 100).toFixed(2)}% changed)`,
+              ext: "png",
+            },
+            vd.bytes,
+          );
+          await this.stateStore.saveArtifact(
+            vdArt,
+            `visual_diff ${vd.path} diffRatio=${vd.diffRatio.toFixed(6)}`,
+          );
+          artifacts.push(vdArt);
+          const routeObj = smokeRes.browserResult?.routes?.[vd.routeIndex];
+          if (routeObj) {
+            routeObj.visualDiffArtifactId = vdArt.id;
+          }
+        } catch {
+          // Do not fail pipeline solely on visual_diff artifact I/O error
+        }
+      }
+    }
+
+    const sanitizedSmokeRes: SmokeCheckResult = {
       ...smokeRes,
       rawScreenshots: undefined,
+      rawVisualDiffs: undefined,
     };
     delete sanitizedSmokeRes.rawScreenshots;
+    delete sanitizedSmokeRes.rawVisualDiffs;
+
+    const visualDiffMode = smokeCfg!.browserCheck?.visualDiffMode ?? "auto";
+    const maxDiffRatio = smokeCfg!.browserCheck?.maxVisualDiffRatio ?? 0.02;
+    if (
+      sanitizedSmokeRes.ok &&
+      visualDiffMode !== "off" &&
+      visualDiffMode !== "informational" &&
+      sanitizedSmokeRes.browserResult?.routes
+    ) {
+      const exceededRoute = sanitizedSmokeRes.browserResult.routes.find(
+        (r) => typeof r.diffRatio === "number" && r.diffRatio > maxDiffRatio,
+      );
+      if (exceededRoute) {
+        const shouldBlock =
+          visualDiffMode === "enforce" ||
+          (visualDiffMode === "auto" &&
+            !isUiIntentTicket({
+              title: ticket.title,
+              description: ticket.description,
+            }));
+        if (shouldBlock) {
+          exceededRoute.ok = false;
+          sanitizedSmokeRes.ok = false;
+          sanitizedSmokeRes.failedStep = "smoke:visualDiff";
+          sanitizedSmokeRes.summary = `Visual regression on ${exceededRoute.path} (${(exceededRoute.diffRatio! * 100).toFixed(2)}% > ${(maxDiffRatio * 100).toFixed(2)}% threshold in '${visualDiffMode}' mode)`;
+          if (sanitizedSmokeRes.browserResult) {
+            sanitizedSmokeRes.browserResult.ok = false;
+            sanitizedSmokeRes.browserResult.summary = sanitizedSmokeRes.summary;
+          }
+        }
+      }
+    }
 
     const smokeLogLines = [
       `Start Command: ${smokeCfg!.startCommand}`,
@@ -3653,10 +4495,25 @@ export class SuperWorkKernel {
       }
     }
 
+    let symbolContextPack: string | undefined;
+    if (
+      (stage === "plan" || stage === "spec_test" || stage === "implement") &&
+      this.workspace.analyzeSymbolImpact &&
+      !ticket.mandate.allowedPaths.includes("**")
+    ) {
+      const impact = await this.workspace
+        .analyzeSymbolImpact(repo.rootPath, ticket.mandate.allowedPaths)
+        .catch(() => null);
+      if (impact?.contextPackMarkdown?.trim()) {
+        symbolContextPack = impact.contextPackMarkdown.trim();
+      }
+    }
+
     return this.memory.buildWorkerPromptContext(ticket, stage, relatedMemory, {
       verificationCommands: repo.verificationCommands,
       smokeCheck: repo.smokeCheck,
-      repoConventions: repo.conventions,
+      repoConventions:
+        [repo.conventions?.trim(), symbolContextPack].filter(Boolean).join("\n\n") || undefined,
       playbookContext,
       casebookContext: caseSelection.formattedMarkdown || undefined,
       upstreamHandovers,
@@ -3982,7 +4839,11 @@ export class SuperWorkKernel {
       this.emitEvent({ type: "routine_run_updated", repoId: repo.id, routineId: routine.id, run: initialRun, timestamp: startedAt });
 
       const availableEngines = await this.getAvailableEngines();
-      const preferred = routine.preferredEngine ?? repo.preferredImplementEngine;
+      const rawPreferred = routine.preferredEngine ?? repo.preferredImplementEngine;
+      const preferred: WorkerEngineId =
+        rawPreferred === "auto"
+          ? (availableEngines.find((e) => e !== "mock") ?? availableEngines[0] ?? "claude")
+          : rawPreferred;
       let driver = this.drivers.get(preferred);
       if (!driver) {
         const chain = resolveFallbackChain({
@@ -4452,11 +5313,14 @@ export class SuperWorkKernel {
       spillArtifactIds: [
         ...(winner.diffArtifactId ? [winner.diffArtifactId] : []),
         ...(winner.screenshotArtifactIds ?? []),
+        ...(winner.visualDiffArtifactIds ?? []),
       ],
       createdAt: nowIso(),
     };
 
-    const nextStage = ticket.prNumber ? "rebase" : getNextStage(ticket.template, "implement");
+    const nextStage = ticket.prNumber
+      ? "rebase"
+      : getNextStage(ticket.template, "implement", ticket.tddMode);
     const nextMemory = {
       ...ticket.inlineMemory,
       stageNotes: [...ticket.inlineMemory.stageNotes, note],
@@ -4504,7 +5368,8 @@ export class SuperWorkKernel {
     repo: RepoConfig,
     availableEngines: WorkerEngineId[],
   ): Promise<boolean> {
-    const engineA = selectEngineForStage(repo, "implement", ticket.preferredEngine);
+    const engineA =
+      ticket.activeEngine ?? selectEngineForStage(repo, "implement", ticket.preferredEngine);
     const preferredOpponent = ticket.arenaCompetitorEngine;
     const engineB =
       preferredOpponent &&
@@ -4525,6 +5390,7 @@ export class SuperWorkKernel {
     }
 
     const { effectiveBaseBranch } = await this.getEffectiveBaseInfo(ticket, repo);
+    const arenaStartPoint = ticket.specTestCommitSha ?? effectiveBaseBranch;
     const sameRepoDepBranches: string[] = [];
     for (const depId of ticket.dependsOn) {
       const dep = await this.stateStore.getTicket(depId);
@@ -4544,7 +5410,7 @@ export class SuperWorkKernel {
         const prepared = await this.workspace.prepareWorkspace(
           { ...ticket, id: `${ticket.id}_${spec.id}`, worktreePath: undefined, branchName: spec.branch },
           repo,
-          { startPoint: effectiveBaseBranch },
+          { startPoint: arenaStartPoint },
         );
         if (sameRepoDepBranches.length > 0) {
           await this.workspace.integrateDependencyBranches(prepared.worktreePath, sameRepoDepBranches);
@@ -4607,6 +5473,7 @@ export class SuperWorkKernel {
             isResume: false,
             sandboxMode: repo.sandboxMode ?? "balanced",
             rootRepoPath: repo.rootPath,
+            readOnlyPaths: ticket.lockedTestPaths,
           },
           abortController.signal,
         )) {
@@ -4635,7 +5502,30 @@ export class SuperWorkKernel {
       }
 
       const rawChanged = await this.workspace.getChangedFiles(ws.worktreePath, effectiveBaseBranch);
-      const mandateCheck = validateChangedFilesAgainstMandate(rawChanged, ticket.mandate);
+      if (
+        ticket.lockedTestPaths &&
+        ticket.lockedTestPaths.length > 0 &&
+        ticket.specTestCommitSha &&
+        this.workspace.getChangedFilesSince
+      ) {
+        const sinceSpec = await this.workspace.getChangedFilesSince(
+          ws.worktreePath,
+          ticket.specTestCommitSha,
+        );
+        const tampered = sinceSpec.filter((f) => ticket.lockedTestPaths!.includes(f));
+        if (tampered.length > 0) {
+          await this.workspace.revertPathsToCommit?.(
+            ws.worktreePath,
+            ticket.specTestCommitSha,
+            tampered,
+          );
+        }
+      }
+      const filesForArenaMandate =
+        ticket.lockedTestPaths && ticket.lockedTestPaths.length > 0
+          ? rawChanged.filter((f) => !ticket.lockedTestPaths!.includes(f))
+          : rawChanged;
+      const mandateCheck = validateChangedFilesAgainstMandate(filesForArenaMandate, ticket.mandate);
       if (!mandateCheck.ok) {
         await this.workspace.revertPaths(ws.worktreePath, mandateCheck.violations);
       }
@@ -4714,6 +5604,9 @@ export class SuperWorkKernel {
       const screenshotArtifactIds = gate.artifacts
         .filter((a) => a.kind === "screenshot")
         .map((a) => a.id);
+      const visualDiffArtifactIds = gate.artifacts
+        .filter((a) => a.kind === "visual_diff")
+        .map((a) => a.id);
 
       return {
         candidateId: spec.id,
@@ -4731,6 +5624,7 @@ export class SuperWorkKernel {
         summary: textSummary.slice(0, 400),
         diffArtifactId: recordedDiffId,
         ...(screenshotArtifactIds.length > 0 ? { screenshotArtifactIds } : {}),
+        ...(visualDiffArtifactIds.length > 0 ? { visualDiffArtifactIds } : {}),
       };
     };
 
@@ -5078,7 +5972,7 @@ export class SuperWorkKernel {
           description: sanitizedSpec.description,
           status: allDepsDelivered ? "queued" : "waiting_deps",
           template: sanitizedSpec.template,
-          currentStage: getFirstStage(sanitizedSpec.template),
+          currentStage: getFirstStage(sanitizedSpec.template, epic.tddMode),
           stageRetries: 0,
           mandate: childMandate,
           dependsOn: depIds,
@@ -5087,7 +5981,11 @@ export class SuperWorkKernel {
           subtaskKey: subKey,
           nativeSessions: {},
           preferredEngine: epic.preferredEngine,
-          activeEngine: epic.preferredEngine,
+          activeEngine:
+            epic.preferredEngine && epic.preferredEngine !== "auto"
+              ? epic.preferredEngine
+              : undefined,
+          tddMode: epic.tddMode,
           inlineMemory: {
             goal: sanitizedSpec.description,
             acceptanceCriteria: sanitizedSpec.acceptanceCriteria,
@@ -5132,5 +6030,396 @@ export class SuperWorkKernel {
       timestamp: ts,
     });
     return updatedEpic;
+  }
+
+  // --- B.1 Symbol Impact Radius ---
+  async analyzeRepoImpact(repoId: string, paths: string[]): Promise<SymbolImpactReport> {
+    const repo = await this.stateStore.getRepo(repoId);
+    if (!repo) {
+      throw new Error(`Repository not found: ${repoId}`);
+    }
+    if (!this.workspace.analyzeSymbolImpact) {
+      throw new Error("WorkspaceProvider does not support symbol impact analysis.");
+    }
+    return this.workspace.analyzeSymbolImpact(repo.rootPath, paths);
+  }
+
+  // --- D.2 Worktree Stage Checkpoints & Time-Travel Re-steer ---
+  async listTicketCheckpoints(ticketId: string): Promise<TicketCheckpoint[]> {
+    return this.stateStore.listCheckpoints(ticketId);
+  }
+
+  async getTicketCheckpointDiff(
+    ticketId: string,
+    checkpointId: string,
+    baseCheckpointId?: string,
+  ): Promise<{ diff: string; fromSha: string; toSha: string }> {
+    const ticket = await this.stateStore.getTicket(ticketId);
+    if (!ticket) {
+      throw new Error(`Ticket not found: ${ticketId}`);
+    }
+    const repo = await this.stateStore.getRepo(ticket.repoId);
+    if (!repo) {
+      throw new Error(`Repository not found: ${ticket.repoId}`);
+    }
+    const cp = await this.stateStore.getCheckpoint(checkpointId);
+    if (!cp || cp.ticketId !== ticket.id) {
+      throw new Error(`Checkpoint '${checkpointId}' not found for ticket ${ticketId}`);
+    }
+    if (cp.cleanedAt) {
+      throw new Error(`Checkpoint '${checkpointId}' has already been cleaned (${cp.cleanedAt}).`);
+    }
+    if (!this.workspace.getCommitDiff || !this.workspace.getHeadCommitSha) {
+      throw new Error("WorkspaceProvider does not support checkpoint diff inspection.");
+    }
+
+    let fromSha: string;
+    if (baseCheckpointId) {
+      const baseCp = await this.stateStore.getCheckpoint(baseCheckpointId);
+      if (!baseCp || baseCp.ticketId !== ticket.id || baseCp.cleanedAt) {
+        throw new Error(`Base checkpoint '${baseCheckpointId}' not available for ticket ${ticketId}`);
+      }
+      fromSha = baseCp.commitSha;
+    } else {
+      const { effectiveBaseBranch } = await this.getEffectiveBaseInfo(ticket, repo);
+      fromSha = await this.workspace.getHeadCommitSha(repo.rootPath, effectiveBaseBranch);
+    }
+
+    const diff = await this.workspace.getCommitDiff(repo.rootPath, fromSha, cp.commitSha);
+    return { diff, fromSha, toSha: cp.commitSha };
+  }
+
+  async restoreTicketCheckpoint(
+    ticketId: string,
+    checkpointId: string,
+    input?: RestoreCheckpointInput,
+  ): Promise<{ mode: "in_place" | "fork"; ticket: Ticket }> {
+    const ticket = await this.stateStore.getTicket(ticketId);
+    if (!ticket) {
+      throw new Error(`Ticket not found: ${ticketId}`);
+    }
+    if (ticket.isEpic) {
+      throw new Error("Checkpoints are supported on concrete execution tickets, not Epic umbrellas.");
+    }
+    const repo = await this.stateStore.getRepo(ticket.repoId);
+    if (!repo) {
+      throw new Error(`Repository not found: ${ticket.repoId}`);
+    }
+    const cp = await this.stateStore.getCheckpoint(checkpointId);
+    if (!cp || cp.ticketId !== ticket.id) {
+      throw new Error(`Checkpoint '${checkpointId}' not found for ticket ${ticketId}`);
+    }
+    if (cp.cleanedAt) {
+      throw new Error(`Checkpoint '${checkpointId}' has already been cleaned (${cp.cleanedAt}).`);
+    }
+    if (!this.workspace.restoreWorktreeCheckpoint) {
+      throw new Error("WorkspaceProvider does not support checkpoint restore.");
+    }
+
+    const mode = input?.mode ?? "in_place";
+    const defaultTargetStage: StageKind =
+      cp.stage === "baseline"
+        ? getFirstStage(ticket.template, ticket.tddMode)
+        : cp.stage;
+    const targetStage: StageKind = input?.targetStage ?? defaultTargetStage;
+    const keptNotes = ticket.inlineMemory.stageNotes.filter((n) => n.createdAt <= cp.createdAt);
+    const discardedNotes = ticket.inlineMemory.stageNotes.filter((n) => n.createdAt > cp.createdAt);
+    const pitfalls = discardedNotes
+      .map((n) => `[${n.stage}] ${n.summary.replace(/\s+/g, " ").slice(0, 140)}`)
+      .join("; ");
+    const operatorPrompt = input?.prompt?.trim();
+    const prefEngine = input?.preferredEngine ?? ticket.preferredEngine;
+
+    if (mode === "fork") {
+      const forkedBase = await this.createDirectTicket({
+        repoId: repo.id,
+        title: `[Fork] ${ticket.title}`,
+        description: ticket.description,
+        template: ticket.template,
+        tddMode: ticket.tddMode,
+        allowedPaths: ticket.mandate.allowedPaths,
+        forbiddenPaths: ticket.mandate.forbiddenPaths,
+        preferredEngine: prefEngine,
+        startPoint: cp.commitSha,
+        acceptanceCriteria: ticket.inlineMemory.acceptanceCriteria,
+      });
+
+      const forkHint = [
+        `[Forked from ${ticket.id} checkpoint '${cp.label}' (${cp.commitSha.slice(0, 8)})]`,
+        pitfalls ? `Parent discarded later attempt pitfalls to avoid: ${pitfalls}` : "",
+        operatorPrompt ? `Operator steering instruction: ${operatorPrompt}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      const updatedFork: Ticket = {
+        ...forkedBase,
+        currentStage: targetStage,
+        inlineMemory: {
+          ...forkedBase.inlineMemory,
+          planSummary: ticket.inlineMemory.planSummary,
+          stageNotes: keptNotes,
+          activeHint: forkHint,
+        },
+        updatedAt: nowIso(),
+      };
+      await this.stateStore.saveTicket(updatedFork);
+      this.emitEvent({ type: "ticket_updated", ticket: updatedFork, timestamp: updatedFork.updatedAt });
+      return { mode: "fork", ticket: updatedFork };
+    }
+
+    const activeCtrl = this.abortControllers.get(ticket.id);
+    if (activeCtrl) {
+      activeCtrl.abort("checkpoint_restore");
+    }
+    const activeRun = this.activeTicketRuns.get(ticket.id);
+    if (activeRun) {
+      await Promise.race([activeRun, new Promise((r) => setTimeout(r, 800))]).catch(() => {});
+    }
+
+    const ws =
+      ticket.worktreePath && existsSync(ticket.worktreePath)
+        ? { worktreePath: ticket.worktreePath, branchName: ticket.branchName! }
+        : await this.runWithRepoWorkspaceLock(repo.id, () =>
+            this.workspace.prepareWorkspace(ticket, repo, { startPoint: cp.commitSha }),
+          );
+
+    await this.workspace.restoreWorktreeCheckpoint({
+      worktreePath: ws.worktreePath,
+      rootRepoPath: repo.rootPath,
+      commitSha: cp.commitSha,
+    });
+
+    const resteerHint = [
+      `[Time-Travel Restored to '${cp.label}' (${cp.commitSha.slice(0, 8)})]`,
+      pitfalls ? `Discarded later attempt pitfalls to avoid: ${pitfalls}` : "",
+      operatorPrompt ? `Operator steering instruction: ${operatorPrompt}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    const shouldClearLocks = targetStage === "spec_test" || cp.stage === "baseline";
+    const ts = nowIso();
+    const restoredTicket: Ticket = {
+      ...ticket,
+      status: "queued",
+      currentStage: targetStage,
+      stageRetries: 0,
+      worktreePath: ws.worktreePath,
+      branchName: ws.branchName,
+      worktreeCleanedAt: undefined,
+      preferredEngine: prefEngine,
+      activeEngine: prefEngine && prefEngine !== "auto" ? prefEngine : undefined,
+      failedEngines: [],
+      nativeSessions: {},
+      lockedTestPaths: shouldClearLocks ? undefined : ticket.lockedTestPaths,
+      specTestCommitSha: shouldClearLocks ? undefined : ticket.specTestCommitSha,
+      errorMessage: undefined,
+      inlineMemory: {
+        ...ticket.inlineMemory,
+        stageNotes: keptNotes,
+        activeHint: resteerHint,
+      },
+      updatedAt: ts,
+    };
+    await this.stateStore.saveTicket(restoredTicket);
+    this.emitEvent({ type: "ticket_updated", ticket: restoredTicket, timestamp: ts });
+    return { mode: "in_place", ticket: restoredTicket };
+  }
+
+  // --- D.1 Interactive DAG Studio Live Surgery ---
+  async mutateDagNode(ticketId: string, input: DagNodeMutationInput): Promise<Ticket> {
+    const ticket = await this.stateStore.getTicket(ticketId);
+    if (!ticket) {
+      throw new Error(`Ticket not found: ${ticketId}`);
+    }
+    if (ticket.isEpic) {
+      throw new Error("DAG live surgery operates on execution/subtask nodes, not Epic containers.");
+    }
+
+    const action = input.action ?? "update";
+    const ts = nowIso();
+
+    if (action === "pause") {
+      const ctrl = this.abortControllers.get(ticket.id);
+      if (ctrl) {
+        ctrl.abort("dag_manual_pause");
+      }
+      const paused: Ticket = {
+        ...ticket,
+        pauseBeforeRun: false,
+        status: "needs_human",
+        activeEngine: undefined,
+        errorMessage: "Paused manually in DAG Studio",
+        updatedAt: ts,
+      };
+      await this.stateStore.saveTicket(paused);
+      this.emitEvent({ type: "ticket_updated", ticket: paused, timestamp: ts });
+      const inboxItem: InboxItem = {
+        id: newId("inb"),
+        repoId: ticket.repoId,
+        ticketId: ticket.id,
+        kind: "plan_approval",
+        status: "pending",
+        title: `DAG Breakpoint: ${ticket.title}`,
+        summary: "Node paused in DAG Studio. Approve to resume execution.",
+        contextPayload: { isDagBreakpoint: true, stage: ticket.currentStage },
+        createdAt: ts,
+      };
+      await this.stateStore.saveInboxItem(inboxItem);
+      this.emitEvent({ type: "inbox_created", item: inboxItem, timestamp: ts });
+      return paused;
+    }
+
+    if (action === "resume" || action === "rerun") {
+      if (action === "rerun") {
+        this.abortControllers.get(ticket.id)?.abort("dag_rerun");
+      }
+      const pendingInbox = await this.stateStore.listInboxItems({
+        ticketId: ticket.id,
+        status: "pending",
+      });
+      for (const item of pendingInbox) {
+        if (item.kind === "plan_approval" && item.contextPayload.isDagBreakpoint === true) {
+          const resolved: InboxItem = {
+            ...item,
+            status: "approved",
+            resolutionNote: `Auto-resolved via DAG ${action}`,
+            resolvedAt: ts,
+          };
+          await this.stateStore.saveInboxItem(resolved);
+          this.emitEvent({ type: "inbox_resolved", item: resolved, timestamp: ts });
+        }
+      }
+
+      const hasPending = await this.hasUnfinishedDependencies(ticket);
+      const nextTdd = input.tddMode !== undefined ? input.tddMode : ticket.tddMode;
+      const nextPrefEngine =
+        input.preferredEngine !== undefined ? input.preferredEngine : ticket.preferredEngine;
+      const nextActiveEngine =
+        input.preferredEngine !== undefined
+          ? input.preferredEngine === "auto"
+            ? undefined
+            : input.preferredEngine
+          : ticket.activeEngine;
+      const nextAllowed =
+        input.allowedPaths && input.allowedPaths.length > 0
+          ? input.allowedPaths.map((p) => p.trim()).filter(Boolean)
+          : ticket.mandate.allowedPaths;
+      const nextTicket: Ticket =
+        action === "resume"
+          ? {
+              ...ticket,
+              pauseBeforeRun: false,
+              preferredEngine: nextPrefEngine,
+              activeEngine: nextActiveEngine,
+              mandate: { ...ticket.mandate, allowedPaths: nextAllowed },
+              status: hasPending ? "waiting_deps" : "queued",
+              errorMessage: undefined,
+              updatedAt: ts,
+            }
+          : {
+              ...ticket,
+              pauseBeforeRun: false,
+              preferredEngine: nextPrefEngine,
+              activeEngine: undefined,
+              mandate: { ...ticket.mandate, allowedPaths: nextAllowed },
+              status: hasPending ? "waiting_deps" : "queued",
+              currentStage: getFirstStage(ticket.template, nextTdd),
+              stageRetries: 0,
+              tddMode: nextTdd,
+              failedEngines: [],
+              nativeSessions: {},
+              lockedTestPaths: undefined,
+              specTestCommitSha: undefined,
+              errorMessage: undefined,
+              updatedAt: ts,
+            };
+      await this.stateStore.saveTicket(nextTicket);
+      this.emitEvent({ type: "ticket_updated", ticket: nextTicket, timestamp: ts });
+      return nextTicket;
+    }
+
+    // Live edit on unstarted/paused nodes
+    const editableStatuses = new Set<Ticket["status"]>([
+      "waiting_deps",
+      "queued",
+      "proposed",
+      "needs_human",
+    ]);
+    if (!editableStatuses.has(ticket.status) || this.activeTicketRuns.has(ticket.id)) {
+      throw new Error(
+        `Cannot mutate node '${ticket.id}' while in status '${ticket.status}'. Pause or wait for idle state first.`,
+      );
+    }
+
+    let nextDependsOn = ticket.dependsOn;
+    if (input.dependsOn !== undefined) {
+      nextDependsOn = Array.from(new Set(input.dependsOn.map((d) => d.trim()).filter(Boolean)));
+      const allTickets = await this.stateStore.listTickets();
+      const byId = new Map(allTickets.map((t) => [t.id, t]));
+      for (const depId of nextDependsOn) {
+        const dep = byId.get(depId);
+        if (!dep) {
+          throw new Error(`Dependency ticket not found: ${depId}`);
+        }
+        if (dep.isEpic) {
+          throw new Error(`Cannot depend on Epic container ticket: ${depId}`);
+        }
+      }
+      const depsMap = new Map<string, string[]>();
+      for (const t of allTickets) {
+        depsMap.set(t.id, t.dependsOn);
+      }
+      if (detectTicketDependencyCycle(depsMap, ticket.id, nextDependsOn)) {
+        throw new Error(`Dependency cycle detected involving ticket ${ticket.id}`);
+      }
+    }
+
+    const nextTdd = input.tddMode !== undefined ? input.tddMode : ticket.tddMode;
+    const nextPrefEngine =
+      input.preferredEngine !== undefined ? input.preferredEngine : ticket.preferredEngine;
+    const nextAllowed =
+      input.allowedPaths && input.allowedPaths.length > 0
+        ? input.allowedPaths.map((p) => p.trim()).filter(Boolean)
+        : ticket.mandate.allowedPaths;
+
+    let nextStatus = ticket.status;
+    if (ticket.status === "waiting_deps" || ticket.status === "queued") {
+      const hasPending = await this.hasUnfinishedDependencies({ ...ticket, dependsOn: nextDependsOn });
+      nextStatus = hasPending ? "waiting_deps" : "queued";
+    }
+
+    const nextCurrentStage =
+      input.tddMode !== undefined && ticket.inlineMemory.stageNotes.length === 0
+        ? getFirstStage(ticket.template, nextTdd)
+        : ticket.currentStage;
+
+    const updated: Ticket = {
+      ...ticket,
+      title: input.title?.trim() || ticket.title,
+      description: input.description?.trim() || ticket.description,
+      preferredEngine: nextPrefEngine,
+      activeEngine:
+        nextPrefEngine && nextPrefEngine !== "auto" ? nextPrefEngine : undefined,
+      tddMode: nextTdd,
+      pauseBeforeRun:
+        input.pauseBeforeRun !== undefined ? input.pauseBeforeRun : ticket.pauseBeforeRun,
+      dependsOn: nextDependsOn,
+      status: nextStatus,
+      currentStage: nextCurrentStage,
+      mandate: {
+        ...ticket.mandate,
+        allowedPaths: nextAllowed,
+      },
+      inlineMemory: {
+        ...ticket.inlineMemory,
+        goal: input.description?.trim() || ticket.inlineMemory.goal,
+      },
+      updatedAt: ts,
+    };
+    await this.stateStore.saveTicket(updated);
+    this.emitEvent({ type: "ticket_updated", ticket: updated, timestamp: ts });
+    return updated;
   }
 }

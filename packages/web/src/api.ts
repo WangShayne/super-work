@@ -2,8 +2,10 @@ import type {
   CasebookEntry,
   ChainOfRecall,
   CliScanReport,
+  DagNodeMutationInput,
   DeliveryChannel,
   EngineModelProfile,
+  EnginePreference,
   EpicDecompositionPlan,
   EpicDeliveryMode,
   EpicSubtaskSpec,
@@ -24,6 +26,7 @@ import type {
   RepoConfig,
   RepoContractFile,
   RepoMetricsSummary,
+  RestoreCheckpointInput,
   RoutinePresetTemplate,
   RoutineRun,
   RoutineScheduleKind,
@@ -32,7 +35,9 @@ import type {
   SmokeCheckConfig,
   SpecClarificationResult,
   SpillArtifact,
+  SymbolImpactReport,
   Ticket,
+  TicketCheckpoint,
   TicketDetailResponse,
   WorkerEngineId,
   WorktreeGcResult,
@@ -82,7 +87,8 @@ export const api = {
     mode?: OperatingMode;
     githubRepo?: string;
     defaultTemplate?: PipelineTemplateId;
-    preferredImplementEngine?: WorkerEngineId;
+    defaultTddMode?: boolean;
+    preferredImplementEngine?: EnginePreference;
     preferredReviewEngine?: WorkerEngineId;
     verificationCommands?: string[];
     defaultDeliveryChannel?: DeliveryChannel;
@@ -240,16 +246,48 @@ export const api = {
     title: string;
     description: string;
     template?: PipelineTemplateId;
+    tddMode?: boolean;
+    pauseBeforeRun?: boolean;
     allowedPaths?: string[];
     dependsOn?: string[];
     maxCostUsd?: number;
-    preferredEngine?: WorkerEngineId;
+    preferredEngine?: EnginePreference;
     arenaMode?: boolean;
     arenaCompetitorEngine?: WorkerEngineId;
     modelOverride?: string;
     effortOverride?: ReasoningEffort;
     acceptanceCriteria?: string[];
   }) => request<{ ticket: Ticket }>("/api/tickets", { method: "POST", body: JSON.stringify(payload) }),
+
+  analyzeRepoImpact: (repoId: string, paths: string[]) =>
+    request<{ report: SymbolImpactReport }>(`/api/repos/${encodeURIComponent(repoId)}/impact`, {
+      method: "POST",
+      body: JSON.stringify({ paths }),
+    }),
+
+  listCheckpoints: (ticketId: string) =>
+    request<{ checkpoints: TicketCheckpoint[] }>(
+      `/api/tickets/${encodeURIComponent(ticketId)}/checkpoints`,
+    ),
+
+  getCheckpointDiff: (ticketId: string, cpId: string, baseCpId?: string) =>
+    request<{ diff: string; fromSha: string; toSha: string }>(
+      `/api/tickets/${encodeURIComponent(ticketId)}/checkpoints/${encodeURIComponent(cpId)}/diff${
+        baseCpId ? `?base=${encodeURIComponent(baseCpId)}` : ""
+      }`,
+    ),
+
+  restoreCheckpoint: (ticketId: string, cpId: string, payload?: RestoreCheckpointInput) =>
+    request<{ mode: "in_place" | "fork"; ticket: Ticket }>(
+      `/api/tickets/${encodeURIComponent(ticketId)}/checkpoints/${encodeURIComponent(cpId)}/restore`,
+      { method: "POST", body: JSON.stringify(payload ?? {}) },
+    ),
+
+  mutateDagNode: (ticketId: string, payload: DagNodeMutationInput) =>
+    request<{ ticket: Ticket }>(`/api/tickets/${encodeURIComponent(ticketId)}/dag-node`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
 
   clarifySpec: (payload: {
     repoId: string;
@@ -333,8 +371,9 @@ export const api = {
     title: string;
     description: string;
     template?: PipelineTemplateId;
+    tddMode?: boolean;
     epicDeliveryMode?: EpicDeliveryMode;
-    preferredEngine?: WorkerEngineId;
+    preferredEngine?: EnginePreference;
     modelOverride?: string;
     effortOverride?: ReasoningEffort;
     maxCostUsdPerSubtask?: number;

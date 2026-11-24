@@ -208,6 +208,68 @@ export function MetricsView({ metrics, repo }: MetricsViewProps) {
           </div>
         )}
       </div>
+
+      {/* Engine x Category Bandit Matrix (v0.9.0 B.2) */}
+      <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-zinc-800 flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-zinc-100">{t("metrics.matrixTitle")}</h3>
+          <span className="text-[11px] font-mono text-zinc-500">
+            {metrics.engineMatrix?.length ?? 0} rows
+          </span>
+        </div>
+
+        {(metrics.engineMatrix?.length ?? 0) === 0 ? (
+          <div className="p-8 text-center text-xs text-zinc-500">{t("metrics.matrixEmpty")}</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-zinc-950/60 text-zinc-400 font-mono text-[11px] border-b border-zinc-800">
+                <tr>
+                  <th className="px-5 py-3 font-medium">{t("metrics.col.engine")}</th>
+                  <th className="px-4 py-3 font-medium">{t("metrics.col.category")}</th>
+                  <th className="px-4 py-3 font-medium">{t("metrics.col.tickets")}</th>
+                  <th className="px-4 py-3 font-medium">{t("metrics.col.firstPass")}</th>
+                  <th className="px-4 py-3 font-medium">{t("metrics.col.delivery")}</th>
+                  <th className="px-4 py-3 font-medium">{t("metrics.col.revert")}</th>
+                  <th className="px-4 py-3 font-medium">{t("metrics.col.cost")}</th>
+                  <th className="px-5 py-3 font-medium text-right">{t("metrics.col.score")}</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-800/70">
+                {metrics.engineMatrix!.map((row) => (
+                  <tr
+                    key={`${row.engine}:${row.category}`}
+                    className="hover:bg-zinc-900/60"
+                  >
+                    <td className="px-5 py-3 font-medium text-zinc-100">
+                      <span className="px-2 py-0.5 rounded bg-indigo-500/15 border border-indigo-500/30 font-mono text-[11px] text-indigo-300">
+                        {formatEngineDisplayName(row.engine, locale)}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 font-mono text-zinc-300">{row.category}</td>
+                    <td className="px-4 py-3 font-mono text-zinc-300">{row.tickets}</td>
+                    <td className="px-4 py-3 font-mono text-emerald-300">
+                      {Math.round(row.firstPassRate * 100)}%
+                    </td>
+                    <td className="px-4 py-3 font-mono text-sky-300">
+                      {Math.round(row.deliveryRate * 100)}%
+                    </td>
+                    <td className="px-4 py-3 font-mono text-rose-300">
+                      {Math.round(row.revertRate * 100)}%
+                    </td>
+                    <td className="px-4 py-3 font-mono text-zinc-300">
+                      ${row.avgCostUsd.toFixed(4)}
+                    </td>
+                    <td className="px-5 py-3 text-right font-mono font-semibold text-amber-300">
+                      {row.compositeScore.toFixed(3)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

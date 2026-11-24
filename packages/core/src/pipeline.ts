@@ -1,4 +1,5 @@
 import type {
+  EnginePreference,
   PipelineTemplateId,
   RepoConfig,
   StageKind,
@@ -38,12 +39,27 @@ export function getPipelineTemplate(id: PipelineTemplateId): PipelineTemplate {
   return PIPELINE_TEMPLATES[id];
 }
 
-export function getFirstStage(templateId: PipelineTemplateId): StageKind {
-  return PIPELINE_TEMPLATES[templateId].stages[0]!;
+export function getEffectiveStages(id: PipelineTemplateId, tddMode?: boolean): StageKind[] {
+  const base = [...PIPELINE_TEMPLATES[id].stages];
+  if (!tddMode) return base;
+  const implIdx = base.indexOf("implement");
+  if (implIdx === -1) {
+    return ["spec_test", ...base];
+  }
+  base.splice(implIdx, 0, "spec_test");
+  return base;
 }
 
-export function getNextStage(templateId: PipelineTemplateId, current: StageKind): StageKind | null {
-  const stages = PIPELINE_TEMPLATES[templateId].stages;
+export function getFirstStage(templateId: PipelineTemplateId, tddMode?: boolean): StageKind {
+  return getEffectiveStages(templateId, tddMode)[0]!;
+}
+
+export function getNextStage(
+  templateId: PipelineTemplateId,
+  current: StageKind,
+  tddMode?: boolean,
+): StageKind | null {
+  const stages = getEffectiveStages(templateId, tddMode);
   const idx = stages.indexOf(current);
   if (idx === -1 || idx + 1 >= stages.length) {
     return null;
@@ -55,6 +71,8 @@ export function statusForStage(stage: StageKind): TicketStatus {
   switch (stage) {
     case "plan":
       return "planning";
+    case "spec_test":
+      return "spec_testing";
     case "implement":
       return "implementing";
     case "review":
@@ -67,15 +85,18 @@ export function statusForStage(stage: StageKind): TicketStatus {
 export function selectEngineForStage(
   repo: RepoConfig,
   stage: StageKind,
-  explicitOverride?: WorkerEngineId,
+  explicitOverride?: EnginePreference,
 ): WorkerEngineId {
-  if (explicitOverride) {
+  if (explicitOverride && explicitOverride !== "auto") {
     return explicitOverride;
   }
   if (stage === "review") {
     return repo.preferredReviewEngine;
   }
-  return repo.preferredImplementEngine;
+  if (repo.preferredImplementEngine !== "auto") {
+    return repo.preferredImplementEngine;
+  }
+  return repo.preferredReviewEngine === "mock" ? "mock" : "claude";
 }
 
 export function selectReviewEngine(input: {

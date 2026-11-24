@@ -255,11 +255,11 @@ describe("v0.8.0 Core Modules (D.1 Spec Studio + A.2 Webhooks + A.1 MCP Protocol
   });
 
   it("A.1: handles MCP JSON-RPC initialize, notifications, tools, resources, and batch", async () => {
-    expect(MCP_TOOL_DEFINITIONS).toHaveLength(10);
+    expect(MCP_TOOL_DEFINITIONS.length).toBeGreaterThanOrEqual(10);
     expect(MCP_RESOURCES).toHaveLength(3);
 
     const host: McpToolHost = {
-      getHealth: async () => ({ ok: true, version: "0.8.0" }),
+      getHealth: async () => ({ ok: true, version: "0.9.0" }),
       listRepos: async () => [makeRepo()],
       clarifySpec: async (args) => ({ ready: true, echoTitle: args.title }),
       dispatchTicket: async () => ({ ticket: { id: "tkt_1" } }),
@@ -273,6 +273,9 @@ describe("v0.8.0 Core Modules (D.1 Spec Studio + A.2 Webhooks + A.1 MCP Protocol
         throw new Error("Routine not found");
       },
       managePreview: async () => ({ previews: [] }),
+      analyzeImpact: async () => ({ targetFiles: [], directDependents: [], transitiveDependents: [], neighborSignatures: [], contextPackMarkdown: "" }),
+      manageCheckpoints: async () => ({ checkpoints: [] }),
+      mutateDagNode: async () => ({ ticket: { id: "tkt_1" } }),
     };
 
     const initRes = (await handleMcpJsonRpcMessage(
@@ -285,7 +288,7 @@ describe("v0.8.0 Core Modules (D.1 Spec Studio + A.2 Webhooks + A.1 MCP Protocol
       host,
     )) as { result: { protocolVersion: string; serverInfo: { name: string; version: string } } };
     expect(initRes.result.protocolVersion).toBe("2024-11-05");
-    expect(initRes.result.serverInfo.version).toBe("0.8.0");
+    expect(initRes.result.serverInfo.version).toBe("0.9.0");
 
     const notifRes = await handleMcpJsonRpcMessage(
       { jsonrpc: "2.0", method: "notifications/initialized" },

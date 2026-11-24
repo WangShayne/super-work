@@ -157,6 +157,7 @@ export class CodexDriver implements WorkerDriver {
       rootRepoPath: input.rootRepoPath,
       mode: input.sandboxMode ?? "balanced",
       forbiddenPaths: input.mandate.forbiddenPaths,
+      readOnlyPaths: input.readOnlyPaths,
       allowNetwork: input.mandate.allowNetwork,
       engine: "codex",
       skipOuterSandbox: true,

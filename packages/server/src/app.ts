@@ -19,8 +19,10 @@ import type {
   ArtifactStore,
   CliScanReport,
   CreateEpicInput,
+  DagNodeMutationInput,
   DeliveryChannel,
   EngineModelProfile,
+  EnginePreference,
   EpicDeliveryMode,
   HandoverDigest,
   InboxItemStatus,
@@ -34,10 +36,12 @@ import type {
   PublicSetupStatus,
   ReasoningEffort,
   RepoConfig,
+  RestoreCheckpointInput,
   RoutineScheduleKind,
   RoutineSpec,
   SandboxMode,
   SmokeCheckConfig,
+  StageKind,
   StateStore,
   SuperWorkKernel,
   SystemSetupConfig,
@@ -155,6 +159,8 @@ function resolveEventTarget(
       return { repoId: event.repoId, ticketId: event.epicId };
     case "preview_updated":
       return { repoId: event.preview.repoId, ticketId: event.preview.ticketId };
+    case "checkpoint_created":
+      return { repoId: event.checkpoint.repoId, ticketId: event.checkpoint.ticketId };
     case "trigger_ingested":
       return { repoId: event.trigger.repoId };
     case "ticket_created":
@@ -453,6 +459,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       mode: body.mode ?? "observe",
       githubRepo: body.githubRepo,
       defaultTemplate: body.defaultTemplate ?? "standard",
+      defaultTddMode: Boolean(body.defaultTddMode),
       preferredImplementEngine: body.preferredImplementEngine ?? "claude",
       preferredReviewEngine: body.preferredReviewEngine ?? "codex",
       fallbackEngines: Array.isArray(body.fallbackEngines)
@@ -532,6 +539,10 @@ export function createServerApp(deps: ServerAppDeps): Hono {
           ? patch.githubRepo.trim() || undefined
           : existing.githubRepo,
       autoCleanupWorktree: patch.autoCleanupWorktree ?? existing.autoCleanupWorktree ?? true,
+      defaultTddMode:
+        patch.defaultTddMode !== undefined
+          ? Boolean(patch.defaultTddMode)
+          : existing.defaultTddMode,
       verificationCommands:
         patch.verificationCommands !== undefined
           ? patch.verificationCommands.map((s) => String(s).trim()).filter(Boolean)
@@ -610,6 +621,21 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     try {
       const result = await kernel.exportRepoContract(id);
       return c.json(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("Repository not found") ? 404 : 400);
+    }
+  });
+
+  app.post("/api/repos/:id/impact", async (c) => {
+    const id = c.req.param("id");
+    const body = (await c.req.json().catch(() => ({}))) as { paths?: string[] };
+    const paths = Array.isArray(body.paths)
+      ? body.paths.map((p) => String(p).trim()).filter(Boolean)
+      : ["**"];
+    try {
+      const report = await kernel.analyzeRepoImpact(id, paths);
+      return c.json({ report });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return c.json({ error: msg }, msg.includes("Repository not found") ? 404 : 400);
@@ -912,13 +938,15 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       title?: string;
       description?: string;
       template?: RepoConfig["defaultTemplate"];
+      tddMode?: boolean;
+      pauseBeforeRun?: boolean;
       allowedPaths?: string[];
       forbiddenPaths?: string[];
       dependsOn?: string[];
       maxCostUsd?: number;
-      preferredEngine?: RepoConfig["preferredImplementEngine"];
+      preferredEngine?: EnginePreference;
       arenaMode?: boolean;
-      arenaCompetitorEngine?: RepoConfig["preferredImplementEngine"];
+      arenaCompetitorEngine?: WorkerEngineId;
       modelOverride?: string;
       effortOverride?: ReasoningEffort;
       acceptanceCriteria?: string[];
@@ -934,6 +962,8 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         title: body.title,
         description: body.description,
         template: body.template,
+        tddMode: body.tddMode,
+        pauseBeforeRun: body.pauseBeforeRun,
         allowedPaths: body.allowedPaths,
         forbiddenPaths: body.forbiddenPaths,
         dependsOn: Array.isArray(body.dependsOn)
@@ -961,7 +991,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     if (!ticket) {
       return null;
     }
-    const [repo, allRepos, stageRuns, artifacts, inboxItems, outboxEntries, allPreviews] =
+    const [repo, allRepos, stageRuns, artifacts, inboxItems, outboxEntries, allPreviews, checkpoints] =
       await Promise.all([
         stateStore.getRepo(ticket.repoId),
         stateStore.listRepos(),
@@ -970,6 +1000,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         stateStore.listInboxItems({ ticketId: ticket.id }),
         stateStore.listOutboxEntries({ ticketId: ticket.id }),
         kernel.listPreviews(ticket.repoId),
+        kernel.listTicketCheckpoints(ticket.id),
       ]);
 
     const reposById = new Map(allRepos.map((r) => [r.id, r]));
@@ -1065,6 +1096,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       outboxEntries,
       diff,
       previews,
+      checkpoints,
       ...(subtasks ? { subtasks } : {}),
       ...(upstreamDependencies.length > 0 ? { upstreamDependencies } : {}),
       ...(arenaCandidateDiffs ? { arenaCandidateDiffs } : {}),
@@ -1077,6 +1109,56 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       return c.json({ error: "Ticket not found" }, 404);
     }
     return c.json(detail);
+  });
+
+  app.get("/api/tickets/:id/checkpoints", async (c) => {
+    const id = c.req.param("id");
+    const ticket = await stateStore.getTicket(id);
+    if (!ticket) {
+      return c.json({ error: "Ticket not found" }, 404);
+    }
+    const checkpoints = await kernel.listTicketCheckpoints(id);
+    return c.json({ checkpoints });
+  });
+
+  app.get("/api/tickets/:id/checkpoints/:cpId/diff", async (c) => {
+    const id = c.req.param("id");
+    const cpId = c.req.param("cpId");
+    const base = c.req.query("base") || undefined;
+    try {
+      const result = await kernel.getTicketCheckpointDiff(id, cpId, base);
+      return c.json(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("not found") ? 404 : 400);
+    }
+  });
+
+  app.post("/api/tickets/:id/checkpoints/:cpId/restore", async (c) => {
+    const id = c.req.param("id");
+    const cpId = c.req.param("cpId");
+    const body = (await c.req.json().catch(() => ({}))) as RestoreCheckpointInput;
+    try {
+      const result = await kernel.restoreTicketCheckpoint(id, cpId, body);
+      void kernel.tick();
+      return c.json(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("not found") ? 404 : 400);
+    }
+  });
+
+  app.patch("/api/tickets/:id/dag-node", async (c) => {
+    const id = c.req.param("id");
+    const body = (await c.req.json().catch(() => ({}))) as DagNodeMutationInput;
+    try {
+      const ticket = await kernel.mutateDagNode(id, body);
+      void kernel.tick();
+      return c.json({ ticket });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("not found") ? 404 : 400);
+    }
   });
 
   app.post("/api/tickets/:id/message", async (c) => {
@@ -1177,6 +1259,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         title: body.title,
         description: body.description,
         template: body.template,
+        tddMode: body.tddMode,
         epicDeliveryMode: body.epicDeliveryMode as EpicDeliveryMode | undefined,
         preferredEngine: body.preferredEngine,
         modelOverride: body.modelOverride,
@@ -1264,10 +1347,14 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     if (!artifact) {
       return c.json({ error: "Artifact not found" }, 404);
     }
-    if (artifact.kind === "screenshot" || artifact.storageUri.endsWith(".png")) {
+    if (
+      artifact.kind === "screenshot" ||
+      artifact.kind === "visual_diff" ||
+      artifact.storageUri.endsWith(".png")
+    ) {
       return c.json({
         artifact,
-        content: `[binary screenshot artifact: ${artifact.byteSize} bytes — view via /api/artifacts/${artifact.id}/raw]`,
+        content: `[binary ${artifact.kind} artifact: ${artifact.byteSize} bytes — view via /api/artifacts/${artifact.id}/raw]`,
       });
     }
     const content = await artifactStore.readSpill(artifact.storageUri);
@@ -1280,7 +1367,10 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     if (!artifact) {
       return c.json({ error: "Artifact not found" }, 404);
     }
-    const isPng = artifact.kind === "screenshot" || artifact.storageUri.toLowerCase().endsWith(".png");
+    const isPng =
+      artifact.kind === "screenshot" ||
+      artifact.kind === "visual_diff" ||
+      artifact.storageUri.toLowerCase().endsWith(".png");
     if (artifactStore.readBinarySpill) {
       const bytes = await artifactStore.readBinarySpill(artifact.storageUri);
       return new Response(new Uint8Array(bytes), {
@@ -1408,11 +1498,13 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         title: String(args.title ?? ""),
         description: String(args.description ?? ""),
         template: args.template as PipelineTemplateId | undefined,
+        tddMode: args.tddMode !== undefined ? Boolean(args.tddMode) : undefined,
+        pauseBeforeRun: args.pauseBeforeRun !== undefined ? Boolean(args.pauseBeforeRun) : undefined,
         allowedPaths: Array.isArray(args.allowedPaths)
           ? args.allowedPaths.map(String)
           : undefined,
         dependsOn: Array.isArray(args.dependsOn) ? args.dependsOn.map(String) : undefined,
-        preferredEngine: args.preferredEngine as WorkerEngineId | undefined,
+        preferredEngine: args.preferredEngine as EnginePreference | undefined,
         arenaMode: Boolean(args.arenaMode),
         arenaCompetitorEngine: args.arenaCompetitorEngine as WorkerEngineId | undefined,
         acceptanceCriteria: Array.isArray(args.acceptanceCriteria)
@@ -1435,6 +1527,8 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         title,
         description,
         template,
+        tddMode: args.tddMode !== undefined ? Boolean(args.tddMode) : undefined,
+        preferredEngine: args.preferredEngine as EnginePreference | undefined,
         epicDeliveryMode: args.epicDeliveryMode as EpicDeliveryMode | undefined,
       });
       void kernel.tick();
@@ -1533,12 +1627,56 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       }
       throw new Error(`Unknown preview action: ${action}`);
     },
+    analyzeImpact: (args) =>
+      kernel.analyzeRepoImpact(
+        String(args.repoId ?? ""),
+        Array.isArray(args.paths) ? args.paths.map(String) : ["**"],
+      ),
+    manageCheckpoints: async (args) => {
+      const action = String(args.action ?? "list");
+      const ticketId = String(args.ticketId ?? "");
+      if (action === "list") {
+        return { checkpoints: await kernel.listTicketCheckpoints(ticketId) };
+      }
+      if (action === "diff") {
+        return kernel.getTicketCheckpointDiff(
+          ticketId,
+          String(args.checkpointId ?? ""),
+          args.baseCheckpointId ? String(args.baseCheckpointId) : undefined,
+        );
+      }
+      if (action === "restore") {
+        const res = await kernel.restoreTicketCheckpoint(ticketId, String(args.checkpointId ?? ""), {
+          mode: args.mode === "fork" ? "fork" : "in_place",
+          prompt: args.prompt ? String(args.prompt) : undefined,
+          preferredEngine: args.preferredEngine as EnginePreference | undefined,
+          targetStage: args.targetStage ? (String(args.targetStage) as StageKind) : undefined,
+        });
+        void kernel.tick();
+        return res;
+      }
+      throw new Error(`Unknown checkpoint action: ${action}`);
+    },
+    mutateDagNode: async (args) => {
+      const ticket = await kernel.mutateDagNode(String(args.ticketId ?? ""), {
+        action: args.action as DagNodeMutationInput["action"],
+        title: args.title ? String(args.title) : undefined,
+        description: args.description ? String(args.description) : undefined,
+        preferredEngine: args.preferredEngine as EnginePreference | undefined,
+        allowedPaths: Array.isArray(args.allowedPaths) ? args.allowedPaths.map(String) : undefined,
+        dependsOn: Array.isArray(args.dependsOn) ? args.dependsOn.map(String) : undefined,
+        tddMode: args.tddMode !== undefined ? Boolean(args.tddMode) : undefined,
+        pauseBeforeRun: args.pauseBeforeRun !== undefined ? Boolean(args.pauseBeforeRun) : undefined,
+      });
+      void kernel.tick();
+      return { ticket };
+    },
   });
 
   app.get("/api/mcp", (c) => {
     return c.json({
       name: "super-work",
-      version: "0.8.0",
+      version: "0.9.0",
       transport: "streamable-http",
       endpoint: "/api/mcp",
     });

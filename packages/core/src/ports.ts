@@ -3,6 +3,8 @@ import type {
   ArtifactKind,
   CasebookEntry,
   ChainOfRecall,
+  DagNodeMutationInput,
+  EnginePreference,
   EpicDecompositionPlan,
   EpicDeliveryMode,
   EpicReplanProposal,
@@ -21,6 +23,7 @@ import type {
   RepoConfig,
   RepoContractFile,
   RepoMetricsSummary,
+  RestoreCheckpointInput,
   RevertResult,
   RoutineRun,
   RoutineSpec,
@@ -31,8 +34,10 @@ import type {
   SpillArtifact,
   StageKind,
   StageRun,
+  SymbolImpactReport,
   Thread,
   Ticket,
+  TicketCheckpoint,
   TicketStatus,
   TriageProposal,
   Trigger,
@@ -144,6 +149,7 @@ export interface WorkspaceProvider {
       env?: NodeJS.ProcessEnv;
       sandboxMode?: SandboxMode;
       forbiddenPaths?: string[];
+      readOnlyPaths?: string[];
       allowNetwork?: boolean;
       rootRepoPath?: string;
     },
@@ -151,6 +157,10 @@ export interface WorkspaceProvider {
   runSmokeCheck?(
     worktreePath: string,
     config: SmokeCheckConfig,
+    options?: {
+      baselineScreenshotsDir?: string;
+      resolveBaselineScreenshotsDir?: () => Promise<string | undefined>;
+    },
   ): Promise<SmokeCheckResult>;
   commitAll(worktreePath: string, message: string): Promise<boolean>;
   rebaseOntoBase(worktreePath: string, baseBranch: string): Promise<{ ok: boolean; conflictSummary?: string }>;
@@ -175,6 +185,23 @@ export interface WorkspaceProvider {
     rootRepoPath: string,
     contract: RepoContractFile,
   ): Promise<{ filePath: string; rawHash: string }>;
+  analyzeSymbolImpact?(rootRepoPath: string, scopePatterns: string[]): Promise<SymbolImpactReport>;
+  getChangedFilesSince?(worktreePath: string, refOrSha: string): Promise<string[]>;
+  revertPathsToCommit?(worktreePath: string, commitSha: string, paths: string[]): Promise<void>;
+  getHeadCommitSha?(repoOrWorktreePath: string, rev?: string): Promise<string>;
+  captureWorktreeCheckpoint?(input: {
+    worktreePath: string;
+    ticketId: string;
+    checkpointId: string;
+    label: string;
+  }): Promise<{ gitRef: string; commitSha: string }>;
+  restoreWorktreeCheckpoint?(input: {
+    worktreePath: string;
+    rootRepoPath: string;
+    commitSha: string;
+  }): Promise<void>;
+  getCommitDiff?(repoOrWorktreePath: string, fromSha: string, toSha: string): Promise<string>;
+  cleanupTicketCheckpoints?(rootRepoPath: string, ticketId: string): Promise<number>;
   revertPaths(worktreePath: string, paths: string[]): Promise<void>;
   deleteBranch?(rootRepoPath: string, branchName: string): Promise<void>;
   listWorktreeDirs(): Promise<string[]>;
@@ -262,6 +289,12 @@ export interface StateStore {
   deleteCasebookEntry(id: string): Promise<boolean>;
   recordCasebookHits(ids: string[], matchedAt: string): Promise<void>;
 
+  // Worktree Checkpoints (D.2)
+  saveCheckpoint(checkpoint: TicketCheckpoint): Promise<void>;
+  getCheckpoint(id: string): Promise<TicketCheckpoint | null>;
+  listCheckpoints(ticketId: string): Promise<TicketCheckpoint[]>;
+  markCheckpointsCleaned(ticketId: string, cleanedAt: string): Promise<void>;
+
   // System Settings
   getSystemSetting<T>(key: string): Promise<T | null>;
   setSystemSetting<T>(key: string, value: T): Promise<void>;
@@ -311,12 +344,15 @@ export interface DirectTicketInput {
   title: string;
   description: string;
   template?: RepoConfig["defaultTemplate"];
+  tddMode?: boolean;
+  pauseBeforeRun?: boolean;
+  startPoint?: string;
   allowedPaths?: string[];
   forbiddenPaths?: string[];
   dependsOn?: string[];
   maxCostUsd?: number;
   maxDurationSec?: number;
-  preferredEngine?: WorkerEngineId;
+  preferredEngine?: EnginePreference;
   arenaMode?: boolean;
   arenaCompetitorEngine?: WorkerEngineId;
   modelOverride?: string;
@@ -330,8 +366,9 @@ export interface CreateEpicInput {
   title: string;
   description: string;
   template?: PipelineTemplateId;
+  tddMode?: boolean;
   epicDeliveryMode?: EpicDeliveryMode;
-  preferredEngine?: WorkerEngineId;
+  preferredEngine?: EnginePreference;
   modelOverride?: string;
   effortOverride?: ReasoningEffort;
   maxCostUsdPerSubtask?: number;

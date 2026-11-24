@@ -87,6 +87,7 @@ export async function startDaemon(options?: {
     drivers,
     outboxExecutor: new GhOutboxExecutor(workspace),
     previewProvider,
+    dataDir,
   });
 
   // Auto-register workspace repository if none registered yet

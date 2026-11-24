@@ -130,6 +130,7 @@ export function App() {
       "casebook_updated",
       "epic_replanned",
       "preview_updated",
+      "checkpoint_created",
       "ticket_created",
       "ticket_updated",
       "stage_started",
@@ -153,6 +154,7 @@ export function App() {
           const tId =
             (parsed.ticketId as string | undefined) ||
             ((parsed.ticket as { id?: string } | undefined)?.id) ||
+            ((parsed.checkpoint as { ticketId?: string } | undefined)?.ticketId) ||
             ((parsed.item as { ticketId?: string } | undefined)?.ticketId) ||
             ((parsed.entry as { ticketId?: string } | undefined)?.ticketId) ||
             ((parsed.signal as { ticketId?: string } | undefined)?.ticketId);
@@ -201,7 +203,7 @@ export function App() {
   const runningTicketCount = useMemo(
     () =>
       tickets.filter((tkt) =>
-        ["planning", "implementing", "reviewing", "rebasing"].includes(tkt.status),
+        ["planning", "spec_testing", "implementing", "reviewing", "rebasing"].includes(tkt.status),
       ).length,
     [tickets],
   );
@@ -352,7 +354,9 @@ export function App() {
             allTickets={allTickets}
             repos={repos}
             selectedRepoId={selectedRepoId}
+            availableEngines={health?.availableEngines ?? ["mock"]}
             onSelectTicket={(id) => setInspectedTicketId(id)}
+            onRefresh={() => void refreshAll(selectedRepoId || undefined)}
           />
         ) : activeTab === "routines" ? (
           <RoutinesView
@@ -386,6 +390,7 @@ export function App() {
             allTickets={allTickets}
             availableEngines={health?.availableEngines ?? ["mock"]}
             defaultTemplate={activeRepo.defaultTemplate}
+            defaultTddMode={activeRepo.defaultTddMode}
             defaultEngine={activeRepo.preferredImplementEngine}
             onClose={() => setDispatchOpen(false)}
             onSubmit={async (data) => {

@@ -666,3 +666,32 @@ export function evaluateHeuristicEpicReplan(input: {
     createdAt,
   };
 }
+
+/**
+ * Returns true if setting `targetId`'s `dependsOn` to `newDependsOn` introduces a cycle.
+ */
+export function detectTicketDependencyCycle(
+  existingDepsByTicket: Map<string, string[]>,
+  targetId: string,
+  newDependsOn: string[],
+): boolean {
+  if (newDependsOn.includes(targetId)) {
+    return true;
+  }
+  const visited = new Set<string>();
+  const stack = [...newDependsOn];
+  while (stack.length > 0) {
+    const cur = stack.pop()!;
+    if (cur === targetId) {
+      return true;
+    }
+    if (visited.has(cur)) continue;
+    visited.add(cur);
+    for (const upstream of existingDepsByTicket.get(cur) ?? []) {
+      if (!visited.has(upstream)) {
+        stack.push(upstream);
+      }
+    }
+  }
+  return false;
+}

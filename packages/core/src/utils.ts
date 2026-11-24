@@ -1,4 +1,10 @@
-import type { BrowserCheckConfig, SmokeCheckConfig, TicketStatus } from "./types.ts";
+import type {
+  BrowserCheckConfig,
+  BrowserInteractionStep,
+  SmokeCheckConfig,
+  TicketStatus,
+  VisualDiffMode,
+} from "./types.ts";
 
 export function newId(prefix: string): string {
   const rand = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
@@ -70,6 +76,41 @@ export function normalizeSmokeCheckConfig(raw: unknown): SmokeCheckConfig | unde
     const vw = typeof bc.viewportWidth === "number" ? bc.viewportWidth : Number(bc.viewportWidth);
     const vh = typeof bc.viewportHeight === "number" ? bc.viewportHeight : Number(bc.viewportHeight);
     const tm = typeof bc.timeoutMs === "number" ? bc.timeoutMs : Number(bc.timeoutMs);
+    const rawRatio =
+      typeof bc.maxVisualDiffRatio === "number"
+        ? bc.maxVisualDiffRatio
+        : Number(bc.maxVisualDiffRatio);
+    const visualDiffMode: VisualDiffMode | undefined =
+      bc.visualDiffMode === "off" ||
+      bc.visualDiffMode === "auto" ||
+      bc.visualDiffMode === "enforce" ||
+      bc.visualDiffMode === "informational"
+        ? bc.visualDiffMode
+        : undefined;
+    const validStepActions = new Set([
+      "click",
+      "fill",
+      "press",
+      "waitForSelector",
+      "waitForText",
+    ]);
+    const steps: BrowserInteractionStep[] | undefined = Array.isArray(bc.steps)
+      ? bc.steps
+          .filter(
+            (s): s is Record<string, unknown> =>
+              Boolean(s) && typeof s === "object" && validStepActions.has(String((s as Record<string, unknown>).action)),
+          )
+          .map((s) => ({
+            action: s.action as BrowserInteractionStep["action"],
+            ...(typeof s.selector === "string" && s.selector.trim()
+              ? { selector: s.selector.trim() }
+              : {}),
+            ...(typeof s.value === "string" ? { value: s.value } : {}),
+            ...(typeof s.timeoutMs === "number" && Number.isFinite(s.timeoutMs) && s.timeoutMs > 0
+              ? { timeoutMs: Math.floor(s.timeoutMs) }
+              : {}),
+          }))
+      : undefined;
     browserCheck = {
       enabled: Boolean(bc.enabled),
       ...(bcPaths && bcPaths.length > 0 ? { paths: bcPaths } : {}),
@@ -80,6 +121,11 @@ export function normalizeSmokeCheckConfig(raw: unknown): SmokeCheckConfig | unde
         : {}),
       ...(bc.failOnConsoleError !== undefined ? { failOnConsoleError: Boolean(bc.failOnConsoleError) } : {}),
       ...(Number.isFinite(tm) && tm > 0 ? { timeoutMs: Math.floor(tm) } : {}),
+      ...(steps && steps.length > 0 ? { steps } : {}),
+      ...(visualDiffMode ? { visualDiffMode } : {}),
+      ...(Number.isFinite(rawRatio) && rawRatio >= 0 && rawRatio <= 1
+        ? { maxVisualDiffRatio: rawRatio }
+        : {}),
     };
   }
 

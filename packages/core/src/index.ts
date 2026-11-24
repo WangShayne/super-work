@@ -5,6 +5,7 @@ export * from "./mandate.ts";
 export * from "./handover.ts";
 export * from "./routine.ts";
 export * from "./arena.ts";
+export * from "./engine-router.ts";
 export * from "./casebook.ts";
 export * from "./spec-studio.ts";
 export * from "./webhooks.ts";

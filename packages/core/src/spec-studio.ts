@@ -5,6 +5,7 @@ import type {
   RepoConfig,
   SpecClarificationQuestion,
   SpecClarificationResult,
+  SymbolImpactReport,
 } from "./types.ts";
 
 const STOPWORDS = new Set([
@@ -86,6 +87,7 @@ export function buildHeuristicSpecClarification(input: {
   repoStructure?: string;
   casebookEntries?: CasebookEntry[];
   playbookEntries?: PlaybookEntry[];
+  symbolImpact?: SymbolImpactReport;
 }): SpecClarificationResult {
   const combined = `${input.title}\n${input.description}`.trim();
   const lower = combined.toLowerCase();
@@ -115,6 +117,7 @@ export function buildHeuristicSpecClarification(input: {
     new Set([
       ...explicitMatches.slice(0, 6),
       ...scoredPaths.slice(0, 8).map((s) => s.path),
+      ...(input.symbolImpact?.targetFiles.slice(0, 6) ?? []),
     ]),
   ).slice(0, 8);
 
@@ -223,17 +226,34 @@ export function buildHeuristicSpecClarification(input: {
     });
   }
 
+  const recommendedTddMode = Boolean(
+    input.repo.defaultTddMode ||
+      /(?:fix|bug|auth|security|test|tdd|regression|refactor|parser|沙盒|鉴权|校验|修复|重构)/i.test(
+        lower,
+      ),
+  );
+
   const rationaleParts = [
     `Scanned ${structurePaths.length} workspace path hints`,
     matchedFiles.length > 0 ? `matched ${matchedFiles.length} path(s)` : "no narrow path match (fallback **)",
     matchedCases.length > 0 ? `recalled ${matchedCases.length} prior Casebook case(s)` : "no matching Casebook hits",
-    `recommended ${recommendedDispatchMode}/${recommendedTemplate}`,
-  ];
+    input.symbolImpact && input.symbolImpact.directDependents.length > 0
+      ? `impact: ${input.symbolImpact.directDependents.length} direct dep(s)`
+      : "",
+    `recommended ${recommendedDispatchMode}/${recommendedTemplate}${recommendedTddMode ? "+tdd" : ""}`,
+  ].filter(Boolean);
 
   return {
     ready: true,
     recommendedDispatchMode,
     recommendedTemplate,
+    recommendedTddMode,
+    ...(input.symbolImpact?.directDependents.length
+      ? { directDependents: input.symbolImpact.directDependents }
+      : {}),
+    ...(input.symbolImpact?.transitiveDependents.length
+      ? { transitiveDependents: input.symbolImpact.transitiveDependents }
+      : {}),
     refinedTitle: input.title.trim(),
     refinedDescription: input.description.trim(),
     suggestedAllowedPaths,
