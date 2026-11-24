@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -61,6 +62,11 @@ function parseCliArgs(argv: string[]): ParsedArgs {
     "mode",
     "prompt",
     "stage",
+    "decision",
+    "ids",
+    "engines",
+    "o",
+    "out",
   ]);
   const optionalEngineFlags = new Set(["arena"]);
   const engineValues = new Set(["claude", "codex", "opencode", "mock"]);
@@ -351,12 +357,14 @@ async function waitForTicketCompletion(
 }
 
 function printHelp(stdout: (line: string) => void): void {
-  stdout(`super-work v1.0.0 CLI
+  stdout(`super-work v1.1.0 CLI
 
 Usage:
   super-work up [-d|--detach] [--port 4318] [--data-dir path]
   super-work mcp [--url http://localhost:4318] [--token <token>] [--no-auto-start]
   super-work status [--repo <id>] [--auto-start] [--json]
+  super-work ask <question> [--repo <id>] [--auto-start] [--json]
+  super-work steer <ticketId> <instruction> [--engine auto|claude|codex|opencode|mock] [--auto-start] [--json]
   super-work dispatch <title> [-d|--desc <text>] [--repo <id>] [--blueprint <id>] [--gate-policy <policy>] [--paths <csv>] [--depends-on <csv>]
                       [--template fast|standard|strict] [--engine auto|claude|codex|opencode|mock]
                       [--tdd] [--pause-before-run] [--arena [engine]] [--clarify] [--clarify-only]
@@ -365,13 +373,16 @@ Usage:
                   [--engine auto|...] [--preview-only] [--per-subtask] [--wait] [--auto-start] [--json]
   super-work blueprints [--repo <id>] [--auto-start] [--json]
   super-work doctor [--fix] [--auto-start] [--json]
-  super-work backup [list|create] [--auto-start] [--json]
+  super-work backup [list | create | restore <backupId> [--force]] [--auto-start] [--json]
+  super-work bundle [export <repoId> [-o <path>] | import <repoId> <path>] [--auto-start] [--json]
+  super-work eval [list [--repo <id>] | save <ticketId> | run <evalCaseId> [--engines <csv>] [--budget <usd>] | runs [--repo <id>]] [--auto-start] [--json]
   super-work impact [--repo <id>] [--paths <csv>] [--auto-start] [--json]
   super-work checkpoint [list <ticketId> | diff <ticketId> <cpId> [--base <cpId>] |
                          restore <ticketId> <cpId> [--mode in_place|fork] [-m <prompt>] [--stage <stage>] [--engine <eng>]]
   super-work dag [pause <ticketId> | resume <ticketId> | rerun <ticketId> |
                   set <ticketId> [--engine auto|...] [--paths <csv>] [--depends-on <csv>] [-d <desc>] [--tdd|--no-tdd] [--breakpoint]]
-  super-work inbox [list | approve <id> [--expand-mandate] [--local-merge] [--budget-add <usd>] [--winner <candId>] [-m <note>] | reject <id> [-m <note>]]
+  super-work inbox [list | approve <id> [--expand-mandate] [--local-merge] [--budget-add <usd>] [--winner <candId>] [-m <note>] | reject <id> [-m <note>] |
+                    batch --decision <approved|rejected> [--repo <id>] [--low-risk] [--ids <csv>] [-m <note>]]
   super-work preview [list | start <ticketId> [--candidate <candId>] | stop <previewId>] [--repo <id>] [--json]
   super-work routine [list | add <name> -d <prompt> [--cron <expr> | --every <min>] [--window HH:MM-HH:MM] [--paths <csv>] [--budget <usd>] | run <id> | toggle <id> | runs [--routine <id>] | delete <id>]
   super-work casebook [list | search <query>] [--repo <id>] [--auto-start] [--json]
@@ -832,6 +843,35 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
           asJson
             ? JSON.stringify(result, null, 2)
             : `Inbox ${result.item.id} ${result.item.status}; ticket ${result.ticket.id} -> ${result.ticket.status}`,
+        );
+        return 0;
+      }
+
+      if (subCmd === "batch") {
+        const rawDecision = getStringFlag(flags, "decision") ?? "approved";
+        const decision: "approved" | "rejected" =
+          rawDecision === "rejected" ? "rejected" : "approved";
+        const idsRaw = getStringFlag(flags, "ids");
+        const inboxIds = idsRaw
+          ? idsRaw.split(",").map((s) => s.trim()).filter(Boolean)
+          : undefined;
+        const result = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () =>
+            client.batchResolveInbox({
+              inboxIds,
+              repoId: getStringFlag(flags, "repo"),
+              onlyLowRisk: Boolean(flags["low-risk"]),
+              decision,
+              note: getStringFlag(flags, "m", "note"),
+            }),
+          stdout,
+        );
+        stdout(
+          asJson
+            ? JSON.stringify(result, null, 2)
+            : `Batch ${decision}: resolved=${result.resolvedCount}, skipped=${result.skippedCount}`,
         );
         return 0;
       }
@@ -1613,6 +1653,27 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
         }
         return 0;
       }
+      if (subCmd === "restore") {
+        const backupId = positionals[2];
+        if (!backupId) {
+          stderr("Error: backupId or filename is required. Usage: super-work backup restore <backupId> [--force]");
+          return 1;
+        }
+        const res = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.restoreBackup(backupId, Boolean(flags.force)),
+          stdout,
+        );
+        if (asJson) {
+          stdout(JSON.stringify(res, null, 2));
+        } else {
+          stdout(
+            `Restored ${res.restoredBackup.filename} (ok=${res.ok}; ${res.integrityDetail})${res.preRestoreSafetyBackup ? ` | Safety snapshot: ${res.preRestoreSafetyBackup.filename}` : ""}`,
+          );
+        }
+        return 0;
+      }
       const res = await withAutoStart(
         baseUrl,
         autoStart,
@@ -1625,10 +1686,201 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
         stdout("No SQLite hot backups created yet.");
       } else {
         for (const b of res.backups) {
-          stdout(`${b.filename} (${b.byteSize} bytes) createdAt=${b.createdAt}`);
+          stdout(`${b.id} :: ${b.filename} (${b.byteSize} bytes) createdAt=${b.createdAt}`);
         }
       }
       return 0;
+    }
+
+    if (cmd === "steer") {
+      const ticketId = positionals[1];
+      const instruction = positionals[2] ?? getStringFlag(flags, "m", "note", "d", "desc");
+      if (!ticketId || !instruction) {
+        stderr('Error: usage: super-work steer <ticketId> "<instruction>" [--engine <eng>]');
+        return 1;
+      }
+      const preferredEngine = getStringFlag(flags, "engine") as EnginePreference | undefined;
+      const res = await withAutoStart(
+        baseUrl,
+        autoStart,
+        () => client.steerTicket(ticketId, { instruction, preferredEngine }),
+        stdout,
+      );
+      stdout(
+        asJson
+          ? JSON.stringify(res, null, 2)
+          : `Steered ticket ${res.ticket.id} -> status=${res.ticket.status} steerCount=${res.ticket.steerCount ?? 1}`,
+      );
+      return 0;
+    }
+
+    if (cmd === "ask") {
+      const question = positionals.slice(1).join(" ").trim();
+      if (!question) {
+        stderr('Error: question is required. Usage: super-work ask "<question>" [--repo <id>]');
+        return 1;
+      }
+      const repoId = getStringFlag(flags, "repo");
+      const res = await withAutoStart(
+        baseUrl,
+        autoStart,
+        () => client.askChief({ repoId, question }),
+        stdout,
+      );
+      if (asJson) {
+        stdout(JSON.stringify(res, null, 2));
+      } else {
+        stdout(res.answer);
+        if (res.suggestedActions.length > 0) {
+          stdout("\nSuggested Actions:");
+          for (const act of res.suggestedActions) {
+            stdout(`  - [${act.kind}] ${act.label}: ${act.description}`);
+          }
+        }
+      }
+      return 0;
+    }
+
+    if (cmd === "eval") {
+      const subCmd = positionals[1] ?? "list";
+      if (subCmd === "save") {
+        const ticketId = positionals[2];
+        if (!ticketId) {
+          stderr("Error: ticketId is required. Usage: super-work eval save <ticketId>");
+          return 1;
+        }
+        const res = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.saveEvalCaseFromTicket(ticketId),
+          stdout,
+        );
+        stdout(
+          asJson
+            ? JSON.stringify(res, null, 2)
+            : `Saved Golden Eval Case ${res.evalCase.id} (${res.evalCase.title}) baseSha=${res.evalCase.baseCommitSha.slice(0, 8)}`,
+        );
+        return 0;
+      }
+      if (subCmd === "run") {
+        const evalCaseId = positionals[2];
+        if (!evalCaseId) {
+          stderr("Error: evalCaseId is required. Usage: super-work eval run <evalCaseId>");
+          return 1;
+        }
+        const enginesRaw = getStringFlag(flags, "engines");
+        const engines = enginesRaw
+          ? (enginesRaw.split(",").map((s) => s.trim()).filter(Boolean) as WorkerEngineId[])
+          : undefined;
+        const budgetStr = getStringFlag(flags, "budget");
+        const maxBudgetUsd = budgetStr ? Number(budgetStr) : undefined;
+        const res = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.runEval({ evalCaseId, engines, maxBudgetUsd }),
+          stdout,
+        );
+        if (asJson) {
+          stdout(JSON.stringify(res, null, 2));
+        } else {
+          stdout(`Eval Run ${res.evalRun.id} (${res.evalRun.status}, cost=$${res.evalRun.totalCostUsd}):`);
+          for (const cand of res.evalRun.results) {
+            stdout(
+              `  - [${cand.passed ? "PASS" : "FAIL"}] ${cand.engine}: ${cand.durationMs}ms, $${cand.costUsd.toFixed(4)}, risk=${cand.riskScore} | ${cand.verificationSummary}`,
+            );
+          }
+        }
+        return 0;
+      }
+      if (subCmd === "runs") {
+        const repoId = getStringFlag(flags, "repo");
+        const res = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.listEvalRuns(repoId),
+          stdout,
+        );
+        if (asJson) {
+          stdout(JSON.stringify(res, null, 2));
+        } else if (res.runs.length === 0) {
+          stdout("No Golden Eval runs recorded yet.");
+        } else {
+          for (const run of res.runs) {
+            stdout(`[${run.id}] case=${run.evalCaseId} status=${run.status} engines=[${run.engines.join(",")}] cost=$${run.totalCostUsd}`);
+          }
+        }
+        return 0;
+      }
+      const repoId = getStringFlag(flags, "repo");
+      const res = await withAutoStart(
+        baseUrl,
+        autoStart,
+        () => client.listEvalCases(repoId),
+        stdout,
+      );
+      if (asJson) {
+        stdout(JSON.stringify(res, null, 2));
+      } else if (res.cases.length === 0) {
+        stdout("No Golden Eval cases saved yet.");
+      } else {
+        for (const c of res.cases) {
+          stdout(`[${c.id}] ${c.title} base=${c.baseCommitSha.slice(0, 8)} checks=${c.verificationCommands.length}`);
+        }
+      }
+      return 0;
+    }
+
+    if (cmd === "bundle") {
+      const subCmd = positionals[1] ?? "export";
+      if (subCmd === "export") {
+        const repoId = await resolveTargetRepoId(
+          client,
+          positionals[2] ?? getStringFlag(flags, "repo"),
+        );
+        const { bundle } = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.exportKnowledgeBundle(repoId),
+          stdout,
+        );
+        const outPath = getStringFlag(flags, "o", "out");
+        const jsonText = JSON.stringify(bundle, null, 2);
+        if (outPath) {
+          writeFileSync(resolve(outPath), jsonText, "utf8");
+          stdout(
+            `Exported knowledge bundle (${bundle.playbook.length} playbook, ${bundle.casebook.length} casebook, ${bundle.blueprints.length} blueprints) -> ${outPath}`,
+          );
+        } else {
+          stdout(jsonText);
+        }
+        return 0;
+      }
+      if (subCmd === "import") {
+        const repoId = await resolveTargetRepoId(
+          client,
+          positionals[2] ?? getStringFlag(flags, "repo"),
+        );
+        const filePath = positionals[3];
+        if (!filePath) {
+          stderr("Error: bundle path is required. Usage: super-work bundle import <repoId> <path>");
+          return 1;
+        }
+        const parsed = JSON.parse(readFileSync(resolve(filePath), "utf8"));
+        const res = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.importKnowledgeBundle(repoId, parsed),
+          stdout,
+        );
+        stdout(
+          asJson
+            ? JSON.stringify(res, null, 2)
+            : `Imported playbook=${res.importedPlaybook}, casebook=${res.importedCasebook}, blueprints=${res.importedBlueprints}, skipped=${res.skippedDuplicates}`,
+        );
+        return 0;
+      }
+      stderr(`Unknown bundle subcommand: ${subCmd}`);
+      return 1;
     }
 
     stderr(`Unknown command: ${cmd}`);

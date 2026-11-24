@@ -1,3 +1,4 @@
+import { copyFileSync, existsSync, rmSync } from "node:fs";
 import { Database } from "bun:sqlite";
 import type {
   ArenaCandidateResult,
@@ -8,6 +9,9 @@ import type {
   DeliveryGatePolicy,
   EngineMetricRow,
   EpicReplanProposal,
+  EvalCandidateRun,
+  EvalCase,
+  EvalRunRecord,
   HandoverDigest,
   InboxItem,
   InboxItemStatus,
@@ -27,6 +31,7 @@ import type {
   StageKind,
   StageRun,
   StageSpan,
+  StageToolProfile,
   StateStore,
   TaskBlueprint,
   TaskCategory,
@@ -58,9 +63,11 @@ export function tokenizeFtsQuery(rawQuery: string): string | null {
 }
 
 export class SqliteStateStore implements StateStore {
-  readonly db: Database;
+  db: Database;
+  private readonly dbPath: string;
 
   constructor(dbPath: string) {
+    this.dbPath = dbPath;
     this.db = new Database(dbPath, { create: true });
     this.init();
   }
@@ -354,6 +361,41 @@ export class SqliteStateStore implements StateStore {
       );
       CREATE INDEX IF NOT EXISTS idx_review_comments_ticket
         ON ticket_review_comments(ticket_id, created_at ASC);
+
+      CREATE TABLE IF NOT EXISTS eval_cases (
+        id TEXT PRIMARY KEY,
+        repo_id TEXT NOT NULL,
+        source_ticket_id TEXT,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL,
+        base_commit_sha TEXT NOT NULL,
+        allowed_paths_json TEXT NOT NULL,
+        forbidden_paths_json TEXT NOT NULL,
+        tdd_mode INTEGER NOT NULL DEFAULT 0,
+        locked_test_paths_json TEXT,
+        verification_commands_json TEXT NOT NULL DEFAULT '[]',
+        smoke_check_json TEXT,
+        reference_metrics_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_eval_cases_repo
+        ON eval_cases(repo_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS eval_runs (
+        id TEXT PRIMARY KEY,
+        eval_case_id TEXT NOT NULL,
+        repo_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        engines_json TEXT NOT NULL,
+        results_json TEXT NOT NULL,
+        max_budget_usd REAL NOT NULL,
+        total_cost_usd REAL NOT NULL DEFAULT 0,
+        started_at TEXT NOT NULL,
+        completed_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_eval_runs_case
+        ON eval_runs(eval_case_id, started_at DESC);
     `);
 
     const repoCols = this.db
@@ -544,6 +586,12 @@ export class SqliteStateStore implements StateStore {
     if (!existingCols.has("conflict_context_json")) {
       this.db.run("ALTER TABLE tickets ADD COLUMN conflict_context_json TEXT;");
     }
+    if (!existingCols.has("clarification_count")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN clarification_count INTEGER NOT NULL DEFAULT 0;");
+    }
+    if (!existingCols.has("steer_count")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN steer_count INTEGER NOT NULL DEFAULT 0;");
+    }
 
     if (!existingRepoCols.has("delivery_gate_policy")) {
       this.db.run("ALTER TABLE repos ADD COLUMN delivery_gate_policy TEXT;");
@@ -564,6 +612,12 @@ export class SqliteStateStore implements StateStore {
     const existingStageRunCols = new Set(stageRunCols.map((c) => c.name));
     if (!existingStageRunCols.has("spans_json")) {
       this.db.run("ALTER TABLE stage_runs ADD COLUMN spans_json TEXT;");
+    }
+    if (!existingStageRunCols.has("tool_profile_json")) {
+      this.db.run("ALTER TABLE stage_runs ADD COLUMN tool_profile_json TEXT;");
+    }
+    if (!existingStageRunCols.has("steered")) {
+      this.db.run("ALTER TABLE stage_runs ADD COLUMN steered INTEGER NOT NULL DEFAULT 0;");
     }
 
     const playbookCols = this.db
@@ -765,10 +819,11 @@ export class SqliteStateStore implements StateStore {
           tdd_mode, locked_test_paths_json, spec_test_commit_sha, spec_test_challenge_count,
           task_category, routing_rationale, auto_arena_escalated, impact_summary_json, pause_before_run,
           blueprint_id, delivery_gate_policy, risk_threshold, risk_assessment_json, conflict_resolution_count, conflict_context_json,
+          clarification_count, steer_count,
           routine_id, epic_replan_count, epic_replan_history_json, pending_epic_replan_json,
           model_override, effort_override,
           inline_memory_json, handover_digest_json, cost_usd, priority, error_message, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           title = excluded.title,
           description = excluded.description,
@@ -815,6 +870,8 @@ export class SqliteStateStore implements StateStore {
           risk_assessment_json = excluded.risk_assessment_json,
           conflict_resolution_count = excluded.conflict_resolution_count,
           conflict_context_json = excluded.conflict_context_json,
+          clarification_count = excluded.clarification_count,
+          steer_count = excluded.steer_count,
           routine_id = excluded.routine_id,
           epic_replan_count = excluded.epic_replan_count,
           epic_replan_history_json = excluded.epic_replan_history_json,
@@ -878,6 +935,8 @@ export class SqliteStateStore implements StateStore {
         ticket.riskAssessment ? JSON.stringify(ticket.riskAssessment) : null,
         ticket.conflictResolutionCount ?? 0,
         ticket.conflictContext ? JSON.stringify(ticket.conflictContext) : null,
+        ticket.clarificationCount ?? 0,
+        ticket.steerCount ?? 0,
         ticket.routineId ?? null,
         ticket.epicReplanCount ?? 0,
         ticket.epicReplanHistory ? JSON.stringify(ticket.epicReplanHistory) : null,
@@ -934,8 +993,8 @@ export class SqliteStateStore implements StateStore {
       .query(
         `INSERT INTO stage_runs (
           id, ticket_id, stage, engine, status, native_session_id, cost_usd,
-          started_at, completed_at, summary, spill_transcript_id, spans_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          started_at, completed_at, summary, spill_transcript_id, spans_json, tool_profile_json, steered
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           status = excluded.status,
           native_session_id = excluded.native_session_id,
@@ -943,7 +1002,9 @@ export class SqliteStateStore implements StateStore {
           completed_at = excluded.completed_at,
           summary = excluded.summary,
           spill_transcript_id = excluded.spill_transcript_id,
-          spans_json = excluded.spans_json`,
+          spans_json = excluded.spans_json,
+          tool_profile_json = excluded.tool_profile_json,
+          steered = excluded.steered`,
       )
       .run(
         stageRun.id,
@@ -958,6 +1019,8 @@ export class SqliteStateStore implements StateStore {
         stageRun.summary ?? null,
         stageRun.spillTranscriptId ?? null,
         stageRun.spans ? JSON.stringify(stageRun.spans) : null,
+        stageRun.toolProfile ? JSON.stringify(stageRun.toolProfile) : null,
+        stageRun.steered ? 1 : 0,
       );
   }
 
@@ -1888,6 +1951,165 @@ export class SqliteStateStore implements StateStore {
     this.db.run(`VACUUM INTO '${escaped}';`);
   }
 
+  async restoreFromBackup(backupFilePath: string): Promise<{ ok: boolean; detail: string }> {
+    if (!this.dbPath || this.dbPath === ":memory:") {
+      throw new Error("In-memory SQLite StateStore cannot restore a disk backup file.");
+    }
+    if (!existsSync(backupFilePath)) {
+      throw new Error(`Backup file not found: ${backupFilePath}`);
+    }
+
+    // Validate snapshot integrity BEFORE touching the live database
+    const probeDb = new Database(backupFilePath, { readonly: true });
+    let integrityStatus = "unknown";
+    try {
+      const checkRow = probeDb.query("PRAGMA quick_check;").get() as { quick_check?: string } | null;
+      integrityStatus = String(checkRow?.quick_check ?? "unknown");
+    } finally {
+      probeDb.close();
+    }
+    if (integrityStatus !== "ok") {
+      throw new Error(`Backup failed SQLite integrity check: ${integrityStatus}`);
+    }
+
+    this.db.close();
+    rmSync(`${this.dbPath}-wal`, { force: true });
+    rmSync(`${this.dbPath}-shm`, { force: true });
+    copyFileSync(backupFilePath, this.dbPath);
+
+    this.db = new Database(this.dbPath, { create: true });
+    this.init();
+
+    const postCheck = await this.checkDatabaseIntegrity();
+    return {
+      ok: postCheck.ok,
+      detail: postCheck.detail,
+    };
+  }
+
+  // --- Golden Eval Suite (v1.1.0 D.1) ---
+  async saveEvalCase(evalCase: EvalCase): Promise<void> {
+    this.db
+      .query(
+        `INSERT INTO eval_cases (
+          id, repo_id, source_ticket_id, title, description, base_commit_sha,
+          allowed_paths_json, forbidden_paths_json, tdd_mode, locked_test_paths_json,
+          verification_commands_json, smoke_check_json, reference_metrics_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          title = excluded.title,
+          description = excluded.description,
+          base_commit_sha = excluded.base_commit_sha,
+          allowed_paths_json = excluded.allowed_paths_json,
+          forbidden_paths_json = excluded.forbidden_paths_json,
+          tdd_mode = excluded.tdd_mode,
+          locked_test_paths_json = excluded.locked_test_paths_json,
+          verification_commands_json = excluded.verification_commands_json,
+          smoke_check_json = excluded.smoke_check_json,
+          reference_metrics_json = excluded.reference_metrics_json,
+          updated_at = excluded.updated_at`,
+      )
+      .run(
+        evalCase.id,
+        evalCase.repoId,
+        evalCase.sourceTicketId ?? null,
+        evalCase.title,
+        evalCase.description,
+        evalCase.baseCommitSha,
+        JSON.stringify(evalCase.allowedPaths),
+        JSON.stringify(evalCase.forbiddenPaths),
+        evalCase.tddMode ? 1 : 0,
+        evalCase.lockedTestPaths ? JSON.stringify(evalCase.lockedTestPaths) : null,
+        JSON.stringify(evalCase.verificationCommands),
+        evalCase.smokeCheck ? JSON.stringify(evalCase.smokeCheck) : null,
+        evalCase.referenceMetrics ? JSON.stringify(evalCase.referenceMetrics) : null,
+        evalCase.createdAt,
+        evalCase.updatedAt,
+      );
+  }
+
+  async getEvalCase(id: string): Promise<EvalCase | null> {
+    const row = this.db.query("SELECT * FROM eval_cases WHERE id = ?").get(id) as Record<
+      string,
+      unknown
+    > | null;
+    return row ? mapEvalCaseRow(row) : null;
+  }
+
+  async listEvalCases(repoId?: string): Promise<EvalCase[]> {
+    const rows = repoId
+      ? (this.db
+          .query("SELECT * FROM eval_cases WHERE repo_id = ? ORDER BY created_at DESC")
+          .all(repoId) as Record<string, unknown>[])
+      : (this.db
+          .query("SELECT * FROM eval_cases ORDER BY created_at DESC")
+          .all() as Record<string, unknown>[]);
+    return rows.map(mapEvalCaseRow);
+  }
+
+  async deleteEvalCase(id: string): Promise<boolean> {
+    const res = this.db.query("DELETE FROM eval_cases WHERE id = ?").run(id);
+    return Number(res.changes ?? 0) > 0;
+  }
+
+  async saveEvalRun(run: EvalRunRecord): Promise<void> {
+    this.db
+      .query(
+        `INSERT INTO eval_runs (
+          id, eval_case_id, repo_id, status, engines_json, results_json,
+          max_budget_usd, total_cost_usd, started_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          status = excluded.status,
+          results_json = excluded.results_json,
+          total_cost_usd = excluded.total_cost_usd,
+          completed_at = excluded.completed_at`,
+      )
+      .run(
+        run.id,
+        run.evalCaseId,
+        run.repoId,
+        run.status,
+        JSON.stringify(run.engines),
+        JSON.stringify(run.results),
+        run.maxBudgetUsd,
+        run.totalCostUsd,
+        run.startedAt,
+        run.completedAt ?? null,
+      );
+  }
+
+  async getEvalRun(id: string): Promise<EvalRunRecord | null> {
+    const row = this.db.query("SELECT * FROM eval_runs WHERE id = ?").get(id) as Record<
+      string,
+      unknown
+    > | null;
+    return row ? mapEvalRunRow(row) : null;
+  }
+
+  async listEvalRuns(filter?: {
+    repoId?: string;
+    evalCaseId?: string;
+    limit?: number;
+  }): Promise<EvalRunRecord[]> {
+    const conds: string[] = [];
+    const params: Array<string | number> = [];
+    if (filter?.repoId) {
+      conds.push("repo_id = ?");
+      params.push(filter.repoId);
+    }
+    if (filter?.evalCaseId) {
+      conds.push("eval_case_id = ?");
+      params.push(filter.evalCaseId);
+    }
+    const where = conds.length > 0 ? `WHERE ${conds.join(" AND ")}` : "";
+    const limit = Math.max(1, Math.min(100, filter?.limit ?? 30));
+    const rows = this.db
+      .query(`SELECT * FROM eval_runs ${where} ORDER BY started_at DESC LIMIT ?`)
+      .all(...params, limit) as Record<string, unknown>[];
+    return rows.map(mapEvalRunRow);
+  }
+
   // --- System Settings ---
   async getSystemSetting<T>(key: string): Promise<T | null> {
     const row = this.db
@@ -2098,6 +2320,12 @@ function mapTicketRow(r: Record<string, unknown>): Ticket {
     conflictContext: r.conflict_context_json
       ? (JSON.parse(String(r.conflict_context_json)) as ConflictSemanticContext)
       : undefined,
+    clarificationCount:
+      r.clarification_count !== null && r.clarification_count !== undefined
+        ? Number(r.clarification_count)
+        : undefined,
+    steerCount:
+      r.steer_count !== null && r.steer_count !== undefined ? Number(r.steer_count) : undefined,
     routineId: r.routine_id ? String(r.routine_id) : undefined,
     epicReplanCount:
       r.epic_replan_count !== null && r.epic_replan_count !== undefined
@@ -2139,6 +2367,10 @@ function mapStageRunRow(r: Record<string, unknown>): StageRun {
     summary: r.summary ? String(r.summary) : undefined,
     spillTranscriptId: r.spill_transcript_id ? String(r.spill_transcript_id) : undefined,
     spans: r.spans_json ? (JSON.parse(String(r.spans_json)) as StageSpan[]) : undefined,
+    toolProfile: r.tool_profile_json
+      ? (JSON.parse(String(r.tool_profile_json)) as StageToolProfile)
+      : undefined,
+    steered: r.steered ? Boolean(r.steered) : undefined,
   };
 }
 
@@ -2323,5 +2555,52 @@ function mapReviewCommentRow(r: Record<string, unknown>): TicketReviewComment {
     status: String(r.status) as ReviewCommentStatus,
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
+  };
+}
+
+function mapEvalCaseRow(r: Record<string, unknown>): EvalCase {
+  return {
+    id: String(r.id),
+    repoId: String(r.repo_id),
+    sourceTicketId: r.source_ticket_id ? String(r.source_ticket_id) : undefined,
+    title: String(r.title),
+    description: String(r.description),
+    baseCommitSha: String(r.base_commit_sha),
+    allowedPaths: r.allowed_paths_json
+      ? (JSON.parse(String(r.allowed_paths_json)) as string[])
+      : ["**"],
+    forbiddenPaths: r.forbidden_paths_json
+      ? (JSON.parse(String(r.forbidden_paths_json)) as string[])
+      : [],
+    tddMode: Boolean(r.tdd_mode),
+    lockedTestPaths: r.locked_test_paths_json
+      ? (JSON.parse(String(r.locked_test_paths_json)) as string[])
+      : undefined,
+    verificationCommands: r.verification_commands_json
+      ? (JSON.parse(String(r.verification_commands_json)) as string[])
+      : [],
+    smokeCheck: r.smoke_check_json
+      ? (JSON.parse(String(r.smoke_check_json)) as SmokeCheckConfig)
+      : undefined,
+    referenceMetrics: r.reference_metrics_json
+      ? (JSON.parse(String(r.reference_metrics_json)) as EvalCase["referenceMetrics"])
+      : undefined,
+    createdAt: String(r.created_at),
+    updatedAt: String(r.updated_at),
+  };
+}
+
+function mapEvalRunRow(r: Record<string, unknown>): EvalRunRecord {
+  return {
+    id: String(r.id),
+    evalCaseId: String(r.eval_case_id),
+    repoId: String(r.repo_id),
+    status: String(r.status) as EvalRunRecord["status"],
+    engines: r.engines_json ? (JSON.parse(String(r.engines_json)) as WorkerEngineId[]) : [],
+    results: r.results_json ? (JSON.parse(String(r.results_json)) as EvalCandidateRun[]) : [],
+    maxBudgetUsd: Number(r.max_budget_usd ?? 2),
+    totalCostUsd: Number(r.total_cost_usd ?? 0),
+    startedAt: String(r.started_at),
+    completedAt: r.completed_at ? String(r.completed_at) : undefined,
   };
 }

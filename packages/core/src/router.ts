@@ -9,9 +9,12 @@ import type {
   CreateEpicInput,
   DirectTicketInput,
   IngestTriggerInput,
+  RepoProbeExecutor,
   StateStore,
 } from "./ports.ts";
 import type {
+  ControlProbeRequest,
+  ControlProbeStep,
   EpicDecompositionPlan,
   EpicDeliveryMode,
   InboxItem,
@@ -19,6 +22,7 @@ import type {
   Mandate,
   PipelineTemplateId,
   RepoConfig,
+  RepoProbeContextPack,
   SymbolImpactReport,
   Thread,
   Ticket,
@@ -45,7 +49,28 @@ export class EventIntakeRouter {
       rootPath: string,
       scopePatterns: string[],
     ) => Promise<SymbolImpactReport>,
+    private readonly repoPreProbeProvider?: (
+      rootPath: string,
+      queryText: string,
+      forbiddenPaths?: string[],
+    ) => Promise<RepoProbeContextPack>,
+    private readonly repoProbeToolProvider?: (
+      rootPath: string,
+      req: ControlProbeRequest,
+      forbiddenPaths?: string[],
+      stepIndex?: number,
+    ) => Promise<ControlProbeStep>,
   ) {}
+
+  private buildProbeExecutor(repo: RepoConfig): RepoProbeExecutor | undefined {
+    const provider = this.repoProbeToolProvider;
+    if (!provider) return undefined;
+    let step = 0;
+    return (req) => {
+      step += 1;
+      return provider(repo.rootPath, req, repo.forbiddenPaths, step);
+    };
+  }
 
   private async resolveRepoStructure(repo: RepoConfig): Promise<string | undefined> {
     if (!this.repoStructureProvider) return undefined;
@@ -346,6 +371,19 @@ export class EventIntakeRouter {
       this.stateStore.listPlaybookEntries(repo.id, { onlyEnabled: true }),
     ]);
     const playbookRules = formatPlaybookContext(playbookEntries, ["**"]) || undefined;
+    const rawCombined = `${trigger.title}\n${trigger.rawText}`;
+    const hasExplicitPathLiteral =
+      /scope:[^\s,;]+|(?:packages|src|apps|docs|test)\/[a-zA-Z0-9_./*-]+/i.test(rawCombined);
+    const probeContext =
+      !hasExplicitPathLiteral && this.repoPreProbeProvider
+        ? await this.repoPreProbeProvider(
+            repo.rootPath,
+            rawCombined,
+            repo.forbiddenPaths,
+          ).catch(() => undefined)
+        : undefined;
+    const probeExecutor =
+      !hasExplicitPathLiteral ? this.buildProbeExecutor(repo) : undefined;
     const proposal = await this.llm.triageTrigger({
       repo,
       trigger,
@@ -354,6 +392,8 @@ export class EventIntakeRouter {
       repoStructure,
       playbookRules,
       conventions: repo.conventions,
+      probeContext,
+      probeExecutor,
     });
 
     if (!proposal.shouldCreateTicket) {
@@ -637,6 +677,14 @@ export class EventIntakeRouter {
     };
 
     const playbookRules = formatPlaybookContext(playbookEntries, ["**"]) || undefined;
+    const probeContext = this.repoPreProbeProvider
+      ? await this.repoPreProbeProvider(
+          repo.rootPath,
+          `${input.title}\n${input.description}`,
+          repo.forbiddenPaths,
+        ).catch(() => undefined)
+      : undefined;
+    const probeExecutor = this.buildProbeExecutor(repo);
     if (this.llm.planEpicDecomposition) {
       const plan = await this.llm.planEpicDecomposition({
         repo,
@@ -647,6 +695,8 @@ export class EventIntakeRouter {
         playbookRules,
         conventions: repo.conventions,
         availableRepos,
+        probeContext,
+        probeExecutor,
       });
       return {
         ...plan,

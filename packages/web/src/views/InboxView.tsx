@@ -10,6 +10,7 @@ import {
   FileJson2,
   GitMerge,
   GitPullRequest,
+  HelpCircle,
   Kanban,
   Layers,
   Play,
@@ -31,11 +32,13 @@ import type {
   PreviewSession,
   Ticket,
   TicketRiskAssessment,
+  WorkerClarificationRequest,
 } from "../types.ts";
 
 interface InboxViewProps {
   items: InboxItem[];
   ticketsById: Map<string, Ticket>;
+  selectedRepoId?: string;
   totalTicketCount?: number;
   runningTicketCount?: number;
   onResolve: (
@@ -43,8 +46,14 @@ interface InboxViewProps {
     decision: "approved" | "rejected",
     note?: string,
     deliveryAction?: "local_merge" | "push_and_create_pr",
-    options?: { expandMandate?: boolean; budgetIncreaseUsd?: number; arenaWinnerId?: string },
+    options?: {
+      expandMandate?: boolean;
+      budgetIncreaseUsd?: number;
+      arenaWinnerId?: string;
+      selectedOption?: string;
+    },
   ) => Promise<void>;
+  onRefresh?: () => void;
   onInspectTicket: (ticketId: string) => void;
   onOpenDispatch?: () => void;
   onSwitchToBoard?: () => void;
@@ -92,14 +101,20 @@ const KIND_STYLE: Record<InboxItem["kind"], { color: string; icon: typeof Eye }>
     color: "bg-purple-500/15 text-purple-300 border-purple-500/30",
     icon: Layers,
   },
+  clarification_request: {
+    color: "bg-violet-500/15 text-violet-300 border-violet-500/30",
+    icon: HelpCircle,
+  },
 };
 
 export function InboxView({
   items,
   ticketsById,
+  selectedRepoId,
   totalTicketCount = 0,
   runningTicketCount = 0,
   onResolve,
+  onRefresh,
   onInspectTicket,
   onOpenDispatch,
   onSwitchToBoard,
@@ -107,6 +122,10 @@ export function InboxView({
 }: InboxViewProps) {
   const { locale, t } = useI18n();
   const [notes, setNotes] = useState<Record<string, string>>({});
+  const [clarifyChoices, setClarifyChoices] = useState<Record<string, string>>({});
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [batchNotice, setBatchNotice] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [previewBusyKey, setPreviewBusyKey] = useState<string | null>(null);
   const [previewsByKey, setPreviewsByKey] = useState<Record<string, PreviewSession>>({});
@@ -114,6 +133,46 @@ export function InboxView({
 
   const pending = items.filter((i) => i.status === "pending");
   const resolved = items.filter((i) => i.status !== "pending").slice(0, 10);
+  const pendingIdSet = new Set(pending.map((i) => i.id));
+  const activeSelectedIds = selectedIds.filter((id) => pendingIdSet.has(id));
+
+  const isLowRiskBatchable = (item: InboxItem): boolean => {
+    const tkt = ticketsById.get(item.ticketId);
+    const highRisk = tkt?.riskAssessment?.level === "high";
+    return (
+      !highRisk &&
+      (item.kind === "observe_proposal" ||
+        item.kind === "outbox_signoff" ||
+        item.kind === "clarification_request")
+    );
+  };
+
+  const toggleSelectItem = (id: string) => {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
+    );
+  };
+
+  const handleBatchResolve = async (decision: "approved" | "rejected") => {
+    if (activeSelectedIds.length === 0) return;
+    setBatchBusy(true);
+    setBatchNotice(null);
+    try {
+      const res = await api.batchResolveInbox({
+        inboxIds: activeSelectedIds,
+        repoId: selectedRepoId,
+        onlyLowRisk: false,
+        decision,
+      });
+      setSelectedIds([]);
+      setBatchNotice(
+        `${decision === "approved" ? t("inbox.batchApprove") : t("inbox.batchReject")}: ${res.resolvedCount} ok, ${res.skippedCount} skipped`,
+      );
+      onRefresh?.();
+    } finally {
+      setBatchBusy(false);
+    }
+  };
 
   const handleLaunchPreview = async (
     pKey: string,
@@ -167,7 +226,12 @@ export function InboxView({
     id: string,
     decision: "approved" | "rejected",
     deliveryAction?: "local_merge" | "push_and_create_pr",
-    options?: { expandMandate?: boolean; budgetIncreaseUsd?: number; arenaWinnerId?: string },
+    options?: {
+      expandMandate?: boolean;
+      budgetIncreaseUsd?: number;
+      arenaWinnerId?: string;
+      selectedOption?: string;
+    },
   ) => {
     setBusyId(id);
     try {
@@ -239,11 +303,72 @@ export function InboxView({
         </div>
       ) : (
         <div className="space-y-4">
+          {/* Batch Triage Action Bar (v1.1.0 A.2) */}
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-2.5 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() =>
+                  setSelectedIds(
+                    activeSelectedIds.length === pending.length ? [] : pending.map((i) => i.id),
+                  )
+                }
+                className="px-2.5 py-1 rounded-md border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 text-[11px] transition"
+              >
+                {t("inbox.batchSelectAll")}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedIds(pending.filter(isLowRiskBatchable).map((i) => i.id))}
+                className="px-2.5 py-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-200 text-[11px] transition"
+              >
+                {t("inbox.batchSelectLowRisk")}
+              </button>
+              {activeSelectedIds.length > 0 && (
+                <span className="font-mono text-[11px] text-indigo-300">
+                  {activeSelectedIds.length} / {pending.length}
+                </span>
+              )}
+              {batchNotice && (
+                <span className="text-[11px] text-emerald-300 font-mono">{batchNotice}</span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={batchBusy || activeSelectedIds.length === 0}
+                onClick={() => void handleBatchResolve("rejected")}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 text-[11px] font-medium disabled:opacity-40 transition"
+              >
+                <X className="w-3 h-3" />
+                {t("inbox.batchReject")}
+              </button>
+              <button
+                type="button"
+                disabled={batchBusy || activeSelectedIds.length === 0}
+                onClick={() => void handleBatchResolve("approved")}
+                className="inline-flex items-center gap-1 px-3 py-1 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-medium disabled:opacity-40 transition"
+              >
+                <Check className="w-3 h-3" />
+                {t("inbox.batchApprove")}
+              </button>
+            </div>
+          </div>
+
           {pending.map((item) => {
             const style = KIND_STYLE[item.kind];
             const Icon = style.icon;
             const ticket = ticketsById.get(item.ticketId);
             const isBusy = busyId === item.id;
+            const clarification =
+              item.kind === "clarification_request"
+                ? (item.contextPayload.clarification as WorkerClarificationRequest | undefined)
+                : undefined;
+            const activeClarifyChoice = clarification
+              ? (clarifyChoices[item.id] ??
+                clarification.recommendedOption ??
+                clarification.options[0])
+              : undefined;
 
             return (
               <div
@@ -253,6 +378,13 @@ export function InboxView({
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="space-y-1.5">
                     <div className="flex items-center gap-2 flex-wrap">
+                      <input
+                        type="checkbox"
+                        checked={activeSelectedIds.includes(item.id)}
+                        onChange={() => toggleSelectItem(item.id)}
+                        aria-label={`Select ${item.title}`}
+                        className="rounded border-zinc-700 bg-zinc-950 text-indigo-500 cursor-pointer"
+                      />
                       <span
                         className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-mono font-semibold border ${style.color}`}
                       >
@@ -572,6 +704,57 @@ export function InboxView({
                     </div>
                   )}
 
+                {clarification && (
+                  <div className="space-y-2 rounded-lg border border-violet-500/35 bg-violet-500/5 p-3.5 text-xs">
+                    <div className="flex items-center gap-1.5 font-semibold text-violet-200">
+                      <HelpCircle className="w-3.5 h-3.5 text-violet-400" />
+                      <span>{t("inbox.clarificationTitle")}</span>
+                    </div>
+                    <p className="text-zinc-100 font-medium">{clarification.question}</p>
+                    {clarification.context && (
+                      <p className="text-[11px] text-zinc-400 leading-relaxed">
+                        {clarification.context}
+                      </p>
+                    )}
+                    <div className="space-y-1.5 pt-1">
+                      {clarification.options.map((opt) => {
+                        const selected = activeClarifyChoice === opt;
+                        const isRec = clarification.recommendedOption === opt;
+                        return (
+                          <button
+                            key={opt}
+                            type="button"
+                            onClick={() =>
+                              setClarifyChoices((prev) => ({ ...prev, [item.id]: opt }))
+                            }
+                            className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg border text-left transition ${
+                              selected
+                                ? "border-violet-400 bg-violet-500/20 text-violet-100"
+                                : "border-zinc-800 bg-zinc-950/70 text-zinc-300 hover:bg-zinc-900"
+                            }`}
+                          >
+                            <span className="inline-flex items-center gap-2">
+                              <span
+                                className={`w-3 h-3 rounded-full border inline-flex items-center justify-center ${
+                                  selected
+                                    ? "border-violet-300 bg-violet-400"
+                                    : "border-zinc-600"
+                                }`}
+                              />
+                              <span>{opt}</span>
+                            </span>
+                            {isRec && (
+                              <span className="px-1.5 py-0.2 rounded bg-emerald-500/15 border border-emerald-500/30 font-mono text-[10px] text-emerald-300 shrink-0">
+                                ★ recommended
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
                 <div className="flex flex-wrap items-center gap-2.5">
                   <input
                     type="text"
@@ -645,11 +828,24 @@ export function InboxView({
                   ) : (
                     <button
                       disabled={isBusy}
-                      onClick={() => handleAction(item.id, "approved")}
+                      onClick={() =>
+                        handleAction(
+                          item.id,
+                          "approved",
+                          undefined,
+                          clarification && activeClarifyChoice
+                            ? { selectedOption: activeClarifyChoice }
+                            : undefined,
+                        )
+                      }
                       className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium disabled:opacity-50 transition"
                     >
                       <Check className="w-3.5 h-3.5" />
-                      {item.kind === "epic_replan" ? t("inbox.epicReplanApprove") : t("inbox.approve")}
+                      {clarification
+                        ? t("inbox.clarificationConfirm")
+                        : item.kind === "epic_replan"
+                          ? t("inbox.epicReplanApprove")
+                          : t("inbox.approve")}
                     </button>
                   )}
                 </div>

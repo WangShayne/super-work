@@ -1,6 +1,11 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import type { BackupArchiveInfo, DoctorCheckItem, SystemDoctorReport } from "../types.ts";
+import type {
+  BackupArchiveInfo,
+  BackupRestoreResult,
+  DoctorCheckItem,
+  SystemDoctorReport,
+} from "../types.ts";
 import { isTerminalTicketStatus, newId, nowIso } from "../utils.ts";
 import type { KernelCoordinatorContext } from "./context.ts";
 
@@ -227,4 +232,50 @@ export async function listSystemBackups(dataDir: string): Promise<BackupArchiveI
     };
   });
   return archives.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function restoreSystemBackup(
+  ctx: KernelCoordinatorContext,
+  backupIdOrFilename: string,
+  options?: { force?: boolean },
+): Promise<BackupRestoreResult> {
+  if (!ctx.stateStore.restoreFromBackup) {
+    throw new Error("Configured StateStore does not support atomic hot backup restore.");
+  }
+  const targetRef = backupIdOrFilename.trim();
+  if (!targetRef) {
+    throw new Error("Backup id or filename is required.");
+  }
+
+  if (!options?.force && (ctx.activeTicketRuns.size > 0 || ctx.activeRoutineRuns.size > 0)) {
+    throw new Error(
+      `Cannot restore backup while ${ctx.activeTicketRuns.size} ticket(s) and ${ctx.activeRoutineRuns.size} routine(s) are running (pass force=true to override).`,
+    );
+  }
+
+  const backups = await listSystemBackups(ctx.dataDir);
+  const target = backups.find((b) => b.id === targetRef || b.filename === targetRef);
+  if (!target || !existsSync(target.filePath)) {
+    throw new Error(`Backup archive not found: ${targetRef}`);
+  }
+
+  let preRestoreSafetyBackup: BackupArchiveInfo | undefined;
+  if (ctx.stateStore.vacuumIntoBackup) {
+    preRestoreSafetyBackup = await createSystemBackup(ctx).catch(() => undefined);
+  }
+
+  const restoreRes = await ctx.stateStore.restoreFromBackup(target.filePath);
+  const ts = nowIso();
+  const repos = await ctx.stateStore.listRepos().catch(() => []);
+  for (const repo of repos) {
+    ctx.emitEvent({ type: "repo_updated", repo, timestamp: ts });
+  }
+
+  return {
+    ok: restoreRes.ok,
+    restoredBackup: target,
+    preRestoreSafetyBackup,
+    integrityDetail: restoreRes.detail,
+    restoredAt: ts,
+  };
 }

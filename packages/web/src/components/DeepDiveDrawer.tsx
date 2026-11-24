@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import {
+  Award,
   Ban,
   Check,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
   Clock,
+  Compass,
   Copy,
   Database,
   ExternalLink,
@@ -30,6 +32,7 @@ import {
   Square,
   Terminal,
   Trash2,
+  Wrench,
   X,
 } from "lucide-react";
 import { api } from "../api.ts";
@@ -43,6 +46,7 @@ import {
 } from "../i18n.tsx";
 import type {
   ChainOfRecall,
+  EnginePreference,
   HandoverDigest,
   LiveEventLogEntry,
   MemorySearchHit,
@@ -223,6 +227,11 @@ export function DeepDiveDrawer({
   const [resteerPrompt, setResteerPrompt] = useState("");
   const [checkpointBusy, setCheckpointBusy] = useState<string | null>(null);
   const [checkpointNotice, setCheckpointNotice] = useState<string | null>(null);
+  const [steerInstruction, setSteerInstruction] = useState("");
+  const [steerEngine, setSteerEngine] = useState<EnginePreference | "">("");
+  const [steering, setSteering] = useState(false);
+  const [savingEval, setSavingEval] = useState(false);
+  const [evalNotice, setEvalNotice] = useState<string | null>(null);
 
   useEffect(() => {
     setSelectedArenaCandId(null);
@@ -230,6 +239,9 @@ export function DeepDiveDrawer({
     setCheckpointDiff(null);
     setCheckpointNotice(null);
     setResteerPrompt("");
+    setSteerInstruction("");
+    setSteerEngine("");
+    setEvalNotice(null);
   }, [ticketId]);
 
   useEffect(() => {
@@ -352,6 +364,44 @@ export function DeepDiveDrawer({
     await api.updateReviewCommentStatus(commentId, status);
     const d = await api.getTicketDetail(ticketId);
     setDetail(d);
+  };
+
+  const handleLiveSteer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!steerInstruction.trim()) return;
+    setSteering(true);
+    setDeliveryError(null);
+    try {
+      await api.steerTicket(ticketId, {
+        instruction: steerInstruction.trim(),
+        preferredEngine: steerEngine || undefined,
+      });
+      setSteerInstruction("");
+      setSteerEngine("");
+      const [d, r] = await Promise.all([api.getTicketDetail(ticketId), api.getRecall(ticketId)]);
+      setDetail(d);
+      setRecall(r.chain);
+      onRefresh();
+    } catch (err) {
+      setDeliveryError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSteering(false);
+    }
+  };
+
+  const handleSaveEval = async () => {
+    if (!ticket) return;
+    setSavingEval(true);
+    setDeliveryError(null);
+    setEvalNotice(null);
+    try {
+      const res = await api.saveEvalCaseFromTicket(ticket.id);
+      setEvalNotice(`Golden Eval saved: ${res.evalCase.id} (${res.evalCase.title})`);
+    } catch (err) {
+      setDeliveryError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingEval(false);
+    }
   };
 
   const reposById = new Map(repos.map((r) => [r.id, r]));
@@ -596,6 +646,17 @@ export function DeepDiveDrawer({
                   : t("drawer.pushPrButton")}
               </button>
             )}
+            {ticket && ticket.status === "delivered" && !ticket.isEpic && (
+              <button
+                type="button"
+                disabled={savingEval}
+                onClick={() => void handleSaveEval()}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-teal-500/40 bg-teal-500/15 text-teal-200 hover:bg-teal-500/25 text-xs disabled:opacity-50"
+              >
+                <Award className="w-3 h-3" />
+                {t("drawer.saveEvalBtn")}
+              </button>
+            )}
             {ticket && !["delivered", "cancelled", "failed"].includes(ticket.status) && (
               <button
                 onClick={handleCancel}
@@ -669,6 +730,52 @@ export function DeepDiveDrawer({
                   <strong>{t("drawer.attention")}</strong> {deliveryError}
                 </div>
               )}
+              {evalNotice && (
+                <div className="p-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-xs text-emerald-200">
+                  {evalNotice}
+                </div>
+              )}
+
+              {ticket &&
+                ["planning", "spec_testing", "implementing", "reviewing"].includes(
+                  ticket.status,
+                ) && (
+                  <form
+                    onSubmit={handleLiveSteer}
+                    className="rounded-lg border border-sky-500/30 bg-sky-500/5 p-3 space-y-2 text-xs"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Compass className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                      <input
+                        type="text"
+                        value={steerInstruction}
+                        onChange={(e) => setSteerInstruction(e.target.value)}
+                        placeholder={t("drawer.liveSteerPlaceholder")}
+                        className="flex-1 min-w-[200px] bg-zinc-950 border border-zinc-800 rounded-md px-2.5 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-sky-500"
+                      />
+                      <select
+                        value={steerEngine}
+                        onChange={(e) => setSteerEngine(e.target.value as EnginePreference | "")}
+                        className="bg-zinc-950 border border-zinc-800 rounded-md px-2 py-1.5 text-[11px] font-mono text-zinc-300"
+                      >
+                        <option value="">keep engine</option>
+                        <option value="auto">auto</option>
+                        <option value="claude">claude</option>
+                        <option value="codex">codex</option>
+                        <option value="opencode">opencode</option>
+                        <option value="mock">mock</option>
+                      </select>
+                      <button
+                        type="submit"
+                        disabled={steering || !steerInstruction.trim()}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 text-white text-[11px] font-medium disabled:opacity-40 transition"
+                      >
+                        <Compass className="w-3 h-3" />
+                        {t("drawer.liveSteerBtn")}
+                      </button>
+                    </div>
+                  </form>
+                )}
 
               {ticket &&
                 (ticket.routingRationale ||
@@ -949,10 +1056,12 @@ export function DeepDiveDrawer({
                                     ? "bg-emerald-500/15 text-emerald-300"
                                     : run.status === "running"
                                       ? "bg-amber-500/15 text-amber-300"
-                                      : "bg-rose-500/15 text-rose-300"
+                                      : run.steered
+                                        ? "bg-sky-500/15 text-sky-300"
+                                        : "bg-rose-500/15 text-rose-300"
                                 }`}
                               >
-                                {run.status}
+                                {run.steered ? "steered" : run.status}
                               </span>
                             </div>
                             <span className="font-mono text-zinc-500">${run.costUsd.toFixed(3)}</span>
@@ -985,6 +1094,28 @@ export function DeepDiveDrawer({
                                   </span>
                                 ))}
                               </div>
+                            </div>
+                          )}
+                          {run.toolProfile && run.toolProfile.totalToolCalls > 0 && (
+                            <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                              <span className="inline-flex items-center gap-1 text-[10px] font-mono text-zinc-500">
+                                <Wrench className="w-2.5 h-2.5 text-zinc-400" />
+                                {t("drawer.toolProfileTitle")}:
+                              </span>
+                              {run.toolProfile.byTool.slice(0, 8).map((tp) => (
+                                <span
+                                  key={tp.toolName}
+                                  title={tp.sampleError ?? `${tp.approxDurationMs}ms`}
+                                  className={`px-1.5 py-0.2 rounded border font-mono text-[10px] ${
+                                    tp.errors > 0
+                                      ? "border-rose-500/35 bg-rose-500/10 text-rose-300"
+                                      : "border-zinc-800 bg-zinc-950 text-zinc-300"
+                                  }`}
+                                >
+                                  {tp.toolName} ×{tp.calls}
+                                  {tp.errors > 0 ? ` (${tp.errors} err)` : ""}
+                                </span>
+                              ))}
                             </div>
                           )}
                           {run.summary && (

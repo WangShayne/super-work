@@ -420,6 +420,8 @@ export interface Ticket {
   riskAssessment?: TicketRiskAssessment;
   conflictContext?: ConflictSemanticContext;
   conflictResolutionCount?: number;
+  clarificationCount?: number;
+  steerCount?: number;
   inlineMemory: InlineMemory;
   handoverDigest?: HandoverDigest;
   costUsd: number;
@@ -427,6 +429,20 @@ export interface Ticket {
   errorMessage?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ToolUsageStat {
+  toolName: string;
+  calls: number;
+  errors: number;
+  approxDurationMs: number;
+  sampleError?: string;
+}
+
+export interface StageToolProfile {
+  totalToolCalls: number;
+  totalToolErrors: number;
+  byTool: ToolUsageStat[];
 }
 
 export interface StageRun {
@@ -442,6 +458,8 @@ export interface StageRun {
   summary?: string;
   spillTranscriptId?: string;
   spans?: StageSpan[];
+  toolProfile?: StageToolProfile;
+  steered?: boolean;
 }
 
 export interface SpillArtifact {
@@ -463,6 +481,13 @@ export interface SpillArtifact {
   createdAt: string;
 }
 
+export interface WorkerClarificationRequest {
+  question: string;
+  options: string[];
+  recommendedOption: string;
+  context?: string;
+}
+
 export interface InboxItem {
   id: string;
   repoId: string;
@@ -477,7 +502,8 @@ export interface InboxItem {
     | "budget_cap"
     | "pr_followup"
     | "arena_tiebreak"
-    | "epic_replan";
+    | "epic_replan"
+    | "clarification_request";
   status: "pending" | "approved" | "rejected";
   title: string;
   summary: string;
@@ -769,6 +795,7 @@ export interface SpecClarificationResult {
   matchedCaseTitles: string[];
   questions: SpecClarificationQuestion[];
   rationale: string;
+  probeSteps?: ControlProbeStep[];
 }
 
 export interface LlmConnectionTestResult {
@@ -946,4 +973,121 @@ export interface BackupArchiveInfo {
   byteSize: number;
   createdAt: string;
   dbIntegrityOk?: boolean;
+}
+
+export interface ControlProbeStep {
+  step: number;
+  tool: "search_symbols" | "read_file_slice" | "grep_literals" | "git_recent_commits";
+  inputSummary: string;
+  outputSummary: string;
+  matchedPaths: string[];
+  durationMs: number;
+}
+
+export interface ChiefActionSuggestion {
+  id: string;
+  kind:
+    | "dispatch_ticket"
+    | "batch_resolve_inbox"
+    | "steer_ticket"
+    | "run_doctor"
+    | "create_backup"
+    | "open_ticket";
+  label: string;
+  description: string;
+  payload: Record<string, unknown>;
+}
+
+export interface ChiefAskResult {
+  answer: string;
+  highlights: string[];
+  probeSteps?: ControlProbeStep[];
+  suggestedActions: ChiefActionSuggestion[];
+  generatedAt: string;
+}
+
+export interface BatchResolveInboxResult {
+  resolvedCount: number;
+  skippedCount: number;
+  results: Array<{ inboxId: string; ticketId: string; status: "pending" | "approved" | "rejected" }>;
+}
+
+export interface EvalCase {
+  id: string;
+  repoId: string;
+  sourceTicketId?: string;
+  title: string;
+  description: string;
+  baseCommitSha: string;
+  allowedPaths: string[];
+  forbiddenPaths: string[];
+  tddMode?: boolean;
+  lockedTestPaths?: string[];
+  verificationCommands: string[];
+  referenceMetrics?: {
+    durationMs?: number;
+    costUsd?: number;
+    engine?: WorkerEngineId;
+  };
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EvalCandidateRun {
+  engine: WorkerEngineId;
+  passed: boolean;
+  verificationSummary: string;
+  durationMs: number;
+  costUsd: number;
+  changedFiles: string[];
+  addedLines: number;
+  deletedLines: number;
+  riskScore: number;
+  error?: string;
+}
+
+export interface EvalRunRecord {
+  id: string;
+  evalCaseId: string;
+  repoId: string;
+  status: "running" | "completed" | "failed";
+  engines: WorkerEngineId[];
+  results: EvalCandidateRun[];
+  maxBudgetUsd: number;
+  totalCostUsd: number;
+  startedAt: string;
+  completedAt?: string;
+}
+
+export interface BackupRestoreResult {
+  ok: boolean;
+  restoredBackup: BackupArchiveInfo;
+  preRestoreSafetyBackup?: BackupArchiveInfo;
+  integrityDetail: string;
+  restoredAt: string;
+}
+
+export interface RepoKnowledgeBundle {
+  version: 1;
+  exportedAt: string;
+  sourceRepoName: string;
+  playbook: Array<{ rule: string; scopePaths: string[]; pinned: boolean }>;
+  casebook: Array<{
+    title: string;
+    goalSummary: string;
+    solutionSummary: string;
+    pitfallsAndFixes?: string;
+    changedFiles: string[];
+    scopePaths: string[];
+    exportedSymbols: string[];
+    reverted: boolean;
+  }>;
+  blueprints: TaskBlueprint[];
+}
+
+export interface ImportKnowledgeBundleResult {
+  importedPlaybook: number;
+  importedCasebook: number;
+  importedBlueprints: number;
+  skippedDuplicates: number;
 }

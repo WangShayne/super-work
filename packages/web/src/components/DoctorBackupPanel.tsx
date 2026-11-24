@@ -5,6 +5,7 @@ import {
   Database,
   HardDriveDownload,
   RefreshCw,
+  RotateCcw,
   ShieldAlert,
   Sparkles,
   Stethoscope,
@@ -26,6 +27,8 @@ export function DoctorBackupPanel() {
   const [loadingDoctor, setLoadingDoctor] = useState(false);
   const [fixingDoctor, setFixingDoctor] = useState(false);
   const [creatingBackup, setCreatingBackup] = useState(false);
+  const [confirmRestoreId, setConfirmRestoreId] = useState<string | null>(null);
+  const [restoringId, setRestoringId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -74,6 +77,28 @@ export function DoctorBackupPanel() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setCreatingBackup(false);
+    }
+  };
+
+  const handleRestoreBackup = async (backupId: string) => {
+    setRestoringId(backupId);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await api.restoreBackup(backupId);
+      setConfirmRestoreId(null);
+      setNotice(
+        `Restored ${res.restoredBackup.filename}${
+          res.preRestoreSafetyBackup
+            ? ` (safety snapshot: ${res.preRestoreSafetyBackup.filename})`
+            : ""
+        }`,
+      );
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRestoringId(null);
     }
   };
 
@@ -204,9 +229,44 @@ export function DoctorBackupPanel() {
                   </div>
                   <div className="font-mono text-[10px] text-zinc-500 truncate">{b.filePath}</div>
                 </div>
-                <div className="text-right font-mono text-[10px] text-zinc-400 shrink-0">
-                  <div>{formatBytes(b.byteSize)}</div>
-                  <div>{new Date(b.createdAt).toLocaleString()}</div>
+                <div className="flex items-center gap-2.5 shrink-0">
+                  <div className="text-right font-mono text-[10px] text-zinc-400">
+                    <div>{formatBytes(b.byteSize)}</div>
+                    <div>{new Date(b.createdAt).toLocaleString()}</div>
+                  </div>
+                  {confirmRestoreId === b.id ? (
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-amber-200 max-w-44">
+                        {t("doctor.restoreConfirm")}
+                      </span>
+                      <button
+                        type="button"
+                        disabled={restoringId === b.id}
+                        onClick={() => void handleRestoreBackup(b.id)}
+                        className="px-2 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white text-[10px] font-medium disabled:opacity-50"
+                      >
+                        {t("cmd.confirmRun")}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={restoringId === b.id}
+                        onClick={() => setConfirmRestoreId(null)}
+                        className="px-2 py-1 rounded border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 text-[10px]"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={restoringId !== null}
+                      onClick={() => setConfirmRestoreId(b.id)}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded border border-amber-500/35 bg-amber-500/10 hover:bg-amber-500/20 text-amber-200 text-[10px] font-medium disabled:opacity-40 transition"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      {t("doctor.restoreBtn")}
+                    </button>
+                  )}
                 </div>
               </div>
             ))}

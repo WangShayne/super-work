@@ -7,8 +7,11 @@ import { basename, dirname, join, resolve } from "node:path";
 import type {
   BrowserCheckConfig,
   ConflictFileHunk,
+  ControlProbeRequest,
+  ControlProbeStep,
   RepoConfig,
   RepoContractFile,
+  RepoProbeContextPack,
   RevertResult,
   SandboxMode,
   SmokeCheckConfig,
@@ -22,6 +25,10 @@ import type {
 import { runCdpBrowserCheck, type BrowserCheckExecutionResult } from "../browser/cdp-browser-check.ts";
 import { comparePngVisualDiff } from "../browser/png-visual-diff.ts";
 import { wrapCommandWithOsSandbox } from "../sandbox/os-sandbox.ts";
+import {
+  executeReadOnlyProbeTool,
+  runDeterministicRepoPreProbe,
+} from "./readonly-repo-prober.ts";
 import { scanRepoStructureSummary } from "./repo-structure-scanner.ts";
 import { analyzeRepoSymbolImpact } from "./symbol-graph-scanner.ts";
 
@@ -1291,6 +1298,62 @@ export class GitWorktreeProvider implements WorkspaceProvider {
   async deleteGitRef(rootRepoPath: string, ref: string): Promise<boolean> {
     const res = await runGit(["update-ref", "-d", ref], rootRepoPath);
     return res.exitCode === 0;
+  }
+
+  async runRepoPreProbe(
+    rootRepoPath: string,
+    queryText: string,
+    forbiddenPaths?: string[],
+  ): Promise<RepoProbeContextPack> {
+    return runDeterministicRepoPreProbe(rootRepoPath, queryText, forbiddenPaths);
+  }
+
+  async executeRepoProbeTool(
+    rootRepoPath: string,
+    req: ControlProbeRequest,
+    forbiddenPaths?: string[],
+    stepIndex?: number,
+  ): Promise<ControlProbeStep> {
+    return executeReadOnlyProbeTool(rootRepoPath, req, forbiddenPaths, stepIndex);
+  }
+
+  async prepareDetachedWorktree(
+    rootRepoPath: string,
+    commitSha: string,
+    label: string,
+  ): Promise<{ worktreePath: string }> {
+    const evalRoot = join(dirname(this.worktreesDir), "eval-worktrees");
+    await mkdir(evalRoot, { recursive: true });
+    const safeLabel = label.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "eval";
+    const wtPath = join(evalRoot, `${safeLabel}-${Date.now().toString(36)}`);
+    const addRes = await runGit(["worktree", "add", "--detach", wtPath, commitSha], rootRepoPath);
+    if (addRes.exitCode !== 0) {
+      throw new Error(
+        `git worktree add --detach failed for ${commitSha}: ${addRes.stderr.trim() || addRes.stdout.trim()}`,
+      );
+    }
+    await this.linkRepoNodeModules(rootRepoPath, wtPath);
+    return { worktreePath: wtPath };
+  }
+
+  async getWorktreeNumstat(
+    worktreePath: string,
+    baseRef: string,
+  ): Promise<{ addedLines: number; deletedLines: number; changedFiles: string[] }> {
+    await runGit(["add", "-N", "."], worktreePath).catch(() => {});
+    const [numRes, changedFiles] = await Promise.all([
+      runGit(["diff", "--numstat", baseRef], worktreePath),
+      this.getChangedFilesSince(worktreePath, baseRef),
+    ]);
+    let addedLines = 0;
+    let deletedLines = 0;
+    for (const line of numRes.stdout.split("\n")) {
+      const m = line.match(/^(\d+|-)\t(\d+|-)\t/);
+      if (!m) continue;
+      if (m[1] !== "-") addedLines += Number(m[1]);
+      if (m[2] !== "-") deletedLines += Number(m[2]);
+    }
+    return { addedLines, deletedLines, changedFiles };
   }
 
   async cleanupWorkspace(worktreePath: string, rootRepoPath?: string): Promise<void> {

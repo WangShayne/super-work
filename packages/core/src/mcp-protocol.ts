@@ -34,6 +34,10 @@ export interface McpToolHost {
   mutateDagNode(args: Record<string, unknown>): Promise<unknown>;
   submitReviewComments(args: Record<string, unknown>): Promise<unknown>;
   systemDoctor(args: Record<string, unknown>): Promise<unknown>;
+  steerTicket?(args: Record<string, unknown>): Promise<unknown>;
+  batchResolveInbox?(args: Record<string, unknown>): Promise<unknown>;
+  askChief?(args: Record<string, unknown>): Promise<unknown>;
+  manageEvals?(args: Record<string, unknown>): Promise<unknown>;
 }
 
 export const MCP_PROTOCOL_VERSIONS = ["2025-03-26", "2024-11-05"] as const;
@@ -285,6 +289,71 @@ export const MCP_TOOL_DEFINITIONS = [
       },
     },
   },
+  {
+    name: "steer_ticket",
+    description:
+      "Mid-turn lossless live steer: gently abort an executing worker stage without burning retries, prepend instruction into activeHint, and seamlessly resume worktree execution.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticketId: { type: "string" },
+        instruction: { type: "string" },
+        preferredEngine: { type: "string", enum: ["auto", "claude", "codex", "opencode", "mock"] },
+      },
+      required: ["ticketId", "instruction"],
+    },
+  },
+  {
+    name: "batch_resolve_inbox",
+    description:
+      "Batch-approve or reject multiple pending Attention Inbox items (supports filtering by repoId, kinds, and onlyLowRisk).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        inboxIds: { type: "array", items: { type: "string" } },
+        repoId: { type: "string" },
+        kinds: { type: "array", items: { type: "string" } },
+        onlyLowRisk: { type: "boolean" },
+        decision: { type: "string", enum: ["approved", "rejected"] },
+        note: { type: "string" },
+        deliveryAction: { type: "string", enum: ["local_merge", "push_and_create_pr"] },
+      },
+      required: ["decision"],
+    },
+  },
+  {
+    name: "ask_chief",
+    description:
+      "Query the Chief-of-Staff advisor across active tickets, pending inbox, spend metrics, FTS5 memory, and read-only repo probes (returns answer + suggested actions).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        question: { type: "string" },
+        repoId: { type: "string" },
+      },
+      required: ["question"],
+    },
+  },
+  {
+    name: "manage_evals",
+    description:
+      "Manage Golden Benchmark Eval cases and runs (list_cases, save_from_ticket, delete_case, run, list_runs) in isolated detached worktrees.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["list_cases", "save_from_ticket", "delete_case", "run", "list_runs"],
+        },
+        repoId: { type: "string" },
+        ticketId: { type: "string" },
+        evalCaseId: { type: "string" },
+        engines: { type: "array", items: { type: "string" } },
+        maxBudgetUsd: { type: "number" },
+      },
+      required: ["action"],
+    },
+  },
 ] as const;
 
 export const MCP_RESOURCES = [
@@ -369,7 +438,7 @@ async function handleSingleMcpRequest(
             },
             serverInfo: {
               name: "super-work",
-              version: "1.0.0",
+              version: "1.1.0",
             },
           },
         };
@@ -442,6 +511,30 @@ async function handleSingleMcpRequest(
               break;
             case "system_doctor":
               result = await host.systemDoctor(args);
+              break;
+            case "steer_ticket":
+              if (!host.steerTicket) {
+                throw new Error("steer_ticket is not implemented on this MCP host");
+              }
+              result = await host.steerTicket(args);
+              break;
+            case "batch_resolve_inbox":
+              if (!host.batchResolveInbox) {
+                throw new Error("batch_resolve_inbox is not implemented on this MCP host");
+              }
+              result = await host.batchResolveInbox(args);
+              break;
+            case "ask_chief":
+              if (!host.askChief) {
+                throw new Error("ask_chief is not implemented on this MCP host");
+              }
+              result = await host.askChief(args);
+              break;
+            case "manage_evals":
+              if (!host.manageEvals) {
+                throw new Error("manage_evals is not implemented on this MCP host");
+              }
+              result = await host.manageEvals(args);
               break;
             default:
               return jsonRpcError(id, -32601, `Unknown tool: ${name}`);

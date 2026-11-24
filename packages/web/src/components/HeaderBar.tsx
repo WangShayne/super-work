@@ -4,6 +4,7 @@ import {
   Bot,
   BrainCircuit,
   Clock,
+  Command,
   Cpu,
   FileJson2,
   FolderGit2,
@@ -39,6 +40,7 @@ interface HeaderBarProps {
   onOpenRoutines?: () => void;
   onOpenWorktrees: () => void;
   onOpenSetup: () => void;
+  onOpenCommandPalette?: () => void;
 }
 
 interface StatusCapsuleProps {
@@ -95,14 +97,14 @@ function StatusCapsule({
         <button
           type="button"
           onClick={onClick}
-          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] whitespace-nowrap transition ${toneClasses} ${interactiveClass}`}
+          className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border text-[11px] whitespace-nowrap transition ${toneClasses} ${interactiveClass}`}
         >
           {content}
         </button>
       ) : (
         <div
           tabIndex={0}
-          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] whitespace-nowrap transition ${toneClasses} ${interactiveClass}`}
+          className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border text-[11px] whitespace-nowrap transition ${toneClasses} ${interactiveClass}`}
         >
           {content}
         </div>
@@ -141,6 +143,7 @@ export function HeaderBar({
   onOpenRoutines,
   onOpenWorktrees,
   onOpenSetup,
+  onOpenCommandPalette,
 }: HeaderBarProps) {
   const { locale, t, toggleLocale } = useI18n();
   const activeRepo = repos.find((r) => r.id === selectedRepoId) ?? repos[0];
@@ -192,7 +195,7 @@ export function HeaderBar({
               <div className="flex items-center gap-2">
                 <span className="font-semibold tracking-tight text-zinc-100 text-sm">super-work</span>
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
-                  v1.0
+                  v1.1
                 </span>
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700/60">
                   {t("brand.badge")}
@@ -267,7 +270,18 @@ export function HeaderBar({
           )}
         </div>
 
-        <div className="flex items-center gap-2.5 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap">
+          {onOpenCommandPalette && (
+            <button
+              onClick={onOpenCommandPalette}
+              title="⌘K / Ctrl+K"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-indigo-500/35 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-200 text-xs font-medium transition"
+            >
+              <Command className="w-3.5 h-3.5" />
+              {t("header.commandPaletteBtn")}
+            </button>
+          )}
+
           <button
             onClick={onOpenSetup}
             title={t("header.settingsTitle")}

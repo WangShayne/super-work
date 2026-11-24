@@ -53,15 +53,15 @@ bun run setup -- --auto
   - `关闭 (off)`：仅记录事件触发器，不生成任务。
   - `观察 (observe)`（推荐初上手）：收到外部事件后仅**拟单**放入「决策收件箱」等你点头确认，绝不私自改代码。
   - `自动 (auto)`：收到高信噪比事件后直接入队执行，仅在触发审批门禁或异常升级时通知你。
-- **状态指示灯**：实时展示 `实时同步`（SSE）、`总控大脑`、`Agent 分工`、`工程契约`（开启风险门禁时自动显示 `风险门禁`）、`防卡死巡检`、`PR 交付队列`、`定时巡航` 与 **`工作树池`（支持查看/一键 GC 或快捷跳转至系统自检）**，以及 `环境与模型`（内含 **系统自检与热备份** 标签页）/ `中文 / EN` 切换。
+- **状态指示灯与 `⌘K` 全局指令/幕僚面板**：顶栏首行提供 **`⌘K 指令/幕僚`** 快捷键（支持即时搜索工单/记忆，或输入 `?` 向幕僚只读提问态势）；第二行紧凑展示 `实时同步`（SSE）、`总控大脑`、`Agent 分工`、`工程契约`（开启风险门禁时自动显示 `风险门禁`）、`防卡死巡检`、`PR 交付队列`、`定时巡航` 与 **`工作树池`（支持查看/一键 GC 或快捷跳转至系统自检）**，以及 `环境与模型`（内含 **系统自检与热备份/原子恢复** 标签页）/ `中文 / EN` 切换。
 
 ### 2. 三层信息结构与 `@super-work/cli`
-1. **决策收件箱（Attention Inbox）**：聚合 `观察模式拟单`、`方案审批门禁`、`越界授权拦截`、`看门狗升级告警`、`合并冲突待解`（展示 **B.2 3-Way 双方改动与上游提交摘要**）、`PR 交付签发`（展示 **A.1 风险评分与因子拆解**）、`每日预算触顶`、`Arena 双引擎决胜`、`Epic 规划调整` 与 `PR 评审/CI 返修`。
+1. **决策收件箱（Attention Inbox）**：聚合 `观察模式拟单`、`方案审批门禁`、`越界授权拦截`、`看门狗升级告警`、`合并冲突待解`（展示 **B.2 3-Way 双方改动与上游提交摘要**）、`PR 交付签发`（展示 **A.1 风险评分与因子拆解**）、`每日预算触顶`、`Arena 双引擎决胜`、`Epic 规划调整`、`Worker 设计歧义提问`（单选建议卡）与 `PR 评审/CI 返修`，并支持多选及「仅选低风险」批量审批。
 2. **态势看板（Mission Board）**：五列泳道实时展示风险分数标签（`风险:<score>`）、TDD/Auto-Arena 徽章、PR 关联与内嵌交互式 Epic DAG 拓扑画布。
-3. **效能与预算（Metrics & Budget）**：展示当日预算水位进度条、端到端交付成功率、累计花费及按引擎 × 任务类别的 Bandit 评分矩阵。
+3. **效能与预算（Metrics & Budget）**：展示当日预算水位进度条、端到端交付成功率、累计花费、按引擎 × 任务类别的 Bandit 评分矩阵，以及 **Golden Eval 黄金基准回放评测台**。
 4. **下钻详情抽屉 & 命令行客户端（`bun run cli` / `super-work`）**：
    - `super-work up [-d]`：前台或后台守护模式拉起本地服务。
-   - `super-work status`、`blueprints`、`dispatch <title> -d <desc> [--blueprint <id>] [--gate-policy <policy>] [--wait]`、`epic <title> [--preview-only|--wait]`、`doctor [--fix]`、`backup [list|create]`、`inbox list|approve <id> [--expand-mandate]`、`logs <ticketId> [-f]`、`watch`、`revert <ticketId>`、`playbook [list|add|toggle|delete|sync --export]`。
+   - `super-work status`、`ask <问题>`、`steer <ticketId> <纠偏指令>`、`blueprints`、`dispatch <title> -d <desc> [--blueprint <id>] [--gate-policy <policy>] [--wait]`、`epic <title> [--preview-only|--wait]`、`inbox [list|approve|reject|batch]`、`eval [list|save|run|delete]`、`doctor [--fix]`、`backup [list|create|restore <id>]`、`bundle [export|import <file>]`、`logs <ticketId> [-f]`、`watch`、`revert <ticketId>`、`playbook [list|add|toggle|delete|sync --export]`。
 
 ### 3. 三种流水线模板对比
 
@@ -88,14 +88,14 @@ bun run setup -- --auto
 
 ### 3. 文件树 Diff 审查台、行级批注篮与链式召回
 1. 在态势看板点击任一任务，打开 **下钻详情抽屉**：
-   - **执行轨迹**：查看各阶段状态、花费、**阶段分片耗时瀑布流 (`StageSpan`)**、**风险评分卡片**、3-Way 冲突解析摘要与实时 SSE 事件流。
+   - **执行轨迹**：查看各阶段状态、对进行中任务下发 **实时纠偏 (`Live Steer`)**、查看 **阶段分片耗时瀑布流 (`StageSpan`)**、**工具调用热点画像 (`StageToolProfile`)**、**风险评分卡片**、3-Way 冲突解析摘要与实时 SSE 事件流，或在已交付任务右上角点击 **「存为黄金用例」**。
    - **Diff 与授权边界**：通过 **文件树 Diff 审查台** 查看分文件 `+`/`-` 统计与折叠代码块，浏览内联 AI `review_comments` 与结构化审查清单，点击任意代码行左侧 **`+`** 锚定行级批注加入 **Review Basket**（支持「仅保存批注」或一键 **「打回修改 (Request Changes)」**，返修触及对应文件并过门禁后自动标为已解决），也可点击文件右上角 **「针对此文件返修」**。
    - **链式召回**：沿 `Trigger → Thread → Inline 摘要 → Spill 溢出产物`（含结构化 JSON `review_report` 与 `test_log`）溯源，或用 FTS5 搜索历史经验。
 2. **Thread 订阅追问**：在抽屉底部输入框发送补充要求，消息直接注入活跃 `Thread`。
 
-### 4. 任务蓝图、风险门禁、系统自检热备与安全回滚
+### 4. 任务蓝图、黄金评测、原子恢复、知识包与安全回滚
 - **派发任务（Task Blueprints）与交付风险门禁（A.1 Risk Gate）**：派发弹窗支持一键选用 `tdd-bugfix`、`ui-visual-polish`、`safe-refactor`、`backend-feature`、`docs-chore` 或 `super-work.json` 自定义蓝图快速填充模板/TDD/路径与门禁策略；可在 **仓库偏好设置 → 运行时与策略** 配置 `deliveryGatePolicy`（`always_auto` / `risk_gated` / `always_signoff`）、风险阈值 `riskThreshold` 与高敏感路径 `sensitivePaths`。
-- 在 **环境与模型设置 → 系统自检与热备份** 标签页（或 CLI `super-work doctor --fix` / `super-work backup create`）运行 SQLite 完整性检测、孤儿 worktree/Preview/隐藏 Git Ref 一键自愈与零锁 `VACUUM INTO` 热备份。
+- **黄金基准回放、知识包迁移与 SQLite 原子恢复（D.1）**：可在抽屉保存已交付工单为黄金基准并在 **效能与预算 → 黄金基准回放评测台** 跨引擎隔离回放对比（`super-work eval`）；在 **仓库偏好设置 → 经验库** 一键导出/导入包含 Playbook + Casebook + Blueprints 的 **知识包**（`super-work bundle`）；在 **环境与模型设置 → 系统自检与热备份** 执行零锁 `VACUUM INTO` 热备份与带 `pre-restore` 保险快照的 **原子恢复**（`super-work backup restore`）。
 - 通过 `local_merge`（统一 `--no-ff` 生成单点 Merge Commit）本地合入主干后，抽屉顶部提供 **「一键安全回滚」** 按钮（或运行 `super-work revert <ticketId>`），执行非破坏性 `git revert -m 1` 生成反向提交。
 
 ---

@@ -1,12 +1,19 @@
 import type {
   BackupArchiveInfo,
+  BackupRestoreResult,
+  BatchResolveInboxInput,
+  BatchResolveInboxResult,
   CasebookEntry,
+  ChiefAskResult,
   DagNodeMutationInput,
   DeliveryGatePolicy,
   EnginePreference,
   EpicDecompositionPlan,
   EpicDeliveryMode,
+  EvalCase,
+  EvalRunRecord,
   HandoverDigest,
+  ImportKnowledgeBundleResult,
   InboxItem,
   InboxItemStatus,
   OutboxEntry,
@@ -15,6 +22,7 @@ import type {
   PreviewSession,
   RepoConfig,
   RepoContractFile,
+  RepoKnowledgeBundle,
   RepoMetricsSummary,
   RestoreCheckpointInput,
   RoutineRun,
@@ -23,6 +31,7 @@ import type {
   SpecClarificationResult,
   SpillArtifact,
   StageRun,
+  SteerTicketInput,
   SymbolImpactReport,
   SystemDoctorReport,
   TaskBlueprint,
@@ -476,6 +485,7 @@ export class SuperWorkHttpClient {
       expandMandate?: boolean;
       budgetIncreaseUsd?: number;
       arenaWinnerId?: string;
+      selectedOption?: string;
     },
   ): Promise<{ item: InboxItem; ticket: Ticket }> {
     return this.request<{ item: InboxItem; ticket: Ticket }>(
@@ -483,6 +493,96 @@ export class SuperWorkHttpClient {
       {
         method: "POST",
         body: JSON.stringify(payload),
+      },
+    );
+  }
+
+  batchResolveInbox(payload: BatchResolveInboxInput): Promise<BatchResolveInboxResult> {
+    return this.request<BatchResolveInboxResult>("/api/inbox/batch-resolve", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  steerTicket(ticketId: string, payload: SteerTicketInput): Promise<{ ticket: Ticket }> {
+    return this.request<{ ticket: Ticket }>(
+      `/api/tickets/${encodeURIComponent(ticketId)}/steer`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+    );
+  }
+
+  askChief(payload: { repoId?: string; question: string }): Promise<ChiefAskResult> {
+    return this.request<ChiefAskResult>("/api/chief/ask", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  listEvalCases(repoId?: string): Promise<{ cases: EvalCase[] }> {
+    const qs = repoId ? `?repoId=${encodeURIComponent(repoId)}` : "";
+    return this.request<{ cases: EvalCase[] }>(`/api/evals/cases${qs}`);
+  }
+
+  saveEvalCaseFromTicket(ticketId: string): Promise<{ evalCase: EvalCase }> {
+    return this.request<{ evalCase: EvalCase }>(
+      `/api/evals/cases/from-ticket/${encodeURIComponent(ticketId)}`,
+      { method: "POST", body: "{}" },
+    );
+  }
+
+  deleteEvalCase(id: string): Promise<{ ok: boolean }> {
+    return this.request<{ ok: boolean }>(`/api/evals/cases/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+  }
+
+  listEvalRuns(repoId?: string, evalCaseId?: string): Promise<{ runs: EvalRunRecord[] }> {
+    const params = new URLSearchParams();
+    if (repoId) params.set("repoId", repoId);
+    if (evalCaseId) params.set("evalCaseId", evalCaseId);
+    const qs = params.toString();
+    return this.request<{ runs: EvalRunRecord[] }>(`/api/evals/runs${qs ? `?${qs}` : ""}`);
+  }
+
+  runEval(payload: {
+    evalCaseId: string;
+    engines?: WorkerEngineId[];
+    maxBudgetUsd?: number;
+  }): Promise<{ evalRun: EvalRunRecord }> {
+    return this.request<{ evalRun: EvalRunRecord }>("/api/evals/run", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  restoreBackup(backupId: string, force = false): Promise<BackupRestoreResult> {
+    return this.request<BackupRestoreResult>(
+      `/api/system/backups/${encodeURIComponent(backupId)}/restore`,
+      {
+        method: "POST",
+        body: JSON.stringify({ force }),
+      },
+    );
+  }
+
+  exportKnowledgeBundle(repoId: string): Promise<{ bundle: RepoKnowledgeBundle }> {
+    return this.request<{ bundle: RepoKnowledgeBundle }>(
+      `/api/repos/${encodeURIComponent(repoId)}/knowledge-bundle`,
+    );
+  }
+
+  importKnowledgeBundle(
+    repoId: string,
+    bundle: RepoKnowledgeBundle,
+  ): Promise<ImportKnowledgeBundleResult> {
+    return this.request<ImportKnowledgeBundleResult>(
+      `/api/repos/${encodeURIComponent(repoId)}/knowledge-bundle/import`,
+      {
+        method: "POST",
+        body: JSON.stringify({ bundle }),
       },
     );
   }

@@ -8,6 +8,7 @@ import {
 } from "./arena.ts";
 import { resolveRepoBlueprints } from "./blueprints.ts";
 import { buildCasebookEntryFromTicket, selectRelevantCasesForContext } from "./casebook.ts";
+import { runChiefOfStaffQuery } from "./chief.ts";
 import { buildConflictResolutionPrompt } from "./conflict-resolver.ts";
 import {
   computeEngineRoutingDecision,
@@ -72,12 +73,21 @@ import type { KernelCoordinatorContext } from "./kernel/context.ts";
 import {
   createSystemBackup,
   listSystemBackups,
+  restoreSystemBackup as restoreSystemBackupOp,
   runSystemDoctor,
 } from "./kernel/doctor-backup-coordinator.ts";
+import {
+  createEvalCaseFromTicket as createEvalCaseFromTicketOp,
+  runEvalCase as runEvalCaseOp,
+} from "./kernel/eval-coordinator.ts";
 import {
   applyEpicReplanProposalOp,
   maybeEvaluateEpicReplanOp,
 } from "./kernel/epic-replan-coordinator.ts";
+import {
+  exportRepoKnowledgeBundle as exportRepoKnowledgeBundleOp,
+  importRepoKnowledgeBundle as importRepoKnowledgeBundleOp,
+} from "./kernel/knowledge-bundle-coordinator.ts";
 import {
   autoResolveModifiedReviewComments,
   submitTicketReviewComments,
@@ -93,6 +103,7 @@ import {
 } from "./kernel/routine-coordinator.ts";
 import { SpanRecorder } from "./kernel/span-recorder.ts";
 import { evaluateTicketRisk } from "./risk.ts";
+import { buildStageToolProfile, extractWorkerClarificationRequest } from "./tool-profiler.ts";
 import type {
   ArtifactStore,
   ControlPlaneLLM,
@@ -102,6 +113,7 @@ import type {
   KernelConfig,
   OutboxExecutor,
   PreviewProvider,
+  RepoProbeExecutor,
   StateStore,
   WorkerDriver,
   WorkspaceProvider,
@@ -110,12 +122,20 @@ import { EventIntakeRouter, type IngestResult } from "./router.ts";
 import type {
   ArenaCandidateResult,
   BackupArchiveInfo,
+  BackupRestoreResult,
+  BatchResolveInboxInput,
+  BatchResolveInboxResult,
   CasebookEntry,
+  ChiefAskInput,
+  ChiefAskResult,
   ConflictSemanticContext,
   DagNodeMutationInput,
   EpicDecompositionPlan,
   EpicReplanProposal,
+  EvalCase,
+  EvalRunRecord,
   HandoverDigest,
+  ImportKnowledgeBundleResult,
   InboxItem,
   KernelEvent,
   ManagedWorktreeItem,
@@ -126,6 +146,7 @@ import type {
   PreviewSession,
   RepoConfig,
   RepoContractFile,
+  RepoKnowledgeBundle,
   RestoreCheckpointInput,
   ReviewCommentStatus,
   ReviewReport,
@@ -139,6 +160,7 @@ import type {
   StageKind,
   StageRun,
   StageSpan,
+  SteerTicketInput,
   SubmitReviewCommentsInput,
   SymbolImpactReport,
   SystemDoctorReport,
@@ -152,6 +174,7 @@ import type {
   VerificationRunResult,
   WatchdogDecision,
   WatchdogSignal,
+  WorkerClarificationRequest,
   WorkerEngineId,
   WorkerStreamEvent,
   WorktreeGcResult,
@@ -209,6 +232,7 @@ export class SuperWorkKernel {
   private readonly activeRoutineRuns = new Set<string>();
   private readonly repoWorkspaceLocks = new Map<string, Promise<void>>();
   private readonly abortControllers = new Map<string, AbortController>();
+  private readonly pendingSteers = new Map<string, SteerTicketInput>();
   private readonly finalizingEpics = new Set<string>();
   private readonly epicMergeLocks = new Map<string, Promise<void>>();
 
@@ -246,6 +270,8 @@ export class SuperWorkKernel {
       emit,
       deps.workspace.getRepoStructureSummary?.bind(deps.workspace),
       deps.workspace.analyzeSymbolImpact?.bind(deps.workspace),
+      deps.workspace.runRepoPreProbe?.bind(deps.workspace),
+      deps.workspace.executeRepoProbeTool?.bind(deps.workspace),
     );
     this.watchdog = new TwoTierWatchdog(deps.llm, this.config.watchdog);
     this.outbox = new OutboxProcessor(
@@ -1131,6 +1157,75 @@ export class SuperWorkKernel {
     return (await this.stateStore.getTicket(ticketId)) ?? ticket;
   }
 
+  private createRepoProbeExecutor(repo: RepoConfig): RepoProbeExecutor | undefined {
+    const provider = this.workspace.executeRepoProbeTool;
+    if (!provider) return undefined;
+    let step = 0;
+    return (req) => {
+      step += 1;
+      return provider.call(this.workspace, repo.rootPath, req, repo.forbiddenPaths, step);
+    };
+  }
+
+  async steerTicket(ticketId: string, input: SteerTicketInput): Promise<Ticket> {
+    const instruction = input.instruction?.trim();
+    if (!instruction) {
+      throw new Error("Live steer instruction is required.");
+    }
+    const existing = await this.stateStore.getTicket(ticketId);
+    if (!existing) {
+      throw new Error(`Ticket not found: ${ticketId}`);
+    }
+    if (isTerminalTicketStatus(existing.status)) {
+      throw new Error(`Cannot steer terminal ticket ${ticketId} (${existing.status}).`);
+    }
+
+    const activeCtrl = this.abortControllers.get(ticketId);
+    if (activeCtrl) {
+      this.pendingSteers.set(ticketId, {
+        instruction,
+        preferredEngine: input.preferredEngine,
+      });
+      activeCtrl.abort("live_steer");
+      const activeRun = this.activeTicketRuns.get(ticketId);
+      if (activeRun) {
+        await Promise.race([activeRun, new Promise((r) => setTimeout(r, 600))]).catch(() => {});
+      }
+      return (await this.stateStore.getTicket(ticketId)) ?? existing;
+    }
+
+    const ts = nowIso();
+    const overrideEngine =
+      input.preferredEngine && input.preferredEngine !== "auto"
+        ? input.preferredEngine
+        : existing.activeEngine;
+    const updated: Ticket = {
+      ...existing,
+      status: existing.status === "waiting_deps" ? "waiting_deps" : "queued",
+      pauseBeforeRun: false,
+      errorMessage: undefined,
+      steerCount: (existing.steerCount ?? 0) + 1,
+      preferredEngine: input.preferredEngine ?? existing.preferredEngine,
+      activeEngine: overrideEngine,
+      inlineMemory: {
+        ...existing.inlineMemory,
+        threadUpdates: [
+          ...existing.inlineMemory.threadUpdates,
+          {
+            triggerId: newId("str"),
+            message: `[Live Steer]: ${instruction}`,
+            createdAt: ts,
+          },
+        ],
+        activeHint: `[LIVE STEER]: ${instruction}`,
+      },
+      updatedAt: ts,
+    };
+    await this.stateStore.saveTicket(updated);
+    this.emitEvent({ type: "ticket_updated", ticket: updated, timestamp: ts });
+    return updated;
+  }
+
   async cancelTicket(ticketId: string, reason = "Cancelled by user"): Promise<Ticket> {
     const ctrl = this.abortControllers.get(ticketId);
     if (ctrl) {
@@ -1271,12 +1366,21 @@ export class SuperWorkKernel {
     if (!repo) {
       throw new Error(`Repository not found: ${input.repoId}`);
     }
-    const [repoStructure, playbookEntries, casebookEntries] = await Promise.all([
+    const [repoStructure, playbookEntries, casebookEntries, probeContext] = await Promise.all([
       this.workspace.getRepoStructureSummary
         ? this.workspace.getRepoStructureSummary(repo.rootPath).catch(() => undefined)
         : Promise.resolve(undefined),
       this.stateStore.listPlaybookEntries(repo.id, { onlyEnabled: true }),
       this.stateStore.listCasebookEntries(repo.id),
+      this.workspace.runRepoPreProbe
+        ? this.workspace
+            .runRepoPreProbe(
+              repo.rootPath,
+              `${input.title}\n${input.description}`,
+              repo.forbiddenPaths,
+            )
+            .catch(() => undefined)
+        : Promise.resolve(undefined),
     ]);
 
     const playbookText = formatPlaybookContext(playbookEntries, ["**"], 8, 1200);
@@ -1298,6 +1402,8 @@ export class SuperWorkKernel {
         playbookRules: playbookText || undefined,
         casebookContext: caseText || undefined,
         conventions: repo.conventions,
+        probeContext,
+        probeExecutor: this.createRepoProbeExecutor(repo),
       });
       spec = {
         ...spec,
@@ -1305,6 +1411,10 @@ export class SuperWorkKernel {
           spec.matchedCaseTitles.length > 0
             ? spec.matchedCaseTitles
             : caseSelection.positiveCases.map((c) => c.title),
+        probeSteps:
+          spec.probeSteps && spec.probeSteps.length > 0
+            ? spec.probeSteps
+            : probeContext?.probeSteps,
       };
     } else {
       spec = buildHeuristicSpecClarification({
@@ -1315,6 +1425,7 @@ export class SuperWorkKernel {
         repoStructure,
         casebookEntries,
         playbookEntries,
+        probeContext,
       });
     }
 
@@ -1451,6 +1562,7 @@ export class SuperWorkKernel {
       budgetIncreaseUsd?: number;
       saveToPlaybook?: boolean;
       arenaWinnerId?: string;
+      selectedOption?: string;
     },
   ): Promise<{ item: InboxItem; ticket: Ticket }> {
     const item = await this.stateStore.getInboxItem(inboxId);
@@ -1824,6 +1936,42 @@ export class SuperWorkKernel {
           pendingEpicReplan: undefined,
           status: ticket.isEpic ? "implementing" : ticket.status,
           errorMessage: undefined,
+        };
+      }
+    } else if (item.kind === "clarification_request") {
+      if (decision === "approved") {
+        const clarificationPayload = item.contextPayload.clarification as
+          | WorkerClarificationRequest
+          | undefined;
+        const chosenAnswer =
+          options?.selectedOption?.trim() ||
+          note?.trim() ||
+          clarificationPayload?.recommendedOption ||
+          "Proceed with the recommended engineering approach.";
+        const clarificationLine = `[HUMAN CLARIFICATION] Q: ${clarificationPayload?.question ?? item.summary} -> Answer: ${chosenAnswer}${note && options?.selectedOption && note.trim() !== chosenAnswer ? ` (${note.trim()})` : ""}`;
+        nextTicket = {
+          ...nextTicket,
+          status: "queued",
+          stageRetries: 0,
+          errorMessage: undefined,
+          inlineMemory: {
+            ...nextTicket.inlineMemory,
+            threadUpdates: [
+              ...nextTicket.inlineMemory.threadUpdates,
+              {
+                triggerId: item.id,
+                message: clarificationLine,
+                createdAt: ts,
+              },
+            ],
+            activeHint: clarificationLine,
+          },
+        };
+      } else {
+        nextTicket = {
+          ...nextTicket,
+          status: "cancelled",
+          errorMessage: note ?? "Worker clarification rejected by reviewer",
         };
       }
     } else {
@@ -2391,12 +2539,23 @@ export class SuperWorkKernel {
       watchdogSignal = sig;
       this.emitEvent({ type: "watchdog_signal", signal: sig, timestamp: nowIso() });
 
+      const probeContext = this.workspace.runRepoPreProbe
+        ? await this.workspace
+            .runRepoPreProbe(
+              repo.rootPath,
+              `${ticket.title}\n${sig.details}\n${ticket.mandate.allowedPaths.join(" ")}`,
+              repo.forbiddenPaths,
+            )
+            .catch(() => undefined)
+        : undefined;
       const decision = await this.watchdog.evaluateAndDecide({
         ticket,
         stageRun,
         signal: sig,
         recentEvents: tracker.recentEvents,
         availableEngines,
+        probeContext,
+        probeExecutor: this.createRepoProbeExecutor(repo),
       });
       this.emitEvent({
         type: "watchdog_decision",
@@ -2497,22 +2656,28 @@ export class SuperWorkKernel {
       clearInterval(l1Timer);
     }
 
-    const turnSpanStatus: StageSpan["status"] = watchdogDecision
-      ? "failed"
-      : !completedEvent && collectedEvents.some((e) => e.type === "error")
-        ? "failed"
-        : "ok";
+    const toolProfile = buildStageToolProfile(collectedEvents);
+    const turnSpanStatus: StageSpan["status"] =
+      this.pendingSteers.has(ticket.id)
+        ? "ok"
+        : watchdogDecision
+          ? "failed"
+          : !completedEvent && collectedEvents.some((e) => e.type === "error")
+            ? "failed"
+            : "ok";
     spans.end(workerSpan, turnSpanStatus, `$${stageCostUsd.toFixed(3)}`);
 
     // Re-read ticket in case external cancellation happened mid-turn
     const latestTicket = await this.stateStore.getTicket(ticket.id);
     if (latestTicket && latestTicket.status === "cancelled") {
+      this.pendingSteers.delete(ticket.id);
       await this.stateStore.saveStageRun({
         ...stageRun,
         status: "aborted",
         nativeSessionId: discoveredSessionId,
         costUsd: stageCostUsd,
         spans: spans.toArray(),
+        toolProfile,
         completedAt: nowIso(),
         summary: "Cancelled by user",
       });
@@ -2520,12 +2685,14 @@ export class SuperWorkKernel {
     }
 
     if (this.stopped) {
+      this.pendingSteers.delete(ticket.id);
       await this.stateStore.saveStageRun({
         ...stageRun,
         status: "aborted",
         nativeSessionId: discoveredSessionId,
         costUsd: stageCostUsd,
         spans: spans.toArray(),
+        toolProfile,
         completedAt: nowIso(),
         summary: "Aborted on kernel shutdown",
       });
@@ -2534,6 +2701,81 @@ export class SuperWorkKernel {
         status: "queued",
         costUsd: ticket.costUsd + stageCostUsd,
         updatedAt: nowIso(),
+      });
+      return;
+    }
+
+    // Handle mid-turn lossless Live Steer without burning stageRetries
+    const pendingSteer = this.pendingSteers.get(ticket.id);
+    if (pendingSteer && abortController.signal.aborted) {
+      this.pendingSteers.delete(ticket.id);
+      const ts = nowIso();
+      const steeredRun: StageRun = {
+        ...stageRun,
+        status: "aborted",
+        nativeSessionId: discoveredSessionId,
+        costUsd: stageCostUsd,
+        spans: spans.toArray(),
+        toolProfile,
+        steered: true,
+        completedAt: ts,
+        summary: `Live steer applied: ${pendingSteer.instruction.slice(0, 140)}`,
+      };
+      const { note: steerNote } = await this.memory.recordStageSpillAndNote({
+        ticket,
+        stageRun: steeredRun,
+        events: collectedEvents,
+        changedFiles: [],
+        summary: steeredRun.summary!,
+        verificationPassed: false,
+      });
+      steeredRun.spillTranscriptId = steerNote.spillArtifactIds[0];
+      await this.stateStore.saveStageRun(steeredRun);
+      this.emitEvent({
+        type: "stage_completed",
+        ticketId: ticket.id,
+        stageRun: steeredRun,
+        note: steerNote,
+        timestamp: ts,
+      });
+
+      const preservedSessions =
+        discoveredSessionId && stage !== "review"
+          ? { ...ticket.nativeSessions, [driver.engine]: discoveredSessionId }
+          : ticket.nativeSessions;
+      const switchedEngine =
+        pendingSteer.preferredEngine && pendingSteer.preferredEngine !== "auto"
+          ? pendingSteer.preferredEngine
+          : driver.engine;
+
+      const steeredTicket: Ticket = {
+        ...ticket,
+        status: "queued",
+        steerCount: (ticket.steerCount ?? 0) + 1,
+        costUsd: ticket.costUsd + stageCostUsd,
+        nativeSessions: preservedSessions,
+        preferredEngine: pendingSteer.preferredEngine ?? ticket.preferredEngine,
+        activeEngine: switchedEngine,
+        inlineMemory: {
+          ...ticket.inlineMemory,
+          stageNotes: [...ticket.inlineMemory.stageNotes, steerNote],
+          threadUpdates: [
+            ...ticket.inlineMemory.threadUpdates,
+            {
+              triggerId: newId("str"),
+              message: `[Live Steer]: ${pendingSteer.instruction}`,
+              createdAt: ts,
+            },
+          ],
+          activeHint: `[LIVE STEER]: ${pendingSteer.instruction}`,
+        },
+        updatedAt: ts,
+      };
+      await this.stateStore.saveTicket(steeredTicket);
+      this.emitEvent({
+        type: "ticket_updated",
+        ticket: steeredTicket,
+        timestamp: ts,
       });
       return;
     }
@@ -2548,6 +2790,7 @@ export class SuperWorkKernel {
         nativeSessionId: discoveredSessionId,
         costUsd: stageCostUsd,
         spans: spans.toArray(),
+        toolProfile,
         completedAt: nowIso(),
         summary: `Watchdog ${dec.action}: ${dec.reason}`,
       };
@@ -2637,6 +2880,7 @@ export class SuperWorkKernel {
         nativeSessionId: discoveredSessionId,
         costUsd: stageCostUsd,
         spans: spans.toArray(),
+        toolProfile,
         completedAt: nowIso(),
         summary: lastErrorEvent.message,
       };
@@ -2880,6 +3124,8 @@ export class SuperWorkKernel {
         status: canRewind ? "completed" : "failed",
         nativeSessionId: discoveredSessionId,
         costUsd: stageCostUsd,
+        spans: spans.toArray(),
+        toolProfile,
         completedAt: nowIso(),
         summary: `SPEC_TEST_CHALLENGE: ${challengeReason}`,
       };
@@ -2947,6 +3193,110 @@ export class SuperWorkKernel {
       return;
     }
 
+    // Worker structured clarification protocol (capped at 1 per ticket)
+    const workerClarification =
+      (stage === "plan" || stage === "implement") && (ticket.clarificationCount ?? 0) < 1
+        ? extractWorkerClarificationRequest(
+            collectedEvents,
+            completedEvent?.structuredOutput?.clarificationRequest,
+          )
+        : null;
+    if (workerClarification) {
+      const clarTs = nowIso();
+      const clarRun: StageRun = {
+        ...stageRun,
+        status: "completed",
+        nativeSessionId: discoveredSessionId,
+        costUsd: stageCostUsd,
+        spans: spans.toArray(),
+        toolProfile,
+        completedAt: clarTs,
+        summary: `Clarification requested: ${workerClarification.question}`,
+      };
+      const { note: clarNote } = await this.memory.recordStageSpillAndNote({
+        ticket,
+        stageRun: clarRun,
+        events: collectedEvents,
+        changedFiles,
+        diffText,
+        summary: clarRun.summary!,
+        verificationPassed: false,
+      });
+      clarRun.spillTranscriptId = clarNote.spillArtifactIds[0];
+      await this.stateStore.saveStageRun(clarRun);
+      this.emitEvent({
+        type: "stage_completed",
+        ticketId: ticket.id,
+        stageRun: clarRun,
+        note: clarNote,
+        timestamp: clarTs,
+      });
+
+      const updatedClarSessions = discoveredSessionId
+        ? { ...ticket.nativeSessions, [driver.engine]: discoveredSessionId }
+        : ticket.nativeSessions;
+      const effectiveGatePolicy = ticket.deliveryGatePolicy ?? repo.deliveryGatePolicy ?? "always_auto";
+      const shouldPauseForHuman =
+        repo.mode === "observe" ||
+        ticket.template === "strict" ||
+        effectiveGatePolicy === "risk_gated" ||
+        effectiveGatePolicy === "always_signoff";
+
+      if (shouldPauseForHuman) {
+        await this.escalateTicket(
+          {
+            ...ticket,
+            clarificationCount: (ticket.clarificationCount ?? 0) + 1,
+            costUsd: ticket.costUsd + stageCostUsd,
+            nativeSessions: updatedClarSessions,
+            inlineMemory: {
+              ...ticket.inlineMemory,
+              stageNotes: [...ticket.inlineMemory.stageNotes, clarNote],
+            },
+          },
+          "clarification_request",
+          workerClarification.question,
+          {
+            clarification: workerClarification,
+            stage,
+            stageRunId: clarRun.id,
+          },
+        );
+        return;
+      }
+
+      const autoLine = `[AUTO-CLARIFIED] Q: ${workerClarification.question} -> Adopted recommended option: ${workerClarification.recommendedOption}`;
+      const autoResumed: Ticket = {
+        ...ticket,
+        status: "queued",
+        clarificationCount: (ticket.clarificationCount ?? 0) + 1,
+        costUsd: ticket.costUsd + stageCostUsd,
+        nativeSessions: updatedClarSessions,
+        activeEngine: driver.engine,
+        inlineMemory: {
+          ...ticket.inlineMemory,
+          stageNotes: [...ticket.inlineMemory.stageNotes, clarNote],
+          threadUpdates: [
+            ...ticket.inlineMemory.threadUpdates,
+            {
+              triggerId: newId("clr"),
+              message: autoLine,
+              createdAt: clarTs,
+            },
+          ],
+          activeHint: autoLine,
+        },
+        updatedAt: clarTs,
+      };
+      await this.stateStore.saveTicket(autoResumed);
+      this.emitEvent({
+        type: "ticket_updated",
+        ticket: autoResumed,
+        timestamp: clarTs,
+      });
+      return;
+    }
+
     let reviewApproved: boolean | undefined;
     let reviewReport: ReviewReport | undefined;
     let reviewReportArtifact: SpillArtifact | undefined;
@@ -2995,6 +3345,7 @@ export class SuperWorkKernel {
           nativeSessionId: discoveredSessionId,
           costUsd: stageCostUsd,
           spans: spans.toArray(),
+          toolProfile,
           completedAt: nowIso(),
           summary: failedSummary,
         };
@@ -3115,6 +3466,7 @@ export class SuperWorkKernel {
       nativeSessionId: discoveredSessionId,
       costUsd: stageCostUsd,
       spans: spans.toArray(),
+      toolProfile,
       completedAt: nowIso(),
       summary: noteSummary,
     };
@@ -3478,6 +3830,7 @@ export class SuperWorkKernel {
       status: "completed",
       nativeSessionId: discoveredSessionId,
       costUsd: stageCostUsd,
+      toolProfile: buildStageToolProfile(collectedEvents),
       completedAt: nowIso(),
       summary: `${summary}\nLocked ${testFiles.length} spec test file(s).`,
     };
@@ -5313,5 +5666,142 @@ export class SuperWorkKernel {
 
   async listSystemBackups(): Promise<BackupArchiveInfo[]> {
     return listSystemBackups(this.dataDir);
+  }
+
+  // --- v1.1.0 A.2 Batch Inbox Triage & Chief-of-Staff Advisor ---
+  async batchResolveInbox(input: BatchResolveInboxInput): Promise<BatchResolveInboxResult> {
+    const pendingItems = await this.stateStore.listInboxItems({
+      repoId: input.repoId,
+      status: "pending",
+    });
+    const wantedIds = input.inboxIds?.length ? new Set(input.inboxIds) : null;
+    const wantedKinds = input.kinds?.length ? new Set(input.kinds) : null;
+    const lowRiskKinds = new Set([
+      "observe_proposal",
+      "outbox_signoff",
+      "clarification_request",
+    ]);
+
+    const candidates = pendingItems.filter((item) => {
+      if (wantedIds && !wantedIds.has(item.id)) return false;
+      if (wantedKinds && !wantedKinds.has(item.kind)) return false;
+      return true;
+    });
+
+    const tickets = await this.stateStore.listTickets({ repoId: input.repoId });
+    const ticketsById = new Map(tickets.map((t) => [t.id, t]));
+
+    let resolvedCount = 0;
+    let skippedCount = 0;
+    const results: BatchResolveInboxResult["results"] = [];
+
+    for (const item of candidates) {
+      if (input.onlyLowRisk) {
+        const tkt = ticketsById.get(item.ticketId);
+        if (!lowRiskKinds.has(item.kind) || tkt?.riskAssessment?.level === "high") {
+          skippedCount += 1;
+          continue;
+        }
+      }
+      try {
+        const resolved = await this.resolveInboxItem(item.id, input.decision, input.note, {
+          deliveryAction: input.deliveryAction,
+          saveToPlaybook: false,
+        });
+        resolvedCount += 1;
+        results.push({
+          inboxId: item.id,
+          ticketId: resolved.ticket.id,
+          status: resolved.item.status,
+        });
+      } catch {
+        skippedCount += 1;
+      }
+    }
+
+    return { resolvedCount, skippedCount, results };
+  }
+
+  async askChief(input: ChiefAskInput): Promise<ChiefAskResult> {
+    const [allRepos, repo, tickets, inboxItems] = await Promise.all([
+      this.stateStore.listRepos(),
+      input.repoId ? this.stateStore.getRepo(input.repoId) : Promise.resolve(null),
+      this.stateStore.listTickets(),
+      this.stateStore.listInboxItems(),
+    ]);
+    const effectiveRepo = repo ?? (allRepos.length === 1 ? allRepos[0] : undefined);
+    const [metrics, memoryHits, probeContext] = await Promise.all([
+      this.stateStore.getMetricsSummary(effectiveRepo?.id, utcTodayString()),
+      this.stateStore.searchMemory(input.question, 6, effectiveRepo?.id),
+      effectiveRepo && this.workspace.runRepoPreProbe
+        ? this.workspace
+            .runRepoPreProbe(
+              effectiveRepo.rootPath,
+              input.question,
+              effectiveRepo.forbiddenPaths,
+            )
+            .catch(() => undefined)
+        : Promise.resolve(undefined),
+    ]);
+
+    return runChiefOfStaffQuery({
+      question: input.question,
+      repo: effectiveRepo,
+      allRepos,
+      tickets,
+      inboxItems,
+      metrics,
+      memoryHits,
+      probeContext,
+      llm: this.llm,
+      probeExecutor: effectiveRepo ? this.createRepoProbeExecutor(effectiveRepo) : undefined,
+    });
+  }
+
+  // --- v1.1.0 D.1 Golden Eval Suite, Atomic Backup Restore & Knowledge Bundle ---
+  async createEvalCaseFromTicket(ticketId: string): Promise<EvalCase> {
+    return createEvalCaseFromTicketOp(this.coordinatorCtx(), ticketId);
+  }
+
+  async listEvalCases(repoId?: string): Promise<EvalCase[]> {
+    return this.stateStore.listEvalCases ? this.stateStore.listEvalCases(repoId) : [];
+  }
+
+  async deleteEvalCase(id: string): Promise<boolean> {
+    return this.stateStore.deleteEvalCase ? this.stateStore.deleteEvalCase(id) : false;
+  }
+
+  async runEvalCase(input: {
+    evalCaseId: string;
+    engines?: WorkerEngineId[];
+    maxBudgetUsd?: number;
+  }): Promise<EvalRunRecord> {
+    return runEvalCaseOp(this.coordinatorCtx(), input);
+  }
+
+  async listEvalRuns(filter?: {
+    repoId?: string;
+    evalCaseId?: string;
+    limit?: number;
+  }): Promise<EvalRunRecord[]> {
+    return this.stateStore.listEvalRuns ? this.stateStore.listEvalRuns(filter) : [];
+  }
+
+  async restoreSystemBackup(
+    backupIdOrFilename: string,
+    options?: { force?: boolean },
+  ): Promise<BackupRestoreResult> {
+    return restoreSystemBackupOp(this.coordinatorCtx(), backupIdOrFilename, options);
+  }
+
+  async exportRepoKnowledgeBundle(repoId: string): Promise<RepoKnowledgeBundle> {
+    return exportRepoKnowledgeBundleOp(this.coordinatorCtx(), repoId);
+  }
+
+  async importRepoKnowledgeBundle(
+    repoId: string,
+    bundle: RepoKnowledgeBundle,
+  ): Promise<ImportKnowledgeBundleResult> {
+    return importRepoKnowledgeBundleOp(this.coordinatorCtx(), repoId, bundle);
   }
 }

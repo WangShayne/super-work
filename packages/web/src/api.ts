@@ -1,7 +1,10 @@
 import type {
   BackupArchiveInfo,
+  BackupRestoreResult,
+  BatchResolveInboxResult,
   CasebookEntry,
   ChainOfRecall,
+  ChiefAskResult,
   CliScanReport,
   DagNodeMutationInput,
   DeliveryChannel,
@@ -11,7 +14,10 @@ import type {
   EpicDecompositionPlan,
   EpicDeliveryMode,
   EpicSubtaskSpec,
+  EvalCase,
+  EvalRunRecord,
   HealthResponse,
+  ImportKnowledgeBundleResult,
   InboxItem,
   LlmConnectionTestResult,
   LlmProviderPreset,
@@ -27,6 +33,7 @@ import type {
   ReasoningEffort,
   RepoConfig,
   RepoContractFile,
+  RepoKnowledgeBundle,
   RepoMetricsSummary,
   RestoreCheckpointInput,
   ReviewCommentStatus,
@@ -318,6 +325,24 @@ export const api = {
       method: "POST",
     }),
 
+  restoreBackup: (backupId: string, force = false) =>
+    request<BackupRestoreResult>(`/api/system/backups/${encodeURIComponent(backupId)}/restore`, {
+      method: "POST",
+      body: JSON.stringify({ force }),
+    }),
+
+  exportKnowledgeBundle: (repoId: string) =>
+    request<{ bundle: RepoKnowledgeBundle }>(`/api/repos/${encodeURIComponent(repoId)}/knowledge-bundle`),
+
+  importKnowledgeBundle: (repoId: string, bundle: RepoKnowledgeBundle) =>
+    request<ImportKnowledgeBundleResult>(
+      `/api/repos/${encodeURIComponent(repoId)}/knowledge-bundle/import`,
+      {
+        method: "POST",
+        body: JSON.stringify({ bundle }),
+      },
+    ),
+
   analyzeRepoImpact: (repoId: string, paths: string[]) =>
     request<{ report: SymbolImpactReport }>(`/api/repos/${encodeURIComponent(repoId)}/impact`, {
       method: "POST",
@@ -391,6 +416,15 @@ export const api = {
     request<{ ticket: Ticket }>(`/api/tickets/${ticketId}/message`, {
       method: "POST",
       body: JSON.stringify({ message }),
+    }),
+
+  steerTicket: (
+    ticketId: string,
+    payload: { instruction: string; preferredEngine?: EnginePreference },
+  ) =>
+    request<{ ticket: Ticket }>(`/api/tickets/${encodeURIComponent(ticketId)}/steer`, {
+      method: "POST",
+      body: JSON.stringify(payload),
     }),
 
   cancelTicket: (ticketId: string) =>
@@ -479,6 +513,7 @@ export const api = {
       expandMandate?: boolean;
       budgetIncreaseUsd?: number;
       arenaWinnerId?: string;
+      selectedOption?: string;
     },
   ) =>
     request<{ item: InboxItem; ticket: Ticket }>(`/api/inbox/${id}/resolve`, {
@@ -490,7 +525,58 @@ export const api = {
         expandMandate: options?.expandMandate,
         budgetIncreaseUsd: options?.budgetIncreaseUsd,
         arenaWinnerId: options?.arenaWinnerId,
+        selectedOption: options?.selectedOption,
       }),
+    }),
+
+  batchResolveInbox: (payload: {
+    inboxIds?: string[];
+    repoId?: string;
+    onlyLowRisk?: boolean;
+    decision: "approved" | "rejected";
+    note?: string;
+  }) =>
+    request<BatchResolveInboxResult>("/api/inbox/batch-resolve", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  askChief: (payload: { repoId?: string; question: string }) =>
+    request<ChiefAskResult>("/api/chief/ask", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  listEvalCases: (repoId?: string) =>
+    request<{ cases: EvalCase[] }>(
+      repoId ? `/api/evals/cases?repoId=${encodeURIComponent(repoId)}` : "/api/evals/cases",
+    ),
+
+  saveEvalCaseFromTicket: (ticketId: string) =>
+    request<{ evalCase: EvalCase }>(`/api/evals/cases/from-ticket/${encodeURIComponent(ticketId)}`, {
+      method: "POST",
+      body: "{}",
+    }),
+
+  deleteEvalCase: (id: string) =>
+    request<{ ok: boolean }>(`/api/evals/cases/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  listEvalRuns: (repoId?: string, evalCaseId?: string) => {
+    const params = new URLSearchParams();
+    if (repoId) params.set("repoId", repoId);
+    if (evalCaseId) params.set("evalCaseId", evalCaseId);
+    const qs = params.toString();
+    return request<{ runs: EvalRunRecord[] }>(qs ? `/api/evals/runs?${qs}` : "/api/evals/runs");
+  },
+
+  runEval: (payload: {
+    evalCaseId: string;
+    engines?: WorkerEngineId[];
+    maxBudgetUsd?: number;
+  }) =>
+    request<{ evalRun: EvalRunRecord }>("/api/evals/run", {
+      method: "POST",
+      body: JSON.stringify(payload),
     }),
 
   getRecall: (ticketId: string) => request<{ chain: ChainOfRecall }>(`/api/tickets/${ticketId}/recall`),

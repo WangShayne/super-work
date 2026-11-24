@@ -159,10 +159,42 @@ export interface EpicSubtaskSpec {
   acceptanceCriteria: string[];
 }
 
+export type ControlProbeToolName =
+  | "search_symbols"
+  | "read_file_slice"
+  | "grep_literals"
+  | "git_recent_commits";
+
+export interface ControlProbeRequest {
+  tool: ControlProbeToolName;
+  path?: string;
+  query?: string;
+  startLine?: number;
+  endLine?: number;
+  limit?: number;
+}
+
+export interface ControlProbeStep {
+  step: number;
+  tool: ControlProbeToolName;
+  inputSummary: string;
+  outputSummary: string;
+  matchedPaths: string[];
+  durationMs: number;
+}
+
+export interface RepoProbeContextPack {
+  deterministicSummary: string;
+  matchedFiles: string[];
+  recentCommits: string[];
+  probeSteps: ControlProbeStep[];
+}
+
 export interface EpicDecompositionPlan {
   epicTitle: string;
   summary: string;
   subtasks: EpicSubtaskSpec[];
+  probeSteps?: ControlProbeStep[];
 }
 
 export interface SharedPlaybookRuleSpec {
@@ -497,6 +529,39 @@ export interface BackupArchiveInfo {
   dbIntegrityOk?: boolean;
 }
 
+export interface BackupRestoreResult {
+  ok: boolean;
+  restoredBackup: BackupArchiveInfo;
+  preRestoreSafetyBackup?: BackupArchiveInfo;
+  integrityDetail: string;
+  restoredAt: string;
+}
+
+export interface RepoKnowledgeBundle {
+  version: 1;
+  exportedAt: string;
+  sourceRepoName: string;
+  playbook: Array<{ rule: string; scopePaths: string[]; pinned: boolean }>;
+  casebook: Array<{
+    title: string;
+    goalSummary: string;
+    solutionSummary: string;
+    pitfallsAndFixes?: string;
+    changedFiles: string[];
+    scopePaths: string[];
+    exportedSymbols: string[];
+    reverted: boolean;
+  }>;
+  blueprints: TaskBlueprint[];
+}
+
+export interface ImportKnowledgeBundleResult {
+  importedPlaybook: number;
+  importedCasebook: number;
+  importedBlueprints: number;
+  skippedDuplicates: number;
+}
+
 export interface RepoConfig {
   id: string;
   name: string;
@@ -642,6 +707,8 @@ export interface Ticket {
   riskAssessment?: TicketRiskAssessment;
   conflictResolutionCount?: number;
   conflictContext?: ConflictSemanticContext;
+  clarificationCount?: number;
+  steerCount?: number;
   routineId?: string;
   epicReplanCount?: number;
   epicReplanHistory?: EpicReplanProposal[];
@@ -659,6 +726,20 @@ export interface Ticket {
 
 export type StageRunStatus = "running" | "completed" | "failed" | "aborted";
 
+export interface ToolUsageStat {
+  toolName: string;
+  calls: number;
+  errors: number;
+  approxDurationMs: number;
+  sampleError?: string;
+}
+
+export interface StageToolProfile {
+  totalToolCalls: number;
+  totalToolErrors: number;
+  byTool: ToolUsageStat[];
+}
+
 export interface StageRun {
   id: string;
   ticketId: string;
@@ -672,6 +753,8 @@ export interface StageRun {
   summary?: string;
   spillTranscriptId?: string;
   spans?: StageSpan[];
+  toolProfile?: StageToolProfile;
+  steered?: boolean;
 }
 
 export type ArtifactKind =
@@ -705,7 +788,8 @@ export type InboxItemKind =
   | "budget_cap"
   | "pr_followup"
   | "arena_tiebreak"
-  | "epic_replan";
+  | "epic_replan"
+  | "clarification_request";
 
 export type InboxItemStatus = "pending" | "approved" | "rejected";
 
@@ -743,6 +827,18 @@ export interface OutboxEntry {
   updatedAt: string;
 }
 
+export interface WorkerClarificationRequest {
+  question: string;
+  options: string[];
+  recommendedOption: string;
+  context?: string;
+}
+
+export interface SteerTicketInput {
+  instruction: string;
+  preferredEngine?: EnginePreference;
+}
+
 export type WorkerStreamEvent =
   | { type: "session_started"; nativeSessionId: string; timestamp: string }
   | { type: "thought"; text: string; timestamp: string }
@@ -761,6 +857,7 @@ export type WorkerStreamEvent =
         changedFiles?: string[];
         verificationPassed?: boolean;
         reviewFindings?: ReviewFinding[];
+        clarificationRequest?: WorkerClarificationRequest;
       };
       timestamp: string;
     }
@@ -813,6 +910,7 @@ export interface WatchdogDecision {
   reason: string;
   hint?: string;
   targetEngine?: WorkerEngineId;
+  probeSteps?: ControlProbeStep[];
 }
 
 export interface TriageProposal {
@@ -824,6 +922,7 @@ export interface TriageProposal {
   allowedPaths: string[];
   acceptanceCriteria: string[];
   priority: number;
+  probeSteps?: ControlProbeStep[];
 }
 
 export interface ChainOfRecall {
@@ -924,6 +1023,12 @@ export type KernelEvent =
       type: "review_comment_updated";
       ticketId: string;
       comments: TicketReviewComment[];
+      timestamp: string;
+    }
+  | {
+      type: "eval_run_updated";
+      repoId: string;
+      evalRun: EvalRunRecord;
       timestamp: string;
     };
 
@@ -1119,6 +1224,102 @@ export interface SpecClarificationResult {
   matchedCaseTitles: string[];
   questions: SpecClarificationQuestion[];
   rationale: string;
+  probeSteps?: ControlProbeStep[];
+}
+
+export type ChiefActionKind =
+  | "dispatch_ticket"
+  | "batch_resolve_inbox"
+  | "steer_ticket"
+  | "run_doctor"
+  | "create_backup"
+  | "open_ticket";
+
+export interface ChiefActionSuggestion {
+  id: string;
+  kind: ChiefActionKind;
+  label: string;
+  description: string;
+  payload: Record<string, unknown>;
+}
+
+export interface ChiefAskInput {
+  repoId?: string;
+  question: string;
+}
+
+export interface ChiefAskResult {
+  answer: string;
+  highlights: string[];
+  probeSteps?: ControlProbeStep[];
+  suggestedActions: ChiefActionSuggestion[];
+  generatedAt: string;
+}
+
+export interface BatchResolveInboxInput {
+  inboxIds?: string[];
+  repoId?: string;
+  kinds?: InboxItemKind[];
+  onlyLowRisk?: boolean;
+  decision: "approved" | "rejected";
+  note?: string;
+  deliveryAction?: "local_merge" | "push_and_create_pr";
+}
+
+export interface BatchResolveInboxResult {
+  resolvedCount: number;
+  skippedCount: number;
+  results: Array<{ inboxId: string; ticketId: string; status: InboxItemStatus }>;
+}
+
+export interface EvalCase {
+  id: string;
+  repoId: string;
+  sourceTicketId?: string;
+  title: string;
+  description: string;
+  baseCommitSha: string;
+  allowedPaths: string[];
+  forbiddenPaths: string[];
+  tddMode?: boolean;
+  lockedTestPaths?: string[];
+  verificationCommands: string[];
+  smokeCheck?: SmokeCheckConfig;
+  referenceMetrics?: {
+    durationMs?: number;
+    costUsd?: number;
+    engine?: WorkerEngineId;
+    addedLines?: number;
+    deletedLines?: number;
+  };
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EvalCandidateRun {
+  engine: WorkerEngineId;
+  passed: boolean;
+  verificationSummary: string;
+  durationMs: number;
+  costUsd: number;
+  changedFiles: string[];
+  addedLines: number;
+  deletedLines: number;
+  riskScore: number;
+  error?: string;
+}
+
+export interface EvalRunRecord {
+  id: string;
+  evalCaseId: string;
+  repoId: string;
+  status: "running" | "completed" | "failed";
+  engines: WorkerEngineId[];
+  results: EvalCandidateRun[];
+  maxBudgetUsd: number;
+  totalCostUsd: number;
+  startedAt: string;
+  completedAt?: string;
 }
 
 export interface EngineMetricRow {

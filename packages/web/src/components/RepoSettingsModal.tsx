@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -46,6 +46,7 @@ import type {
   PreviewSession,
   ReasoningEffort,
   RepoConfig,
+  RepoKnowledgeBundle,
   SandboxMode,
   SmokeCheckConfig,
   SmokeTriggerMode,
@@ -173,6 +174,9 @@ export function RepoSettingsModal({
   const [casebook, setCasebook] = useState<CasebookEntry[]>([]);
   const [casebookLoading, setCasebookLoading] = useState(false);
   const [casebookQuery, setCasebookQuery] = useState("");
+  const [bundleBusy, setBundleBusy] = useState(false);
+  const [bundleNotice, setBundleNotice] = useState<string | null>(null);
+  const bundleInputRef = useRef<HTMLInputElement | null>(null);
 
   const loadPlaybook = async (repoId: string) => {
     setPlaybookLoading(true);
@@ -493,6 +497,56 @@ export function RepoSettingsModal({
     await api.deleteCasebookEntry(entryId);
     await loadCasebook(repo.id, casebookQuery.trim() || undefined);
     onRefresh?.();
+  };
+
+  const handleExportBundle = async () => {
+    setBundleBusy(true);
+    setBundleNotice(null);
+    try {
+      const { bundle } = await api.exportKnowledgeBundle(repo.id);
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${repo.name.replace(/[^a-zA-Z0-9._-]+/g, "-")}-knowledge-bundle.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setBundleNotice(
+        `Exported ${bundle.playbook.length} rule(s), ${bundle.casebook.length} case(s), ${bundle.blueprints.length} blueprint(s)`,
+      );
+    } catch (err) {
+      setBundleNotice(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBundleBusy(false);
+    }
+  };
+
+  const handleImportBundleFile = async (file: File) => {
+    setBundleBusy(true);
+    setBundleNotice(null);
+    try {
+      const rawText = await file.text();
+      const parsed = JSON.parse(rawText) as
+        | RepoKnowledgeBundle
+        | { bundle?: RepoKnowledgeBundle };
+      const bundle =
+        "bundle" in parsed && parsed.bundle ? parsed.bundle : (parsed as RepoKnowledgeBundle);
+      const res = await api.importKnowledgeBundle(repo.id, bundle);
+      await Promise.all([
+        loadPlaybook(repo.id),
+        loadCasebook(repo.id, casebookQuery.trim() || undefined),
+      ]);
+      onRefresh?.();
+      setBundleNotice(
+        `Imported +${res.importedPlaybook} rules, +${res.importedCasebook} cases, +${res.importedBlueprints} blueprints (skipped ${res.skippedDuplicates})`,
+      );
+    } catch (err) {
+      setBundleNotice(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBundleBusy(false);
+    }
   };
 
   const toggleFallbackEngine = (eng: WorkerEngineId) => {
@@ -1187,24 +1241,55 @@ export function RepoSettingsModal({
           <div className="flex flex-col flex-1 min-h-0 overflow-hidden text-xs">
             <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                {pruneNotice ? (
-                  <span className="text-[11px] text-emerald-300">{pruneNotice}</span>
+                {bundleNotice || pruneNotice ? (
+                  <span className="text-[11px] text-emerald-300">{bundleNotice ?? pruneNotice}</span>
                 ) : (
                   <span className="text-[11px] text-zinc-500">
                     {playbook.length} rule(s)
                   </span>
                 )}
-                <button
-                  type="button"
-                  disabled={pruningPlaybook || prunableCount === 0}
-                  onClick={() => void handlePrunePlaybook()}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-amber-500/35 bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 text-[11px] font-medium disabled:opacity-40 transition"
-                >
-                  <Sparkles className="w-3 h-3" />
-                  {pruningPlaybook
-                    ? t("modal.repoSettings.playbookPruning")
-                    : `${t("modal.repoSettings.playbookPruneBtn")} (${prunableCount})`}
-                </button>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <input
+                    ref={bundleInputRef}
+                    type="file"
+                    accept=".json,application/json"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      e.target.value = "";
+                      if (f) void handleImportBundleFile(f);
+                    }}
+                  />
+                  <button
+                    type="button"
+                    disabled={bundleBusy}
+                    onClick={() => void handleExportBundle()}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 text-[11px] disabled:opacity-40 transition"
+                  >
+                    <Download className="w-3 h-3" />
+                    {t("bundle.exportBtn")}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={bundleBusy}
+                    onClick={() => bundleInputRef.current?.click()}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 text-[11px] disabled:opacity-40 transition"
+                  >
+                    <Upload className="w-3 h-3" />
+                    {t("bundle.importBtn")}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={pruningPlaybook || prunableCount === 0}
+                    onClick={() => void handlePrunePlaybook()}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-amber-500/35 bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 text-[11px] font-medium disabled:opacity-40 transition"
+                  >
+                    <Sparkles className="w-3 h-3" />
+                    {pruningPlaybook
+                      ? t("modal.repoSettings.playbookPruning")
+                      : `${t("modal.repoSettings.playbookPruneBtn")} (${prunableCount})`}
+                  </button>
+                </div>
               </div>
 
               <form onSubmit={(e) => void handleAddPlaybookRule(e)} className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3 space-y-2">

@@ -3,6 +3,7 @@ import type {
   PipelineTemplateId,
   PlaybookEntry,
   RepoConfig,
+  RepoProbeContextPack,
   SpecClarificationQuestion,
   SpecClarificationResult,
   SymbolImpactReport,
@@ -88,6 +89,7 @@ export function buildHeuristicSpecClarification(input: {
   casebookEntries?: CasebookEntry[];
   playbookEntries?: PlaybookEntry[];
   symbolImpact?: SymbolImpactReport;
+  probeContext?: RepoProbeContextPack;
 }): SpecClarificationResult {
   const combined = `${input.title}\n${input.description}`.trim();
   const lower = combined.toLowerCase();
@@ -116,6 +118,7 @@ export function buildHeuristicSpecClarification(input: {
   const matchedFiles = Array.from(
     new Set([
       ...explicitMatches.slice(0, 6),
+      ...(input.probeContext?.matchedFiles.slice(0, 6) ?? []),
       ...scoredPaths.slice(0, 8).map((s) => s.path),
       ...(input.symbolImpact?.targetFiles.slice(0, 6) ?? []),
     ]),
@@ -134,6 +137,7 @@ export function buildHeuristicSpecClarification(input: {
   const suggestedScopes = Array.from(
     new Set([
       ...explicitMatches.map(toScopePattern),
+      ...(input.probeContext?.matchedFiles.slice(0, 4).map(toScopePattern) ?? []),
       ...scoredPaths.slice(0, 4).map((s) => toScopePattern(s.path)),
       ...matchedCases.flatMap((c) => c.entry.scopePaths).filter((s) => s !== "**"),
     ]),
@@ -262,6 +266,7 @@ export function buildHeuristicSpecClarification(input: {
     matchedCaseTitles: matchedCases.map((c) => c.entry.title),
     questions: questions.slice(0, 3),
     rationale: rationaleParts.join(" · "),
+    ...(input.probeContext?.probeSteps.length ? { probeSteps: input.probeContext.probeSteps } : {}),
   };
 }
 

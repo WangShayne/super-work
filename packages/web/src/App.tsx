@@ -45,6 +45,11 @@ const AddRepoModal = lazy(() =>
 const WorktreeManagerModal = lazy(() =>
   import("./components/Modals.tsx").then((m) => ({ default: m.WorktreeManagerModal })),
 );
+const CommandPaletteModal = lazy(() =>
+  import("./components/CommandPaletteModal.tsx").then((m) => ({
+    default: m.CommandPaletteModal,
+  })),
+);
 
 type MainTab = "inbox" | "board" | "routines" | "metrics";
 
@@ -70,6 +75,7 @@ export function App() {
     "runtime" | "contract" | "playbook" | "casebook"
   >("runtime");
   const [worktreesOpen, setWorktreesOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [setupStatus, setSetupStatus] = useState<PublicSetupStatus | null>(null);
   const [setupOpen, setSetupOpen] = useState(false);
   const [setupInitialTab, setSetupInitialTab] = useState<"config" | "doctor">("config");
@@ -114,6 +120,17 @@ export function App() {
   useEffect(() => {
     void refreshAll(selectedRepoId || undefined);
   }, [selectedRepoId, refreshAll]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setCommandPaletteOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   // Subscribe to real-time Kernel SSE bus
   useEffect(() => {
@@ -166,6 +183,7 @@ export function App() {
       "worktrees_gc",
       "verification_completed",
       "review_comment_updated",
+      "eval_run_updated",
     ];
 
     for (const name of eventNames) {
@@ -249,7 +267,12 @@ export function App() {
     decision: "approved" | "rejected",
     note?: string,
     deliveryAction?: "local_merge" | "push_and_create_pr",
-    options?: { expandMandate?: boolean; budgetIncreaseUsd?: number; arenaWinnerId?: string },
+    options?: {
+      expandMandate?: boolean;
+      budgetIncreaseUsd?: number;
+      arenaWinnerId?: string;
+      selectedOption?: string;
+    },
   ) => {
     await api.resolveInbox(id, decision, note, deliveryAction, options);
     await refreshAll(selectedRepoId || undefined);
@@ -283,6 +306,7 @@ export function App() {
           setSetupInitialTab("config");
           setSetupOpen(true);
         }}
+        onOpenCommandPalette={() => setCommandPaletteOpen(true)}
       />
 
       {/* Primary View Switcher */}
@@ -357,9 +381,11 @@ export function App() {
           <InboxView
             items={inboxItems}
             ticketsById={ticketsById}
+            selectedRepoId={selectedRepoId || undefined}
             totalTicketCount={tickets.length}
             runningTicketCount={runningTicketCount}
             onResolve={handleResolveInbox}
+            onRefresh={() => void refreshAll(selectedRepoId || undefined)}
             onInspectTicket={(id) => setInspectedTicketId(id)}
             onOpenDispatch={activeRepo ? () => setDispatchOpen(true) : undefined}
             onSwitchToBoard={() => setActiveTab("board")}
@@ -395,7 +421,11 @@ export function App() {
           </Suspense>
         ) : (
           <Suspense fallback={null}>
-            <MetricsView metrics={metrics} repo={activeRepo} />
+            <MetricsView
+              metrics={metrics}
+              repo={activeRepo}
+              availableEngines={health?.availableEngines ?? ["mock"]}
+            />
           </Suspense>
         )}
       </main>
@@ -491,6 +521,27 @@ export function App() {
             setSetupStatus(next);
             await refreshAll(selectedRepoId || undefined);
           }}
+        />
+
+        <CommandPaletteModal
+          open={commandPaletteOpen}
+          onClose={() => setCommandPaletteOpen(false)}
+          repos={repos}
+          selectedRepoId={selectedRepoId}
+          tickets={tickets}
+          inboxItems={inboxItems}
+          onSelectRepo={(id) => setSelectedRepoId(id)}
+          onSwitchTab={(tab) => setActiveTab(tab)}
+          onInspectTicket={(id) => setInspectedTicketId(id)}
+          onOpenDispatch={() => {
+            if (activeRepo) setDispatchOpen(true);
+            else setAddRepoOpen(true);
+          }}
+          onOpenDoctor={() => {
+            setSetupInitialTab("doctor");
+            setSetupOpen(true);
+          }}
+          onRefresh={() => void refreshAll(selectedRepoId || undefined)}
         />
       </Suspense>
     </div>

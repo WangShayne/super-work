@@ -1,6 +1,7 @@
-import type { ControlPlaneLLM, WatchdogConfig } from "./ports.ts";
+import type { ControlPlaneLLM, RepoProbeExecutor, WatchdogConfig } from "./ports.ts";
 import type {
   Mandate,
+  RepoProbeContextPack,
   StageRun,
   Ticket,
   WatchdogDecision,
@@ -191,6 +192,8 @@ export class TwoTierWatchdog {
     signal: WatchdogSignal;
     recentEvents: WorkerStreamEvent[];
     availableEngines: WorkerEngineId[];
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
   }): Promise<WatchdogDecision> {
     if (input.signal.kind === "hard_budget_exceeded") {
       return {
@@ -212,6 +215,8 @@ export class TwoTierWatchdog {
       signal: input.signal,
       recentEvents: input.recentEvents,
       availableEngines: input.availableEngines,
+      probeContext: input.probeContext,
+      probeExecutor: input.probeExecutor,
     });
   }
 

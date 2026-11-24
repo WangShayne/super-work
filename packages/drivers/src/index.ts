@@ -1,6 +1,7 @@
 export * from "./storage/sqlite-state-store.ts";
 export * from "./storage/fs-artifact-store.ts";
 export * from "./workspace/git-worktree-provider.ts";
+export * from "./workspace/readonly-repo-prober.ts";
 export * from "./workspace/repo-structure-scanner.ts";
 export * from "./workspace/symbol-graph-scanner.ts";
 export * from "./sandbox/os-sandbox.ts";

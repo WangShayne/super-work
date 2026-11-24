@@ -11,12 +11,17 @@ import {
 } from "@super-work/core";
 import type {
   ControlPlaneLLM,
+  ControlProbeRequest,
+  ControlProbeStep,
+  ControlProbeToolName,
   EpicDecompositionPlan,
   LlmProviderPreset,
   MemorySearchHit,
   PipelineTemplateId,
   ReasoningEffort,
   RepoConfig,
+  RepoProbeContextPack,
+  RepoProbeExecutor,
   SpecClarificationResult,
   StageRun,
   SystemSetupConfig,
@@ -218,6 +223,86 @@ const HANDOVER_DIGEST_SCHEMA = {
   required: ["summary"],
 };
 
+const CHIEF_ANSWER_SCHEMA = {
+  type: "object",
+  properties: {
+    answer: { type: "string" },
+    highlights: { type: "array", items: { type: "string" } },
+  },
+  required: ["answer"],
+};
+
+const PROBE_PROMPT_GUIDE = [
+  "Read-Only Probe Protocol (max 2 rounds, zero write risk):",
+  "If you need to inspect specific files, symbols, literals, or git history before deciding,",
+  'reply with JSON {"probeRequests":[{"tool":"search_symbols"|"read_file_slice"|"grep_literals"|"git_recent_commits","path"?:string,"query"?:string,"startLine"?:number,"endLine"?:number,"limit"?:number}]} (max 3 calls/round).',
+  "Once you have enough evidence, reply with ONLY the final schema JSON.",
+].join(" ");
+
+const VALID_PROBE_TOOLS = new Set<ControlProbeToolName>([
+  "search_symbols",
+  "read_file_slice",
+  "grep_literals",
+  "git_recent_commits",
+]);
+
+export async function runWithOptionalProbes<T extends object>(input: {
+  probeContext?: RepoProbeContextPack;
+  probeExecutor?: RepoProbeExecutor;
+  maxRounds?: number;
+  probeBudgetMs?: number;
+  invoke: (probeTranscript: string, allowProbes: boolean) => Promise<T & { probeRequests?: unknown[] }>;
+}): Promise<{ result: T; probeSteps: ControlProbeStep[] }> {
+  const probeSteps: ControlProbeStep[] = [...(input.probeContext?.probeSteps ?? [])];
+  const maxRounds = input.probeExecutor ? (input.maxRounds ?? 2) : 0;
+  const deadline = Date.now() + (input.probeBudgetMs ?? 12_000);
+  const findings: string[] = [];
+
+  for (let round = 0; round <= maxRounds; round += 1) {
+    const canProbe = Boolean(input.probeExecutor) && round < maxRounds && Date.now() < deadline;
+    const raw = await input.invoke(findings.join("\n\n"), canProbe);
+    const reqs = canProbe && Array.isArray(raw.probeRequests) ? raw.probeRequests.slice(0, 3) : [];
+
+    if (reqs.length > 0 && input.probeExecutor) {
+      let ranAny = false;
+      for (const candidate of reqs) {
+        if (!candidate || typeof candidate !== "object") continue;
+        const obj = candidate as Record<string, unknown>;
+        const tool = String(obj.tool ?? "") as ControlProbeToolName;
+        if (!VALID_PROBE_TOOLS.has(tool)) continue;
+        const req: ControlProbeRequest = {
+          tool,
+          path: typeof obj.path === "string" ? obj.path : undefined,
+          query: typeof obj.query === "string" ? obj.query : undefined,
+          startLine: typeof obj.startLine === "number" ? obj.startLine : undefined,
+          endLine: typeof obj.endLine === "number" ? obj.endLine : undefined,
+          limit: typeof obj.limit === "number" ? obj.limit : undefined,
+        };
+        const step = await input.probeExecutor(req).catch((err) => ({
+          step: probeSteps.length + 1,
+          tool,
+          inputSummary: req.path ?? req.query ?? "",
+          outputSummary: `Probe error: ${err instanceof Error ? err.message : String(err)}`,
+          matchedPaths: [],
+          durationMs: 1,
+        }));
+        const numbered: ControlProbeStep = { ...step, step: round + 1 };
+        probeSteps.push(numbered);
+        findings.push(
+          `[Round ${round + 1} ${numbered.tool}(${numbered.inputSummary})]\n${numbered.outputSummary}`,
+        );
+        ranAny = true;
+      }
+      if (ranAny) continue;
+    }
+
+    return { result: raw, probeSteps };
+  }
+
+  const finalRes = await input.invoke(findings.join("\n\n"), false);
+  return { result: finalRes, probeSteps };
+}
+
 export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
   readonly providerName: string;
 
@@ -233,34 +318,47 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
     repoStructure?: string;
     playbookRules?: string;
     conventions?: string;
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
   }): Promise<TriageProposal> {
-    const sys = [
-      "You are the Super-agent MasterAssessor / Router.",
-      "Decide whether an incoming repository event warrants creating a coding Ticket.",
-      "Prefer exact module paths from repoStructure for allowedPaths when available.",
-      "Output ONLY valid JSON matching the schema:",
-      JSON.stringify(TRIAGE_SCHEMA),
-    ].join("\n");
+    const { result: parsed, probeSteps } = await runWithOptionalProbes<TriageProposal>({
+      probeContext: input.probeContext,
+      probeExecutor: input.probeExecutor,
+      invoke: async (probeTranscript, allowProbes) => {
+        const sys = [
+          "You are the Super-agent MasterAssessor / Router.",
+          "Decide whether an incoming repository event warrants creating a coding Ticket.",
+          "Prefer exact module paths from repoStructure and probeEvidence for allowedPaths when available.",
+          allowProbes ? PROBE_PROMPT_GUIDE : "",
+          "Output ONLY valid JSON matching the schema:",
+          JSON.stringify(TRIAGE_SCHEMA),
+        ]
+          .filter(Boolean)
+          .join("\n");
 
-    const user = JSON.stringify({
-      repo: {
-        name: input.repo.name,
-        defaultTemplate: input.repo.defaultTemplate,
+        const user = JSON.stringify({
+          repo: {
+            name: input.repo.name,
+            defaultTemplate: input.repo.defaultTemplate,
+          },
+          repoStructure: input.repoStructure,
+          conventions: input.conventions,
+          playbookRules: input.playbookRules,
+          probeEvidence: input.probeContext?.deterministicSummary,
+          extraProbeFindings: probeTranscript || undefined,
+          trigger: {
+            source: input.trigger.source,
+            title: input.trigger.title,
+            rawText: input.trigger.rawText,
+          },
+          activeTicketCount: input.activeTickets.length,
+          relatedMemory: input.relatedMemory.slice(0, 3),
+        });
+        return this.chatJson<TriageProposal>(sys, user);
       },
-      repoStructure: input.repoStructure,
-      conventions: input.conventions,
-      playbookRules: input.playbookRules,
-      trigger: {
-        source: input.trigger.source,
-        title: input.trigger.title,
-        rawText: input.trigger.rawText,
-      },
-      activeTicketCount: input.activeTickets.length,
-      relatedMemory: input.relatedMemory.slice(0, 3),
     });
-
-    const parsed = await this.chatJson<TriageProposal>(sys, user);
-    return normalizeTriageProposal(parsed, input.trigger, input.repo.defaultTemplate);
+    const normalized = normalizeTriageProposal(parsed, input.trigger, input.repo.defaultTemplate);
+    return probeSteps.length > 0 ? { ...normalized, probeSteps } : normalized;
   }
 
   async diagnoseWatchdog(input: {
@@ -269,25 +367,47 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
     signal: WatchdogSignal;
     recentEvents: WorkerStreamEvent[];
     availableEngines: WorkerEngineId[];
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
   }): Promise<WatchdogDecision> {
-    const sys = [
-      "You are the Super-agent L2 Watchdog semantic supervisor.",
-      "Analyze why a coding worker triggered an L1 health alert and choose CONTINUE, INJECT_HINT, SWITCH_ENGINE, or ESCALATE_HUMAN.",
-      "Output ONLY valid JSON matching the schema:",
-      JSON.stringify(WATCHDOG_SCHEMA),
-    ].join("\n");
+    const { result: parsed, probeSteps } = await runWithOptionalProbes<WatchdogDecision>({
+      probeContext: input.probeContext,
+      probeExecutor: input.probeExecutor,
+      invoke: async (probeTranscript, allowProbes) => {
+        const sys = [
+          "You are the Super-agent L2 Watchdog semantic supervisor.",
+          "Analyze why a coding worker triggered an L1 health alert and choose CONTINUE, INJECT_HINT, SWITCH_ENGINE, or ESCALATE_HUMAN.",
+          allowProbes ? PROBE_PROMPT_GUIDE : "",
+          "Output ONLY valid JSON matching the schema:",
+          JSON.stringify(WATCHDOG_SCHEMA),
+        ]
+          .filter(Boolean)
+          .join("\n");
 
-    const user = JSON.stringify({
-      ticket: { id: input.ticket.id, title: input.ticket.title, stageRetries: input.ticket.stageRetries },
-      stage: input.stageRun.stage,
-      currentEngine: input.stageRun.engine,
-      availableEngines: input.availableEngines,
-      signal: input.signal,
-      recentEvents: input.recentEvents.slice(-8),
+        const user = JSON.stringify({
+          ticket: {
+            id: input.ticket.id,
+            title: input.ticket.title,
+            stageRetries: input.ticket.stageRetries,
+            allowedPaths: input.ticket.mandate.allowedPaths,
+          },
+          stage: input.stageRun.stage,
+          currentEngine: input.stageRun.engine,
+          availableEngines: input.availableEngines,
+          signal: input.signal,
+          recentEvents: input.recentEvents.slice(-8),
+          probeEvidence: input.probeContext?.deterministicSummary,
+          extraProbeFindings: probeTranscript || undefined,
+        });
+        return this.chatJson<WatchdogDecision>(sys, user);
+      },
     });
-
-    const parsed = await this.chatJson<WatchdogDecision>(sys, user);
-    return normalizeWatchdogDecision(parsed, input.stageRun.engine, input.availableEngines);
+    const normalized = normalizeWatchdogDecision(
+      parsed,
+      input.stageRun.engine,
+      input.availableEngines,
+    );
+    return probeSteps.length > 0 ? { ...normalized, probeSteps } : normalized;
   }
 
   async planEpicDecomposition(input: {
@@ -299,29 +419,44 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
     playbookRules?: string;
     conventions?: string;
     availableRepos?: Array<{ id: string; name: string; structure?: string }>;
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
   }): Promise<EpicDecompositionPlan> {
-    const sys = [
-      "You are the Super-agent Epic Architect.",
-      "Decompose a complex software requirement into 2-6 focused subtasks with disjoint Mandate allowedPaths matching the real repository structure whenever possible so independent workers execute concurrently in separate worktrees.",
-      "When availableRepos contains multiple repositories and the requirement spans repositories, assign subtask.repoId to the target repo ID and use paths inside that repository.",
-      "Only add dependsOnKeys when a subtask genuinely consumes contracts/APIs built by another subtask.",
-      "Output ONLY valid JSON matching the schema:",
-      JSON.stringify(EPIC_DECOMPOSITION_SCHEMA),
-    ].join("\n");
+    const { result: parsed, probeSteps } = await runWithOptionalProbes<
+      Partial<EpicDecompositionPlan>
+    >({
+      probeContext: input.probeContext,
+      probeExecutor: input.probeExecutor,
+      invoke: async (probeTranscript, allowProbes) => {
+        const sys = [
+          "You are the Super-agent Epic Architect.",
+          "Decompose a complex software requirement into 2-6 focused subtasks with disjoint Mandate allowedPaths matching the real repository structure whenever possible so independent workers execute concurrently in separate worktrees.",
+          "When availableRepos contains multiple repositories and the requirement spans repositories, assign subtask.repoId to the target repo ID and use paths inside that repository.",
+          "Only add dependsOnKeys when a subtask genuinely consumes contracts/APIs built by another subtask.",
+          allowProbes ? PROBE_PROMPT_GUIDE : "",
+          "Output ONLY valid JSON matching the schema:",
+          JSON.stringify(EPIC_DECOMPOSITION_SCHEMA),
+        ]
+          .filter(Boolean)
+          .join("\n");
 
-    const user = JSON.stringify({
-      repo: { id: input.repo.id, name: input.repo.name, baseBranch: input.repo.baseBranch },
-      availableRepos: input.availableRepos,
-      repoStructure: input.repoStructure,
-      conventions: input.conventions,
-      playbookRules: input.playbookRules,
-      title: input.title,
-      description: input.description,
-      defaultTemplate: input.defaultTemplate,
+        const user = JSON.stringify({
+          repo: { id: input.repo.id, name: input.repo.name, baseBranch: input.repo.baseBranch },
+          availableRepos: input.availableRepos,
+          repoStructure: input.repoStructure,
+          conventions: input.conventions,
+          playbookRules: input.playbookRules,
+          probeEvidence: input.probeContext?.deterministicSummary,
+          extraProbeFindings: probeTranscript || undefined,
+          title: input.title,
+          description: input.description,
+          defaultTemplate: input.defaultTemplate,
+        });
+        return this.chatJson<Partial<EpicDecompositionPlan>>(sys, user);
+      },
     });
-
-    const parsed = await this.chatJson<Partial<EpicDecompositionPlan>>(sys, user);
-    return normalizeEpicDecompositionPlan(parsed, input);
+    const normalized = normalizeEpicDecompositionPlan(parsed, input);
+    return probeSteps.length > 0 ? { ...normalized, probeSteps } : normalized;
   }
 
   async distillPlaybookLesson(input: {
@@ -405,23 +540,38 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
     playbookRules?: string;
     casebookContext?: string;
     conventions?: string;
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
   }): Promise<SpecClarificationResult> {
     const baseline = buildHeuristicSpecClarification(input);
-    const sys = [
-      "You are the Super-agent Pre-Flight Spec Architect.",
-      "Clarify an engineering task using real repository paths, conventions, playbook rules, and historical cases.",
-      "Output ONLY valid JSON with keys: recommendedDispatchMode ('single'|'epic'), recommendedTemplate ('fast'|'standard'|'strict'), refinedTitle, refinedDescription, suggestedAllowedPaths (string[]), acceptanceCriteria (string[]), matchedFiles (string[]), questions (array of {id, question, options, recommendedIndex}, max 3), rationale.",
-    ].join("\n");
-    const user = JSON.stringify({
-      repo: { id: input.repo.id, name: input.repo.name, defaultTemplate: input.defaultTemplate },
-      repoStructure: input.repoStructure,
-      conventions: input.conventions,
-      playbookRules: input.playbookRules,
-      casebookContext: input.casebookContext,
-      title: input.title,
-      description: input.description,
+    const { result: parsed, probeSteps } = await runWithOptionalProbes<
+      Partial<SpecClarificationResult>
+    >({
+      probeContext: input.probeContext,
+      probeExecutor: input.probeExecutor,
+      invoke: async (probeTranscript, allowProbes) => {
+        const sys = [
+          "You are the Super-agent Pre-Flight Spec Architect.",
+          "Clarify an engineering task using real repository paths, conventions, playbook rules, probe findings, and historical cases.",
+          allowProbes ? PROBE_PROMPT_GUIDE : "",
+          "Output ONLY valid JSON with keys: recommendedDispatchMode ('single'|'epic'), recommendedTemplate ('fast'|'standard'|'strict'), refinedTitle, refinedDescription, suggestedAllowedPaths (string[]), acceptanceCriteria (string[]), matchedFiles (string[]), questions (array of {id, question, options, recommendedIndex}, max 3), rationale.",
+        ]
+          .filter(Boolean)
+          .join("\n");
+        const user = JSON.stringify({
+          repo: { id: input.repo.id, name: input.repo.name, defaultTemplate: input.defaultTemplate },
+          repoStructure: input.repoStructure,
+          conventions: input.conventions,
+          playbookRules: input.playbookRules,
+          casebookContext: input.casebookContext,
+          probeEvidence: input.probeContext?.deterministicSummary,
+          extraProbeFindings: probeTranscript || undefined,
+          title: input.title,
+          description: input.description,
+        });
+        return this.chatJson<Partial<SpecClarificationResult>>(sys, user);
+      },
     });
-    const parsed = await this.chatJson<Partial<SpecClarificationResult>>(sys, user);
     return {
       ...baseline,
       recommendedDispatchMode:
@@ -458,6 +608,44 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
             }))
           : baseline.questions,
       rationale: parsed.rationale?.trim() || baseline.rationale,
+      ...(probeSteps.length > 0 ? { probeSteps } : {}),
+    };
+  }
+
+  async answerChiefQuestion(input: {
+    question: string;
+    contextSummary: string;
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
+  }): Promise<{ answer: string; highlights?: string[]; probeSteps?: ControlProbeStep[] }> {
+    const { result: parsed, probeSteps } = await runWithOptionalProbes<{
+      answer?: string;
+      highlights?: string[];
+    }>({
+      probeContext: input.probeContext,
+      probeExecutor: input.probeExecutor,
+      invoke: async (probeTranscript, allowProbes) => {
+        const sys = [
+          "You are the Super-agent Chief-of-Staff engineering advisor.",
+          "Answer the user's question concisely and accurately using live system telemetry and read-only repo probes.",
+          allowProbes ? PROBE_PROMPT_GUIDE : "",
+          "Output ONLY valid JSON matching:",
+          JSON.stringify(CHIEF_ANSWER_SCHEMA),
+        ]
+          .filter(Boolean)
+          .join("\n");
+        const user = JSON.stringify({
+          question: input.question,
+          contextSummary: input.contextSummary,
+          extraProbeFindings: probeTranscript || undefined,
+        });
+        return this.chatJson<{ answer?: string; highlights?: string[] }>(sys, user);
+      },
+    });
+    return {
+      answer: parsed.answer?.trim() || input.contextSummary,
+      highlights: Array.isArray(parsed.highlights) ? parsed.highlights.map(String) : undefined,
+      probeSteps: probeSteps.length > 0 ? probeSteps : undefined,
     };
   }
 
@@ -525,11 +713,16 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
     repoStructure?: string;
     playbookRules?: string;
     conventions?: string;
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
   }): Promise<TriageProposal> {
     const prompt = [
       "Evaluate this development trigger and return structured JSON triage proposal.",
       `Repo: ${input.repo.name}, DefaultTemplate: ${input.repo.defaultTemplate}`,
       input.repoStructure ? `RepoStructure:\n${input.repoStructure}` : "",
+      input.probeContext?.deterministicSummary
+        ? `ProbeEvidence:\n${input.probeContext.deterministicSummary}`
+        : "",
       input.conventions ? `Conventions:\n${input.conventions}` : "",
       input.playbookRules ? `Playbook:\n${input.playbookRules}` : "",
       `Source: ${input.trigger.source}, Title: ${input.trigger.title}`,
@@ -538,7 +731,10 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
       .filter(Boolean)
       .join("\n");
     const parsed = await this.runClaudeJson<TriageProposal>(prompt, TRIAGE_SCHEMA);
-    return normalizeTriageProposal(parsed, input.trigger, input.repo.defaultTemplate);
+    const norm = normalizeTriageProposal(parsed, input.trigger, input.repo.defaultTemplate);
+    return input.probeContext?.probeSteps.length
+      ? { ...norm, probeSteps: input.probeContext.probeSteps }
+      : norm;
   }
 
   async diagnoseWatchdog(input: {
@@ -547,15 +743,25 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
     signal: WatchdogSignal;
     recentEvents: WorkerStreamEvent[];
     availableEngines: WorkerEngineId[];
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
   }): Promise<WatchdogDecision> {
     const prompt = [
       "Evaluate Watchdog L1 alert and return JSON decision.",
       `Ticket: ${input.ticket.title}, Stage: ${input.stageRun.stage}, Engine: ${input.stageRun.engine}`,
       `Signal: ${input.signal.kind} — ${input.signal.details}`,
       `AvailableEngines: ${input.availableEngines.join(", ")}`,
-    ].join("\n");
+      input.probeContext?.deterministicSummary
+        ? `ProbeEvidence:\n${input.probeContext.deterministicSummary}`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
     const parsed = await this.runClaudeJson<WatchdogDecision>(prompt, WATCHDOG_SCHEMA);
-    return normalizeWatchdogDecision(parsed, input.stageRun.engine, input.availableEngines);
+    const norm = normalizeWatchdogDecision(parsed, input.stageRun.engine, input.availableEngines);
+    return input.probeContext?.probeSteps.length
+      ? { ...norm, probeSteps: input.probeContext.probeSteps }
+      : norm;
   }
 
   async planEpicDecomposition(input: {
@@ -567,6 +773,8 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
     playbookRules?: string;
     conventions?: string;
     availableRepos?: Array<{ id: string; name: string; structure?: string }>;
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
   }): Promise<EpicDecompositionPlan> {
     const prompt = [
       "Decompose this Epic requirement into a DAG of scoped subtasks with disjoint allowedPaths aligned to the real repository structure where independent. Assign repoId if spanning availableRepos.",
@@ -575,6 +783,9 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
         ? `AvailableRepos: ${JSON.stringify(input.availableRepos)}`
         : "",
       input.repoStructure ? `RepoStructure:\n${input.repoStructure}` : "",
+      input.probeContext?.deterministicSummary
+        ? `ProbeEvidence:\n${input.probeContext.deterministicSummary}`
+        : "",
       input.conventions ? `Conventions:\n${input.conventions}` : "",
       input.playbookRules ? `Playbook:\n${input.playbookRules}` : "",
       `Title: ${input.title}`,
@@ -586,7 +797,10 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
       prompt,
       EPIC_DECOMPOSITION_SCHEMA,
     );
-    return normalizeEpicDecompositionPlan(parsed, input);
+    const norm = normalizeEpicDecompositionPlan(parsed, input);
+    return input.probeContext?.probeSteps.length
+      ? { ...norm, probeSteps: input.probeContext.probeSteps }
+      : norm;
   }
 
   async distillPlaybookLesson(input: {
@@ -652,6 +866,27 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
     };
   }
 
+  async answerChiefQuestion(input: {
+    question: string;
+    contextSummary: string;
+    probeContext?: RepoProbeContextPack;
+  }): Promise<{ answer: string; highlights?: string[]; probeSteps?: ControlProbeStep[] }> {
+    const prompt = [
+      "You are the Super-agent Chief-of-Staff engineering advisor. Answer accurately and concisely using telemetry and probe context.",
+      `Question: ${input.question}`,
+      `Context:\n${input.contextSummary}`,
+    ].join("\n\n");
+    const parsed = await this.runClaudeJson<{ answer?: string; highlights?: string[] }>(
+      prompt,
+      CHIEF_ANSWER_SCHEMA,
+    );
+    return {
+      answer: parsed.answer?.trim() || input.contextSummary,
+      highlights: Array.isArray(parsed.highlights) ? parsed.highlights.map(String) : undefined,
+      probeSteps: input.probeContext?.probeSteps,
+    };
+  }
+
   private async runClaudeJson<T>(prompt: string, schema: Record<string, unknown>): Promise<T> {
     const resolvedBin = resolveExecutable(this.claudeBin);
     if (!resolvedBin) {
@@ -712,11 +947,16 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
     repoStructure?: string;
     playbookRules?: string;
     conventions?: string;
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
   }): Promise<TriageProposal> {
     const prompt = [
       "Evaluate this development trigger and return structured JSON triage proposal.",
       `Repo: ${input.repo.name}, DefaultTemplate: ${input.repo.defaultTemplate}`,
       input.repoStructure ? `RepoStructure:\n${input.repoStructure}` : "",
+      input.probeContext?.deterministicSummary
+        ? `ProbeEvidence:\n${input.probeContext.deterministicSummary}`
+        : "",
       input.conventions ? `Conventions:\n${input.conventions}` : "",
       input.playbookRules ? `Playbook:\n${input.playbookRules}` : "",
       `Source: ${input.trigger.source}, Title: ${input.trigger.title}`,
@@ -725,7 +965,10 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
       .filter(Boolean)
       .join("\n");
     const parsed = await this.runCodexJson<TriageProposal>(prompt, TRIAGE_SCHEMA);
-    return normalizeTriageProposal(parsed, input.trigger, input.repo.defaultTemplate);
+    const norm = normalizeTriageProposal(parsed, input.trigger, input.repo.defaultTemplate);
+    return input.probeContext?.probeSteps.length
+      ? { ...norm, probeSteps: input.probeContext.probeSteps }
+      : norm;
   }
 
   async diagnoseWatchdog(input: {
@@ -734,15 +977,25 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
     signal: WatchdogSignal;
     recentEvents: WorkerStreamEvent[];
     availableEngines: WorkerEngineId[];
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
   }): Promise<WatchdogDecision> {
     const prompt = [
       "Evaluate Watchdog L1 alert and return JSON decision.",
       `Ticket: ${input.ticket.title}, Stage: ${input.stageRun.stage}, Engine: ${input.stageRun.engine}`,
       `Signal: ${input.signal.kind} — ${input.signal.details}`,
       `AvailableEngines: ${input.availableEngines.join(", ")}`,
-    ].join("\n");
+      input.probeContext?.deterministicSummary
+        ? `ProbeEvidence:\n${input.probeContext.deterministicSummary}`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
     const parsed = await this.runCodexJson<WatchdogDecision>(prompt, WATCHDOG_SCHEMA);
-    return normalizeWatchdogDecision(parsed, input.stageRun.engine, input.availableEngines);
+    const norm = normalizeWatchdogDecision(parsed, input.stageRun.engine, input.availableEngines);
+    return input.probeContext?.probeSteps.length
+      ? { ...norm, probeSteps: input.probeContext.probeSteps }
+      : norm;
   }
 
   async planEpicDecomposition(input: {
@@ -754,6 +1007,8 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
     playbookRules?: string;
     conventions?: string;
     availableRepos?: Array<{ id: string; name: string; structure?: string }>;
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
   }): Promise<EpicDecompositionPlan> {
     const prompt = [
       "Decompose this Epic requirement into a DAG of scoped subtasks with disjoint allowedPaths aligned to the real repository structure where independent. Assign repoId if spanning availableRepos.",
@@ -762,6 +1017,9 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
         ? `AvailableRepos: ${JSON.stringify(input.availableRepos)}`
         : "",
       input.repoStructure ? `RepoStructure:\n${input.repoStructure}` : "",
+      input.probeContext?.deterministicSummary
+        ? `ProbeEvidence:\n${input.probeContext.deterministicSummary}`
+        : "",
       input.conventions ? `Conventions:\n${input.conventions}` : "",
       input.playbookRules ? `Playbook:\n${input.playbookRules}` : "",
       `Title: ${input.title}`,
@@ -773,7 +1031,10 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
       prompt,
       EPIC_DECOMPOSITION_SCHEMA,
     );
-    return normalizeEpicDecompositionPlan(parsed, input);
+    const norm = normalizeEpicDecompositionPlan(parsed, input);
+    return input.probeContext?.probeSteps.length
+      ? { ...norm, probeSteps: input.probeContext.probeSteps }
+      : norm;
   }
 
   async distillPlaybookLesson(input: {
@@ -839,6 +1100,27 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
     };
   }
 
+  async answerChiefQuestion(input: {
+    question: string;
+    contextSummary: string;
+    probeContext?: RepoProbeContextPack;
+  }): Promise<{ answer: string; highlights?: string[]; probeSteps?: ControlProbeStep[] }> {
+    const prompt = [
+      "You are the Super-agent Chief-of-Staff engineering advisor. Answer accurately and concisely using telemetry and probe context.",
+      `Question: ${input.question}`,
+      `Context:\n${input.contextSummary}`,
+    ].join("\n\n");
+    const parsed = await this.runCodexJson<{ answer?: string; highlights?: string[] }>(
+      prompt,
+      CHIEF_ANSWER_SCHEMA,
+    );
+    return {
+      answer: parsed.answer?.trim() || input.contextSummary,
+      highlights: Array.isArray(parsed.highlights) ? parsed.highlights.map(String) : undefined,
+      probeSteps: input.probeContext?.probeSteps,
+    };
+  }
+
   private async runCodexJson<T>(prompt: string, schema: Record<string, unknown>): Promise<T> {
     const resolvedBin = resolveExecutable(this.codexBin);
     if (!resolvedBin) {
@@ -892,6 +1174,7 @@ export class HeuristicControlLLM implements ControlPlaneLLM {
     activeTickets?: Ticket[];
     relatedMemory?: MemorySearchHit[];
     repoStructure?: string;
+    probeContext?: RepoProbeContextPack;
   }): Promise<TriageProposal> {
     const text = `${input.trigger.title}\n${input.trigger.rawText}`;
     const lower = text.toLowerCase();
@@ -912,6 +1195,7 @@ export class HeuristicControlLLM implements ControlPlaneLLM {
 
     const explicitScope = text.match(/scope:([^\s,;]+)/i)?.[1];
     const pathMatches = text.match(/(?:packages|src|apps|docs|test)\/[a-zA-Z0-9_./*-]+/g) ?? [];
+    const probeMatched = input.probeContext?.matchedFiles ?? [];
     const structureMatches: string[] = [];
     if (!explicitScope && pathMatches.length === 0 && input.repoStructure) {
       const mods = Array.from(
@@ -928,9 +1212,11 @@ export class HeuristicControlLLM implements ControlPlaneLLM {
       ? [explicitScope]
       : pathMatches.length > 0
         ? Array.from(new Set(pathMatches)).slice(0, 4)
-        : structureMatches.length > 0
-          ? Array.from(new Set(structureMatches)).slice(0, 4)
-          : ["**"];
+        : probeMatched.length > 0
+          ? Array.from(new Set(probeMatched)).slice(0, 4)
+          : structureMatches.length > 0
+            ? Array.from(new Set(structureMatches)).slice(0, 4)
+            : ["**"];
 
     const isFast =
       lower.includes("typo") ||
@@ -963,6 +1249,9 @@ export class HeuristicControlLLM implements ControlPlaneLLM {
         "Relevant checks/tests pass before delivery",
       ],
       priority,
+      ...(input.probeContext?.probeSteps.length
+        ? { probeSteps: input.probeContext.probeSteps }
+        : {}),
     };
   }
 
@@ -971,9 +1260,13 @@ export class HeuristicControlLLM implements ControlPlaneLLM {
     stageRun: StageRun;
     signal: WatchdogSignal;
     availableEngines: WorkerEngineId[];
+    probeContext?: RepoProbeContextPack;
   }): Promise<WatchdogDecision> {
+    const probeSteps = input.probeContext?.probeSteps.length
+      ? input.probeContext.probeSteps
+      : undefined;
     if (input.signal.kind === "hard_budget_exceeded") {
-      return { action: "ESCALATE_HUMAN", reason: input.signal.details };
+      return { action: "ESCALATE_HUMAN", reason: input.signal.details, ...(probeSteps ? { probeSteps } : {}) };
     }
 
     const alt = getAlternateEngine(input.stageRun.engine, input.availableEngines);
@@ -987,6 +1280,7 @@ export class HeuristicControlLLM implements ControlPlaneLLM {
         reason: `${input.signal.kind} detected on ${input.stageRun.engine}; switching to ${alt}`,
         targetEngine: alt,
         hint: `Previous engine (${input.stageRun.engine}) hit ${input.signal.kind}: ${input.signal.details}. Take a fresh approach.`,
+        ...(probeSteps ? { probeSteps } : {}),
       };
     }
 
@@ -995,12 +1289,14 @@ export class HeuristicControlLLM implements ControlPlaneLLM {
         action: "INJECT_HINT",
         reason: `Injecting corrective hint after ${input.signal.kind}`,
         hint: `Watchdog alert (${input.signal.kind}): ${input.signal.details}. Stop repeating failing steps and verify assumptions.`,
+        ...(probeSteps ? { probeSteps } : {}),
       };
     }
 
     return {
       action: "ESCALATE_HUMAN",
       reason: `Retries exhausted after ${input.signal.kind}: ${input.signal.details}`,
+      ...(probeSteps ? { probeSteps } : {}),
     };
   }
 
@@ -1013,8 +1309,12 @@ export class HeuristicControlLLM implements ControlPlaneLLM {
     playbookRules?: string;
     conventions?: string;
     availableRepos?: Array<{ id: string; name: string; structure?: string }>;
+    probeContext?: RepoProbeContextPack;
   }): Promise<EpicDecompositionPlan> {
-    return heuristicDecomposeEpic(input);
+    const plan = heuristicDecomposeEpic(input);
+    return input.probeContext?.probeSteps.length
+      ? { ...plan, probeSteps: input.probeContext.probeSteps }
+      : plan;
   }
 
   async distillPlaybookLesson(input: {
@@ -1044,6 +1344,7 @@ export class HeuristicControlLLM implements ControlPlaneLLM {
     description: string;
     defaultTemplate: PipelineTemplateId;
     repoStructure?: string;
+    probeContext?: RepoProbeContextPack;
   }): Promise<SpecClarificationResult> {
     return buildHeuristicSpecClarification(input);
   }
@@ -1169,6 +1470,8 @@ export class CompositeControlPlaneLLM implements ControlPlaneLLM {
     playbookRules?: string;
     casebookContext?: string;
     conventions?: string;
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
   }): Promise<SpecClarificationResult> {
     for (const provider of this.chain) {
       if (!provider.clarifySpec) continue;
@@ -1179,6 +1482,26 @@ export class CompositeControlPlaneLLM implements ControlPlaneLLM {
       }
     }
     return buildHeuristicSpecClarification(input);
+  }
+
+  async answerChiefQuestion(input: {
+    question: string;
+    contextSummary: string;
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
+  }): Promise<{ answer: string; highlights?: string[]; probeSteps?: ControlProbeStep[] }> {
+    for (const provider of this.chain) {
+      if (!provider.answerChiefQuestion) continue;
+      try {
+        return await provider.answerChiefQuestion(input);
+      } catch {
+        // Fallback to next control-plane provider
+      }
+    }
+    return {
+      answer: input.contextSummary,
+      probeSteps: input.probeContext?.probeSteps,
+    };
   }
 }
 
@@ -1294,6 +1617,8 @@ export class MutableControlPlaneLLM implements ControlPlaneLLM {
     repoStructure?: string;
     playbookRules?: string;
     conventions?: string;
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
   }): Promise<TriageProposal> {
     return this.current.triageTrigger(input);
   }
@@ -1304,6 +1629,8 @@ export class MutableControlPlaneLLM implements ControlPlaneLLM {
     signal: WatchdogSignal;
     recentEvents: WorkerStreamEvent[];
     availableEngines: WorkerEngineId[];
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
   }): Promise<WatchdogDecision> {
     return this.current.diagnoseWatchdog(input);
   }
@@ -1317,6 +1644,8 @@ export class MutableControlPlaneLLM implements ControlPlaneLLM {
     playbookRules?: string;
     conventions?: string;
     availableRepos?: Array<{ id: string; name: string; structure?: string }>;
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
   }): Promise<EpicDecompositionPlan> {
     if (this.current.planEpicDecomposition) {
       return this.current.planEpicDecomposition(input);
@@ -1370,11 +1699,28 @@ export class MutableControlPlaneLLM implements ControlPlaneLLM {
     playbookRules?: string;
     casebookContext?: string;
     conventions?: string;
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
   }): Promise<SpecClarificationResult> {
     if (this.current.clarifySpec) {
       return this.current.clarifySpec(input);
     }
     return Promise.resolve(buildHeuristicSpecClarification(input));
+  }
+
+  answerChiefQuestion(input: {
+    question: string;
+    contextSummary: string;
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
+  }): Promise<{ answer: string; highlights?: string[]; probeSteps?: ControlProbeStep[] }> {
+    if (this.current.answerChiefQuestion) {
+      return this.current.answerChiefQuestion(input);
+    }
+    return Promise.resolve({
+      answer: input.contextSummary,
+      probeSteps: input.probeContext?.probeSteps,
+    });
   }
 }
 

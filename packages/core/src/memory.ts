@@ -135,6 +135,11 @@ export class MemoryManager {
 
     sections.push(`\n## Stage Instructions (${stage})`);
     sections.push(stageInstructionFor(stage));
+    if ((ticket.clarificationCount ?? 0) < 1 && (stage === "plan" || stage === "implement")) {
+      sections.push(
+        `If blocked by a critical specification ambiguity with >=2 distinct design choices (limit 1 per ticket), output [ASK_HUMAN]: {"question":"...","options":["Option A","Option B"],"recommendedOption":"Option A"}.`,
+      );
+    }
 
     return sections.join("\n");
   }

@@ -9,6 +9,8 @@ export * from "./engine-router.ts";
 export * from "./risk.ts";
 export * from "./blueprints.ts";
 export * from "./conflict-resolver.ts";
+export * from "./tool-profiler.ts";
+export * from "./chief.ts";
 export * from "./casebook.ts";
 export * from "./spec-studio.ts";
 export * from "./webhooks.ts";

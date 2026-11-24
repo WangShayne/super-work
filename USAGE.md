@@ -53,15 +53,15 @@ bun run setup -- --auto
   - `OFF`: Ingests triggers without creating tickets.
   - `OBSERVE` (Recommended to start): Proposes tickets into the **Attention Inbox** for human approval before touching any code.
   - `AUTO`: Dispatches qualifying triggers straight to worker execution, interrupting only on policy gates or Watchdog escalations.
-- **Live Status Pills**: Displays `Live Sync`, `Control Brain`, `Agent Roles`, `Repo Contract` (with `RiskGate` badge when gated), `Anti-Stall Watchdog`, `PR Delivery Queue`, `Autonomous Routines`, and **`Worktrees` (click to inspect active/reclaimable directories, run one-click GC, or open System Doctor)**, alongside **Env & LLM** (including **Doctor & Hot Backup**) and the `中文 / EN` language switch.
+- **Live Status Pills & `⌘K` Omnibox**: Header Row 1 provides `⌘K Chief` (`⌘K` / `Ctrl+K`) opening the dual-mode Search + Chief-of-Staff Omnibox (`?` prefix queries live telemetry, memory, and read-only code probes); Row 2 displays `Live Sync`, `Control Brain`, `Agent Roles`, `Repo Contract` (with `RiskGate` badge when gated), `Anti-Stall Watchdog`, `PR Delivery Queue`, `Autonomous Routines`, and **`Worktrees` (click to inspect active/reclaimable directories, run one-click GC, or open System Doctor)**, alongside **Env & LLM** (including **Doctor & Hot Backup**) and the `中文 / EN` language switch.
 
 ### 2. Command Center Views & `@super-work/cli`
-1. **Attention Inbox**: High-signal queue aggregating `OBSERVE PROPOSAL`, `PLAN APPROVAL`, `MANDATE VIOLATION` (out-of-scope edits remain preserved for one-click **Expand Mandate & Continue**), `WATCHDOG ESCALATION`, `MERGE CONFLICT` (with **3-way `ours`/`theirs` semantic diff context**), `PR SIGNOFF` (with **A.1 Risk Breakdown** when risk-gated), `BUDGET CAP`, `ARENA TIEBREAK`, `EPIC REPLAN`, and `PR FOLLOW-UP`.
+1. **Attention Inbox**: High-signal queue aggregating `OBSERVE PROPOSAL`, `PLAN APPROVAL`, `MANDATE VIOLATION` (out-of-scope edits remain preserved for one-click **Expand Mandate & Continue**), `WATCHDOG ESCALATION`, `MERGE CONFLICT` (with **3-way `ours`/`theirs` semantic diff context**), `PR SIGNOFF` (with **A.1 Risk Breakdown** when risk-gated), `BUDGET CAP`, `ARENA TIEBREAK`, `EPIC REPLAN`, `CLARIFICATION` (`[ASK_HUMAN]` selectable choices, max 1 per ticket), and `PR FOLLOW-UP`, with multi-select & **Select Low-Risk** batch resolution.
 2. **Mission Board**: Five-column real-time swimlane view with risk score badges (`R:<score>`), TDD/Auto-Arena tags, PR links, and Epic DAG canvas.
-3. **Metrics & Budget**: Live daily budget progress, delivery rate, cumulative cost, per-engine latency & pass-rate metrics, and Bandit matrix.
+3. **Metrics & Budget**: Live daily budget progress, delivery rate, cumulative cost, per-engine latency & pass-rate metrics, Bandit matrix, and the **Golden Eval Suite** comparison board.
 4. **Deep Dive Drawer & `@super-work/cli`** (`bun run cli` / `super-work`):
    - `super-work up [-d]` — Start daemon in foreground or background.
-   - `super-work status`, `blueprints`, `dispatch <title> -d <desc> [--blueprint <id>] [--gate-policy <policy>] [--wait]`, `epic <title> [--preview-only|--wait]`, `doctor [--fix]`, `backup [list|create]`, `inbox list|approve <id> [--expand-mandate]`, `logs <ticketId> [-f]`, `watch [--repo <id>|--ticket <id>]`, `revert <ticketId>`, `playbook [list|add|toggle|delete|sync --export]` — Control tasks, Task Blueprints, System Doctor/hot backups, Playbook rules, live SSE streams, and safe merge reverts from the terminal.
+   - `super-work status`, `ask <question>`, `steer <ticketId> <instruction>`, `blueprints`, `dispatch <title> -d <desc> [--blueprint <id>] [--gate-policy <policy>] [--wait]`, `epic <title> [--preview-only|--wait]`, `inbox [list|approve|reject|batch]`, `eval [list|save|run|delete]`, `doctor [--fix]`, `backup [list|create|restore <id>]`, `bundle [export|import <file>]`, `logs <ticketId> [-f]`, `watch [--repo <id>|--ticket <id>]`, `revert <ticketId>`, `playbook [list|add|toggle|delete|sync --export]` — Control tasks, live steer, Chief-of-Staff queries, Golden Eval benchmarks, knowledge bundles, System Doctor/hot backups & restores, and safe merge reverts from the terminal.
 
 ### 3. Pipeline Templates
 
@@ -87,14 +87,14 @@ bun run setup -- --auto
 
 ### 3. Inspecting Diff Studio, Line-Anchored Review Basket & Using Chain of Recall
 1. Open **Deep Dive Drawer** on any ticket:
-   - **Execution Stream**: Inspect stage status, costs, **inline Stage Span Waterfall bars (`StageSpan`)**, **Risk Assessment** & **3-way conflict context**, and live SSE events.
+   - **Execution Stream**: Inspect stage status, **Live Steer** active turns mid-flight without penalty, view **Stage Span Waterfall bars (`StageSpan`)**, **`StageToolProfile`** hot tool badges, **Risk Assessment**, **3-way conflict context**, and live SSE events, or click **Save Golden Eval** on delivered tickets.
    - **Diff & Mandate**: Browse the **File-Tree Diff Studio** with per-file `+`/`-` stats, collapsible hunks, synced AI & human inline `review_comments`, clickable **`+`** buttons per diff line feeding the **Review Basket** (`Save Comments Only` vs `Request Changes`, auto-resolving open comments once modified files pass verification), and **Rework This File** buttons.
    - **Chain of Recall**: Trace `Trigger → Thread → Inline Notes → Spill Artifacts` (including JSON `review_report` and `test_log` artifacts), click **Read Spill** on demand, or search past tickets via SQLite FTS5.
 2. **Thread Subscription Follow-Up**: Send follow-up instructions via the bottom **Inject** bar; messages route straight into the subscribed Ticket's `inlineMemory.threadUpdates`.
 
-### 4. Task Blueprints, Risk Gate, System Doctor, Hot Backups & Safe Revert
+### 4. Task Blueprints, Risk Gate, Golden Evals, Atomic Restore & Knowledge Bundles
 - **Task Blueprints & Delivery Risk Gate (`A.1`)**: Pick built-in or custom `super-work.json` Blueprints (`tdd-bugfix`, `ui-visual-polish`, `safe-refactor`, `backend-feature`, `docs-chore`) inside **Dispatch Task** to prefill pipeline template, TDD, allowed paths, and `deliveryGatePolicy`; configure repo-wide `deliveryGatePolicy` (`always_auto` / `risk_gated` / `always_signoff`), `riskThreshold`, and `sensitivePaths` under **Repository Preferences**.
-- In **Env & LLM Setup → Doctor & Hot Backup** (or via CLI `super-work doctor [--fix]` / `super-work backup [list|create]`), run integrity diagnostics across SQLite, reclaimable worktrees, stale previews, and lingering hidden checkpoint refs, and capture zero-lock `VACUUM INTO` hot SQLite snapshots.
+- **Golden Eval Suite, Knowledge Bundles & Atomic Hot Restore (`D.1`)**: Save any delivered ticket as a regression benchmark from the drawer header and replay it across engines under **Metrics & Budget → Golden Eval Suite** (`super-work eval`); export/import **Playbook + Casebook + Blueprints** bundles under **Repository Preferences → Playbook** (`super-work bundle`); capture `VACUUM INTO` snapshots and run verified **Atomic Restore** (`pre-restore` safety backup included) inside **Env & LLM → Doctor & Hot Backup** (`super-work backup restore`).
 - For tasks delivered via `local_merge` (`--no-ff`), click **1-Click Safe Revert** in the drawer header (or run `super-work revert <ticketId>`) to execute a non-destructive `git revert -m 1` without rewriting history.
 
 ---

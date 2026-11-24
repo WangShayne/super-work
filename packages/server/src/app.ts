@@ -26,6 +26,7 @@ import type {
   EnginePreference,
   EpicDeliveryMode,
   HandoverDigest,
+  InboxItemKind,
   InboxItemStatus,
   KernelEvent,
   LlmProviderPreset,
@@ -37,6 +38,7 @@ import type {
   PublicSetupStatus,
   ReasoningEffort,
   RepoConfig,
+  RepoKnowledgeBundle,
   RestoreCheckpointInput,
   ReviewCommentStatus,
   RoutineScheduleKind,
@@ -190,6 +192,8 @@ function resolveEventTarget(
     case "outbox_sent":
     case "outbox_failed":
       return { repoId: event.entry.repoId, ticketId: event.entry.ticketId };
+    case "eval_run_updated":
+      return { repoId: event.repoId };
     case "worktrees_gc":
       return {};
   }
@@ -1303,6 +1307,28 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     return c.json({ ticket });
   });
 
+  app.post("/api/tickets/:id/steer", async (c) => {
+    const id = c.req.param("id");
+    const body = (await c.req.json().catch(() => ({}))) as {
+      instruction?: string;
+      preferredEngine?: EnginePreference;
+    };
+    if (!body.instruction?.trim()) {
+      return c.json({ error: "instruction is required" }, 400);
+    }
+    try {
+      const ticket = await kernel.steerTicket(id, {
+        instruction: body.instruction.trim(),
+        preferredEngine: body.preferredEngine,
+      });
+      void kernel.tick();
+      return c.json({ ticket });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("not found") ? 404 : 400);
+    }
+  });
+
   app.post("/api/tickets/:id/cancel", async (c) => {
     const id = c.req.param("id");
     const body = (await c.req.json().catch(() => ({}))) as { reason?: string };
@@ -1438,6 +1464,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       budgetIncreaseUsd?: number;
       saveToPlaybook?: boolean;
       arenaWinnerId?: string;
+      selectedOption?: string;
     };
     if (body.decision !== "approved" && body.decision !== "rejected") {
       return c.json({ error: "decision must be 'approved' or 'rejected'" }, 400);
@@ -1448,10 +1475,109 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       budgetIncreaseUsd: body.budgetIncreaseUsd,
       saveToPlaybook: body.saveToPlaybook,
       arenaWinnerId: body.arenaWinnerId,
+      selectedOption: body.selectedOption,
     });
     void kernel.tick();
     void kernel.outbox.processDueEntries();
     return c.json(result);
+  });
+
+  app.post("/api/inbox/batch-resolve", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      inboxIds?: string[];
+      repoId?: string;
+      kinds?: InboxItemKind[];
+      onlyLowRisk?: boolean;
+      decision?: "approved" | "rejected";
+      note?: string;
+      deliveryAction?: "local_merge" | "push_and_create_pr";
+    };
+    if (body.decision !== "approved" && body.decision !== "rejected") {
+      return c.json({ error: "decision must be 'approved' or 'rejected'" }, 400);
+    }
+    const result = await kernel.batchResolveInbox({
+      inboxIds: Array.isArray(body.inboxIds) ? body.inboxIds.map(String) : undefined,
+      repoId: body.repoId?.trim() || undefined,
+      kinds: Array.isArray(body.kinds) ? body.kinds : undefined,
+      onlyLowRisk: Boolean(body.onlyLowRisk),
+      decision: body.decision,
+      note: body.note?.trim() || undefined,
+      deliveryAction: body.deliveryAction,
+    });
+    void kernel.tick();
+    void kernel.outbox.processDueEntries();
+    return c.json(result);
+  });
+
+  // --- v1.1.0 A.2 Chief-of-Staff Advisor ---
+  app.post("/api/chief/ask", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      repoId?: string;
+      question?: string;
+    };
+    if (!body.question?.trim()) {
+      return c.json({ error: "question is required" }, 400);
+    }
+    const result = await kernel.askChief({
+      repoId: body.repoId?.trim() || undefined,
+      question: body.question.trim(),
+    });
+    return c.json(result);
+  });
+
+  // --- v1.1.0 D.1 Golden Eval Benchmark Suite ---
+  app.get("/api/evals/cases", async (c) => {
+    const repoId = c.req.query("repoId") || undefined;
+    const cases = await kernel.listEvalCases(repoId);
+    return c.json({ cases });
+  });
+
+  app.post("/api/evals/cases/from-ticket/:ticketId", async (c) => {
+    const ticketId = c.req.param("ticketId");
+    try {
+      const evalCase = await kernel.createEvalCaseFromTicket(ticketId);
+      return c.json({ evalCase }, 201);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("not found") ? 404 : 400);
+    }
+  });
+
+  app.delete("/api/evals/cases/:id", async (c) => {
+    const deleted = await kernel.deleteEvalCase(c.req.param("id"));
+    if (!deleted) {
+      return c.json({ error: "Eval case not found" }, 404);
+    }
+    return c.json({ ok: true });
+  });
+
+  app.get("/api/evals/runs", async (c) => {
+    const repoId = c.req.query("repoId") || undefined;
+    const evalCaseId = c.req.query("evalCaseId") || undefined;
+    const runs = await kernel.listEvalRuns({ repoId, evalCaseId });
+    return c.json({ runs });
+  });
+
+  app.post("/api/evals/run", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      evalCaseId?: string;
+      engines?: WorkerEngineId[];
+      maxBudgetUsd?: number;
+    };
+    if (!body.evalCaseId?.trim()) {
+      return c.json({ error: "evalCaseId is required" }, 400);
+    }
+    try {
+      const evalRun = await kernel.runEvalCase({
+        evalCaseId: body.evalCaseId.trim(),
+        engines: Array.isArray(body.engines) ? body.engines : undefined,
+        maxBudgetUsd: typeof body.maxBudgetUsd === "number" ? body.maxBudgetUsd : undefined,
+      });
+      return c.json({ evalRun }, 201);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("not found") ? 404 : 400);
+    }
   });
 
   // --- Chain of Recall & Memory ---
@@ -1836,9 +1962,69 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       return result;
     },
     systemDoctor: async (args) => kernel.runSystemDoctor({ fix: Boolean(args.fix) }),
+    steerTicket: async (args) => {
+      const ticket = await kernel.steerTicket(String(args.ticketId ?? ""), {
+        instruction: String(args.instruction ?? ""),
+        preferredEngine: args.preferredEngine as EnginePreference | undefined,
+      });
+      void kernel.tick();
+      return { ticket };
+    },
+    batchResolveInbox: async (args) => {
+      const res = await kernel.batchResolveInbox({
+        inboxIds: Array.isArray(args.inboxIds) ? args.inboxIds.map(String) : undefined,
+        repoId: args.repoId ? String(args.repoId) : undefined,
+        kinds: Array.isArray(args.kinds) ? (args.kinds.map(String) as InboxItemKind[]) : undefined,
+        onlyLowRisk: args.onlyLowRisk !== undefined ? Boolean(args.onlyLowRisk) : undefined,
+        decision: args.decision === "rejected" ? "rejected" : "approved",
+        note: args.note ? String(args.note) : undefined,
+        deliveryAction: args.deliveryAction as "local_merge" | "push_and_create_pr" | undefined,
+      });
+      void kernel.tick();
+      void kernel.outbox.processDueEntries();
+      return res;
+    },
+    askChief: async (args) =>
+      kernel.askChief({
+        question: String(args.question ?? ""),
+        repoId: args.repoId ? String(args.repoId) : undefined,
+      }),
+    manageEvals: async (args) => {
+      const action = String(args.action ?? "list_cases");
+      if (action === "list_cases") {
+        return { cases: await kernel.listEvalCases(args.repoId ? String(args.repoId) : undefined) };
+      }
+      if (action === "save_from_ticket") {
+        return { evalCase: await kernel.createEvalCaseFromTicket(String(args.ticketId ?? "")) };
+      }
+      if (action === "delete_case") {
+        return { ok: await kernel.deleteEvalCase(String(args.evalCaseId ?? "")) };
+      }
+      if (action === "run") {
+        return {
+          evalRun: await kernel.runEvalCase({
+            evalCaseId: String(args.evalCaseId ?? ""),
+            engines: Array.isArray(args.engines)
+              ? (args.engines.map(String) as WorkerEngineId[])
+              : undefined,
+            maxBudgetUsd:
+              typeof args.maxBudgetUsd === "number" ? args.maxBudgetUsd : undefined,
+          }),
+        };
+      }
+      if (action === "list_runs") {
+        return {
+          runs: await kernel.listEvalRuns({
+            repoId: args.repoId ? String(args.repoId) : undefined,
+            evalCaseId: args.evalCaseId ? String(args.evalCaseId) : undefined,
+          }),
+        };
+      }
+      throw new Error(`Unknown eval action: ${action}`);
+    },
   });
 
-  // --- v1.0.0 System Doctor & SQLite Hot Backups ---
+  // --- v1.0.0 System Doctor & SQLite Hot Backups + v1.1.0 Restore & Knowledge Bundle ---
   app.get("/api/system/doctor", async (c) => {
     const report = await kernel.runSystemDoctor({ fix: false });
     return c.json(report);
@@ -1863,10 +2049,44 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     }
   });
 
+  app.post("/api/system/backups/:id/restore", async (c) => {
+    const id = c.req.param("id");
+    const body = (await c.req.json().catch(() => ({}))) as { force?: boolean };
+    try {
+      const result = await kernel.restoreSystemBackup(id, { force: Boolean(body.force) });
+      return c.json(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("not found") ? 404 : 400);
+    }
+  });
+
+  app.get("/api/repos/:id/knowledge-bundle", async (c) => {
+    try {
+      const bundle = await kernel.exportRepoKnowledgeBundle(c.req.param("id"));
+      return c.json({ bundle });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("not found") ? 404 : 400);
+    }
+  });
+
+  app.post("/api/repos/:id/knowledge-bundle/import", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { bundle?: RepoKnowledgeBundle };
+    const candidate = body.bundle ?? (body as unknown as RepoKnowledgeBundle);
+    try {
+      const result = await kernel.importRepoKnowledgeBundle(c.req.param("id"), candidate);
+      return c.json(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("not found") ? 404 : 400);
+    }
+  });
+
   app.get("/api/mcp", (c) => {
     return c.json({
       name: "super-work",
-      version: "1.0.0",
+      version: "1.1.0",
       transport: "streamable-http",
       endpoint: "/api/mcp",
     });

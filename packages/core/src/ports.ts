@@ -4,6 +4,8 @@ import type {
   CasebookEntry,
   ChainOfRecall,
   ConflictFileHunk,
+  ControlProbeRequest,
+  ControlProbeStep,
   DagNodeMutationInput,
   DeliveryGatePolicy,
   EnginePreference,
@@ -11,6 +13,8 @@ import type {
   EpicDeliveryMode,
   EpicReplanProposal,
   EpicSubtaskSpec,
+  EvalCase,
+  EvalRunRecord,
   HandoverDigest,
   InboxItem,
   InboxItemStatus,
@@ -25,6 +29,7 @@ import type {
   RepoConfig,
   RepoContractFile,
   RepoMetricsSummary,
+  RepoProbeContextPack,
   RestoreCheckpointInput,
   RevertResult,
   ReviewCommentStatus,
@@ -53,6 +58,8 @@ import type {
   WorkerTurnInput,
 } from "./types.ts";
 
+export type RepoProbeExecutor = (req: ControlProbeRequest) => Promise<ControlProbeStep>;
+
 export interface ControlPlaneLLM {
   readonly providerName: string;
   triageTrigger(input: {
@@ -63,6 +70,8 @@ export interface ControlPlaneLLM {
     repoStructure?: string;
     playbookRules?: string;
     conventions?: string;
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
   }): Promise<TriageProposal>;
   diagnoseWatchdog(input: {
     ticket: Ticket;
@@ -70,6 +79,8 @@ export interface ControlPlaneLLM {
     signal: WatchdogSignal;
     recentEvents: WorkerStreamEvent[];
     availableEngines: WorkerEngineId[];
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
   }): Promise<WatchdogDecision>;
   planEpicDecomposition?(input: {
     repo: RepoConfig;
@@ -80,6 +91,8 @@ export interface ControlPlaneLLM {
     playbookRules?: string;
     conventions?: string;
     availableRepos?: Array<{ id: string; name: string; structure?: string }>;
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
   }): Promise<EpicDecompositionPlan>;
   distillPlaybookLesson?(input: {
     repo: RepoConfig;
@@ -124,7 +137,15 @@ export interface ControlPlaneLLM {
     playbookRules?: string;
     casebookContext?: string;
     conventions?: string;
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
   }): Promise<SpecClarificationResult>;
+  answerChiefQuestion?(input: {
+    question: string;
+    contextSummary: string;
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
+  }): Promise<{ answer: string; highlights?: string[]; probeSteps?: ControlProbeStep[] }>;
 }
 
 export interface WorkerDriver {
@@ -222,6 +243,28 @@ export interface WorkspaceProvider {
   deleteBranch?(rootRepoPath: string, branchName: string): Promise<void>;
   listWorktreeDirs(): Promise<string[]>;
   cleanupWorkspace(worktreePath: string, rootRepoPath?: string): Promise<void>;
+
+  // Read-only Repo Probes & Golden Eval Worktrees (v1.1.0 A.1 / D.1)
+  runRepoPreProbe?(
+    rootRepoPath: string,
+    queryText: string,
+    forbiddenPaths?: string[],
+  ): Promise<RepoProbeContextPack>;
+  executeRepoProbeTool?(
+    rootRepoPath: string,
+    req: ControlProbeRequest,
+    forbiddenPaths?: string[],
+    stepIndex?: number,
+  ): Promise<ControlProbeStep>;
+  prepareDetachedWorktree?(
+    rootRepoPath: string,
+    commitSha: string,
+    label: string,
+  ): Promise<{ worktreePath: string }>;
+  getWorktreeNumstat?(
+    worktreePath: string,
+    baseRef: string,
+  ): Promise<{ addedLines: number; deletedLines: number; changedFiles: string[] }>;
 }
 
 export interface StateStore {
@@ -320,9 +363,19 @@ export interface StateStore {
     updatedAt: string,
   ): Promise<TicketReviewComment | null>;
 
-  // System Maintenance (v1.0.0 C.1)
+  // System Maintenance (v1.0.0 C.1 + v1.1.0 D.1)
   checkDatabaseIntegrity?(): Promise<{ ok: boolean; detail: string; walPages?: number }>;
   vacuumIntoBackup?(destFilePath: string): Promise<void>;
+  restoreFromBackup?(backupFilePath: string): Promise<{ ok: boolean; detail: string }>;
+
+  // Golden Eval Suite (v1.1.0 D.1)
+  saveEvalCase?(evalCase: EvalCase): Promise<void>;
+  getEvalCase?(id: string): Promise<EvalCase | null>;
+  listEvalCases?(repoId?: string): Promise<EvalCase[]>;
+  deleteEvalCase?(id: string): Promise<boolean>;
+  saveEvalRun?(run: EvalRunRecord): Promise<void>;
+  getEvalRun?(id: string): Promise<EvalRunRecord | null>;
+  listEvalRuns?(filter?: { repoId?: string; evalCaseId?: string; limit?: number }): Promise<EvalRunRecord[]>;
 
   // System Settings
   getSystemSetting<T>(key: string): Promise<T | null>;

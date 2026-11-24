@@ -582,6 +582,23 @@ export function DispatchTaskModal({
                 </button>
               </div>
               <p className="text-[11px] text-zinc-400">{clarification.rationale}</p>
+              {clarification.probeSteps && clarification.probeSteps.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="inline-flex items-center gap-1 text-[10px] font-mono text-zinc-400">
+                    <Search className="w-3 h-3 text-sky-400" />
+                    Probes ({clarification.probeSteps.length}):
+                  </span>
+                  {clarification.probeSteps.map((p, idx) => (
+                    <span
+                      key={`${p.tool}_${idx}`}
+                      title={p.outputSummary}
+                      className="px-1.5 py-0.5 rounded bg-zinc-950 border border-zinc-800 font-mono text-[10px] text-sky-300"
+                    >
+                      {p.tool} ({p.matchedPaths.length})
+                    </span>
+                  ))}
+                </div>
+              )}
               {clarification.matchedFiles.length > 0 && (
                 <div className="flex flex-wrap gap-1">
                   {clarification.matchedFiles.slice(0, 6).map((f) => (
