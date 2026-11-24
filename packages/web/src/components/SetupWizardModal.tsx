@@ -70,6 +70,8 @@ export function SetupWizardModal({
   const [codexEffort, setCodexEffort] = useState<ReasoningEffort | "">("");
   const [opencodeModel, setOpencodeModel] = useState("");
   const [opencodeEffort, setOpencodeEffort] = useState<ReasoningEffort | "">("");
+  const [geminiModel, setGeminiModel] = useState("");
+  const [geminiEffort, setGeminiEffort] = useState<ReasoningEffort | "">("");
 
   const [macosEnabled, setMacosEnabled] = useState(false);
   const [webhookEnabled, setWebhookEnabled] = useState(false);
@@ -109,6 +111,8 @@ export function SetupWizardModal({
     setCodexEffort(cfg.codexProfile?.effort ?? "");
     setOpencodeModel(cfg.opencodeProfile?.model ?? "");
     setOpencodeEffort(cfg.opencodeProfile?.effort ?? "");
+    setGeminiModel(cfg.geminiProfile?.model ?? "");
+    setGeminiEffort(cfg.geminiProfile?.effort ?? "");
     setMacosEnabled(cfg.notifications?.macosEnabled ?? false);
     setWebhookEnabled(cfg.notifications?.webhookEnabled ?? false);
     setWebhookUrl(cfg.notifications?.webhookUrl ?? "");
@@ -135,6 +139,7 @@ export function SetupWizardModal({
   const claudeScan = scanReport?.tools.find((tool) => tool.id === "claude");
   const codexScan = scanReport?.tools.find((tool) => tool.id === "codex");
   const opencodeScan = scanReport?.tools.find((tool) => tool.id === "opencode");
+  const geminiScan = scanReport?.tools.find((tool) => tool.id === "gemini");
 
   const handleSelectPreset = (next: LlmProviderPreset) => {
     setPreset(next);
@@ -198,6 +203,10 @@ export function SetupWizardModal({
         opencodeProfile: {
           model: opencodeModel.trim() || undefined,
           effort: opencodeEffort || undefined,
+        },
+        geminiProfile: {
+          model: geminiModel.trim() || undefined,
+          effort: geminiEffort || undefined,
         },
         notifications: {
           macosEnabled,
@@ -452,7 +461,7 @@ export function SetupWizardModal({
                 <div className="font-semibold text-zinc-200">{t("setup.workerProfilesTitle")}</div>
                 <p className="text-[11px] text-zinc-400 mt-0.5">{t("setup.workerProfilesHint")}</p>
               </div>
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
                 <div className="rounded-lg border border-zinc-800 bg-zinc-950/70 p-3 space-y-2.5">
                   <div className="font-medium text-zinc-200">{t("setup.claudeProfileTitle")}</div>
                   <div>
@@ -558,6 +567,41 @@ export function SetupWizardModal({
                       <option value="high">{t("setup.effort.high")}</option>
                       <option value="xhigh">{t("setup.effort.xhigh")}</option>
                       <option value="max">{t("setup.effort.max")}</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-zinc-800 bg-zinc-950/70 p-3 space-y-2.5">
+                  <div className="font-medium text-zinc-200">{t("setup.geminiProfileTitle")}</div>
+                  <div>
+                    <label className="block text-zinc-400 mb-1">{t("setup.modelLabel")}</label>
+                    <input
+                      list="gemini-model-presets"
+                      value={geminiModel}
+                      onChange={(e) => setGeminiModel(e.target.value)}
+                      placeholder={
+                        geminiScan?.localDefaultModel
+                          ? `${t("setup.followLocalDefault")} (${geminiScan.localDefaultModel})`
+                          : t("setup.followLocalDefault")
+                      }
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 font-mono text-zinc-100 focus:outline-none focus:border-indigo-500"
+                    />
+                    <datalist id="gemini-model-presets">
+                      <option value="gemini-2.5-pro" />
+                      <option value="gemini-2.5-flash" />
+                    </datalist>
+                  </div>
+                  <div>
+                    <label className="block text-zinc-400 mb-1">{t("setup.effortLabel")}</label>
+                    <select
+                      value={geminiEffort}
+                      onChange={(e) => setGeminiEffort(e.target.value as ReasoningEffort | "")}
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-zinc-100"
+                    >
+                      <option value="">{t("setup.effort.inherit")}</option>
+                      <option value="low">{t("setup.effort.low")}</option>
+                      <option value="medium">{t("setup.effort.medium")}</option>
+                      <option value="high">{t("setup.effort.high")}</option>
                     </select>
                   </div>
                 </div>

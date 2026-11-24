@@ -70,6 +70,7 @@ import { api } from "../api.ts";
 import { formatTemplate, formatTicketStatus, useI18n } from "../i18n.tsx";
 import type {
   BrowserInteractionStep,
+  CampaignDirection,
   CasebookEntry,
   DeliveryChannel,
   DeliveryGatePolicy,
@@ -84,6 +85,8 @@ import type {
   PreviewSession,
   ReasoningEffort,
   RepoConfig,
+  RequirementIntakePlan,
+  RequirementRouteKind,
   SandboxMode,
   SmokeCheckConfig,
   SmokeTriggerMode,
@@ -137,6 +140,7 @@ interface DispatchModalProps {
     maxCostUsdPerSubtask: number;
     subtasks?: EpicSubtaskSpec[];
   }) => Promise<void>;
+  onIntakeSuccess?: (route: RequirementRouteKind) => Promise<void> | void;
 }
 
 export function DispatchTaskModal({
@@ -151,9 +155,20 @@ export function DispatchTaskModal({
   onClose,
   onSubmit,
   onCreateEpic,
+  onIntakeSuccess,
 }: DispatchModalProps) {
   const { locale, t } = useI18n();
-  const [dispatchMode, setDispatchMode] = useState<"single" | "epic">("single");
+  const [dispatchMode, setDispatchMode] = useState<"intake" | "single" | "epic">("intake");
+  const [intakeRequirement, setIntakeRequirement] = useState("");
+  const [intakeTitle, setIntakeTitle] = useState("");
+  const [intakeRoute, setIntakeRoute] = useState<"auto" | RequirementRouteKind>("auto");
+  const [intakePreviewPlan, setIntakePreviewPlan] = useState<RequirementIntakePlan | null>(null);
+  const [intakePreviewing, setIntakePreviewing] = useState(false);
+  const [intakeError, setIntakeError] = useState("");
+  const [intakeMetricOpen, setIntakeMetricOpen] = useState(false);
+  const [intakeMetricCmd, setIntakeMetricCmd] = useState("");
+  const [intakeMetricTarget, setIntakeMetricTarget] = useState("");
+  const [intakeMetricDir, setIntakeMetricDir] = useState<CampaignDirection>("decrease");
   const [epicDeliveryMode, setEpicDeliveryMode] = useState<EpicDeliveryMode>("unified");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -190,7 +205,16 @@ export function DispatchTaskModal({
 
   useEffect(() => {
     if (open) {
-      setDispatchMode("single");
+      setDispatchMode("intake");
+      setIntakeRequirement("");
+      setIntakeTitle("");
+      setIntakeRoute("auto");
+      setIntakePreviewPlan(null);
+      setIntakeError("");
+      setIntakeMetricOpen(false);
+      setIntakeMetricCmd("");
+      setIntakeMetricTarget("");
+      setIntakeMetricDir("decrease");
       setEpicDeliveryMode("unified");
       setTemplate(defaultTemplate);
       setEngine(defaultEngine);
@@ -226,7 +250,8 @@ export function DispatchTaskModal({
 
   if (!open) return null;
 
-  const isCliEngine = engine === "claude" || engine === "codex" || engine === "opencode";
+  const isCliEngine =
+    engine === "claude" || engine === "codex" || engine === "opencode" || engine === "gemini";
   const allCandidates = [...allTickets]
     .filter((tkt) => !tkt.isEpic && tkt.status !== "cancelled")
     .reverse();
@@ -374,8 +399,59 @@ export function DispatchTaskModal({
     });
   };
 
+  const buildIntakePayload = () => ({
+    repoId,
+    requirement: intakeRequirement.trim(),
+    title: intakeTitle.trim() || undefined,
+    preferredRoute: intakeRoute,
+    preferredEngine: engine,
+    template,
+    tddMode: tddMode || undefined,
+    deliveryGatePolicy: deliveryGatePolicy || undefined,
+    maxBudgetUsd: Number(budget) || 2.0,
+    metricCommand: intakeMetricCmd.trim() || undefined,
+    targetValue: intakeMetricTarget.trim() ? Number(intakeMetricTarget) : undefined,
+    direction: intakeMetricCmd.trim() ? intakeMetricDir : undefined,
+    modelOverride: isCliEngine ? modelOverride.trim() || undefined : undefined,
+    effortOverride: isCliEngine ? effortOverride || undefined : undefined,
+  });
+
+  const handlePreviewIntake = async () => {
+    if (!intakeRequirement.trim() || !repoId) return;
+    setIntakePreviewing(true);
+    setIntakeError("");
+    try {
+      const { plan } = await api.previewIntake(buildIntakePayload());
+      setIntakePreviewPlan(plan);
+    } catch (err) {
+      setIntakeError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIntakePreviewing(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (dispatchMode === "intake") {
+      if (!intakeRequirement.trim() || !repoId) return;
+      setSubmitting(true);
+      setIntakeError("");
+      try {
+        const res = await api.submitIntake(buildIntakePayload());
+        await onIntakeSuccess?.(res.route);
+        setIntakeRequirement("");
+        setIntakeTitle("");
+        setIntakePreviewPlan(null);
+        setIntakeMetricCmd("");
+        setIntakeMetricTarget("");
+        onClose();
+      } catch (err) {
+        setIntakeError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
     if (!title.trim() || !description.trim()) return;
     setSubmitting(true);
     try {
@@ -458,7 +534,13 @@ export function DispatchTaskModal({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 overflow-y-auto"
     >
       <div
-        className={`w-full ${dispatchMode === "epic" ? "max-w-2xl" : "max-w-lg"} rounded-xl border border-zinc-800 bg-zinc-950 p-5 space-y-4 shadow-2xl my-4 transition-all`}
+        className={`w-full ${
+          dispatchMode === "epic"
+            ? "max-w-2xl"
+            : dispatchMode === "intake"
+              ? "max-w-xl"
+              : "max-w-lg"
+        } rounded-xl border border-zinc-800 bg-zinc-950 p-5 space-y-4 shadow-2xl my-4 transition-all`}
       >
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-semibold text-zinc-100">{t("modal.dispatch.title")}</h3>
@@ -468,7 +550,19 @@ export function DispatchTaskModal({
         </div>
 
         {/* Mode Switcher */}
-        <div className="grid grid-cols-2 gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/70 p-1 text-xs">
+        <div className="grid grid-cols-3 gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/70 p-1 text-xs">
+          <button
+            type="button"
+            onClick={() => setDispatchMode("intake")}
+            className={`inline-flex items-center justify-center gap-1.5 py-1.5 rounded-md font-medium transition ${
+              dispatchMode === "intake"
+                ? "bg-indigo-600 text-white"
+                : "text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            {t("intake.modeTab")}
+          </button>
           <button
             type="button"
             onClick={() => setDispatchMode("single")}
@@ -495,7 +589,179 @@ export function DispatchTaskModal({
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-3 text-xs">
-          {dispatchMode === "single" && blueprints.length > 0 && (
+          {dispatchMode === "intake" ? (
+            <div className="space-y-3">
+              <div>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <label className="block text-zinc-400">{t("intake.requirementLabel")}</label>
+                  <button
+                    type="button"
+                    disabled={intakePreviewing || !intakeRequirement.trim() || !repoId}
+                    onClick={() => void handlePreviewIntake()}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-indigo-500/40 bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-200 text-[11px] disabled:opacity-40 transition"
+                  >
+                    <Sparkles className={`w-3 h-3 ${intakePreviewing ? "animate-spin" : ""}`} />
+                    {intakePreviewing ? t("intake.previewing") : t("intake.previewBtn")}
+                  </button>
+                </div>
+                <textarea
+                  required
+                  rows={4}
+                  value={intakeRequirement}
+                  onChange={(e) => {
+                    setIntakeRequirement(e.target.value);
+                    if (intakePreviewPlan) setIntakePreviewPlan(null);
+                  }}
+                  placeholder={t("intake.requirementPlaceholder")}
+                  className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-100 focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <input
+                    value={intakeTitle}
+                    onChange={(e) => setIntakeTitle(e.target.value)}
+                    placeholder={t("intake.titleOptionalPlaceholder")}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-2 text-zinc-100 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+                <div>
+                  <select
+                    aria-label={t("intake.routeOverrideLabel")}
+                    value={intakeRoute}
+                    onChange={(e) =>
+                      setIntakeRoute(e.target.value as "auto" | RequirementRouteKind)
+                    }
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-2 text-zinc-100"
+                  >
+                    <option value="auto">{t("intake.routeAuto")}</option>
+                    <option value="single_ticket">{t("intake.routeSingle")}</option>
+                    <option value="epic_dag">{t("intake.routeEpic")}</option>
+                    <option value="goal_campaign">{t("intake.routeCampaign")}</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-2.5 space-y-2">
+                <button
+                  type="button"
+                  onClick={() => setIntakeMetricOpen((v) => !v)}
+                  className="w-full flex items-center justify-between text-[11px] text-zinc-300 hover:text-zinc-100"
+                >
+                  <span>{t("intake.metricOptionalTitle")}</span>
+                  {intakeMetricOpen ? (
+                    <ChevronUp className="w-3.5 h-3.5 text-zinc-400" />
+                  ) : (
+                    <ChevronDown className="w-3.5 h-3.5 text-zinc-400" />
+                  )}
+                </button>
+                {(intakeMetricOpen || intakeRoute === "goal_campaign") && (
+                  <div className="grid grid-cols-4 gap-2 pt-1">
+                    <input
+                      value={intakeMetricCmd}
+                      onChange={(e) => setIntakeMetricCmd(e.target.value)}
+                      placeholder="bun run bench"
+                      className="col-span-2 bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 font-mono text-[11px] text-zinc-100"
+                    />
+                    <select
+                      value={intakeMetricDir}
+                      onChange={(e) => setIntakeMetricDir(e.target.value as CampaignDirection)}
+                      className="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-[11px] text-zinc-100"
+                    >
+                      <option value="decrease">decrease</option>
+                      <option value="increase">increase</option>
+                    </select>
+                    <input
+                      type="number"
+                      step="any"
+                      value={intakeMetricTarget}
+                      onChange={(e) => setIntakeMetricTarget(e.target.value)}
+                      placeholder="target"
+                      className="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 font-mono text-[11px] text-zinc-100"
+                    />
+                  </div>
+                )}
+              </div>
+
+              <label className="inline-flex items-center gap-2 text-[11px] text-zinc-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={tddMode}
+                  onChange={(e) => setTddMode(e.target.checked)}
+                  className="rounded border-zinc-700 bg-zinc-900 accent-indigo-500"
+                />
+                <span>{t("modal.dispatch.tddEnable")}</span>
+              </label>
+
+              {intakeError && (
+                <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-200 flex items-center gap-2">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-rose-400" />
+                  <span>{intakeError}</span>
+                </div>
+              )}
+
+              {intakePreviewPlan && (
+                <div className="rounded-xl border border-indigo-500/35 bg-indigo-500/5 p-3 space-y-2">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-1.5 font-semibold text-indigo-200">
+                      <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>{t("intake.previewTitle")}</span>
+                      <span className="px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-700 font-mono text-[10px] text-emerald-300">
+                        {intakePreviewPlan.route}
+                      </span>
+                      <span className="px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-700 font-mono text-[10px] text-zinc-300">
+                        {Math.round(intakePreviewPlan.confidence * 100)}%
+                      </span>
+                    </div>
+                  </div>
+                  <div className="text-[11px] font-medium text-zinc-200">
+                    {intakePreviewPlan.title}
+                  </div>
+                  <p className="text-[11px] text-zinc-400">{intakePreviewPlan.rationale}</p>
+                  {intakePreviewPlan.singleSpec?.allowedPaths &&
+                    intakePreviewPlan.singleSpec.allowedPaths.length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {intakePreviewPlan.singleSpec.allowedPaths.map((p) => (
+                          <code
+                            key={p}
+                            className="px-1.5 py-0.5 rounded bg-zinc-950 border border-zinc-800 font-mono text-[10px] text-emerald-300"
+                          >
+                            {p}
+                          </code>
+                        ))}
+                      </div>
+                    )}
+                  {intakePreviewPlan.epicPlan && (
+                    <div className="space-y-1">
+                      {intakePreviewPlan.epicPlan.subtasks.map((sub, i) => (
+                        <div
+                          key={`${sub.title}_${i}`}
+                          className="rounded border border-zinc-800 bg-zinc-950/70 px-2 py-1 flex items-center justify-between gap-2 text-[10px]"
+                        >
+                          <span className="text-zinc-200 font-medium truncate">
+                            {i + 1}. {sub.title}
+                          </span>
+                          <span className="font-mono text-zinc-400 shrink-0">
+                            {sub.allowedPaths.slice(0, 2).join(", ") || "**/*"}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {intakePreviewPlan.campaignSpec && (
+                    <div className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 font-mono text-[10px] text-amber-200">
+                      {intakePreviewPlan.campaignSpec.direction} →{" "}
+                      {intakePreviewPlan.campaignSpec.targetValue} ·{" "}
+                      {intakePreviewPlan.campaignSpec.metricCommand}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : (
+            <>
+              {dispatchMode === "single" && blueprints.length > 0 && (
             <div className="space-y-1.5">
               <label className="block text-zinc-400">{t("modal.dispatch.blueprintLabel")}</label>
               <div className="flex flex-wrap gap-1.5">
@@ -653,6 +919,8 @@ export function DispatchTaskModal({
               ))}
             </div>
           )}
+            </>
+          )}
           <div className="grid grid-cols-3 gap-3">
             <div>
               <label className="block text-zinc-400 mb-1">{t("modal.dispatch.pipeline")}</label>
@@ -696,7 +964,7 @@ export function DispatchTaskModal({
               />
             </div>
           </div>
-          {dispatchMode === "single" && (
+          {dispatchMode !== "epic" && (
             <div>
               <label className="block text-zinc-400 mb-1">
                 {t("modal.dispatch.gatePolicyLabel")}
@@ -941,7 +1209,7 @@ export function DispatchTaskModal({
                 )}
               </div>
             </div>
-          ) : (
+          ) : dispatchMode === "epic" ? (
             <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-3.5 space-y-3">
               <div>
                 <label className="block text-zinc-400 mb-1">
@@ -1169,7 +1437,7 @@ export function DispatchTaskModal({
                 </div>
               )}
             </div>
-          )}
+          ) : null}
 
           <div className="flex justify-end gap-2 pt-2">
             <button
@@ -1181,14 +1449,16 @@ export function DispatchTaskModal({
             </button>
             <button
               type="submit"
-              disabled={submitting}
+              disabled={submitting || (dispatchMode === "intake" && !intakeRequirement.trim())}
               className="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium disabled:opacity-50"
             >
               {submitting
                 ? t("modal.dispatch.submitting")
-                : dispatchMode === "epic"
-                  ? t("modal.dispatch.epicDispatchBtn")
-                  : t("modal.dispatch.submit")}
+                : dispatchMode === "intake"
+                  ? t("intake.submitBtn")
+                  : dispatchMode === "epic"
+                    ? t("modal.dispatch.epicDispatchBtn")
+                    : t("modal.dispatch.submit")}
             </button>
           </div>
         </form>

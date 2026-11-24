@@ -62,6 +62,7 @@ export function toPublicSetupStatus(
     claudeProfile: {},
     codexProfile: {},
     opencodeProfile: {},
+    geminiProfile: {},
     notifications: { ...DEFAULT_NOTIFICATION_CONFIG },
     updatedAt: scanReport.scannedAt,
   };

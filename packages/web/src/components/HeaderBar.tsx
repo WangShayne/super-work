@@ -83,10 +83,14 @@ function StatusCapsule({
     ? "cursor-pointer hover:border-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/60"
     : "cursor-help";
 
+  const { locale, t } = useI18n();
   const content = (
     <>
       <span className="shrink-0">{icon}</span>
-      <span className="text-zinc-400">{label}：</span>
+      <span className="text-zinc-400">
+        {label}
+        {locale === "zh" ? "：" : ":"}
+      </span>
       <span className="font-medium text-zinc-100">{value}</span>
       {extra && <span className="text-zinc-400 font-mono text-[10px]">{extra}</span>}
     </>
@@ -197,11 +201,24 @@ export function HeaderBar({
               <div className="flex items-center gap-2">
                 <span className="font-semibold tracking-tight text-zinc-100 text-sm">super-work</span>
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
-                  v1.2
+                  v1.3
                 </span>
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700/60">
                   {t("brand.badge")}
                 </span>
+                {health?.selfReload && health.selfReload.phase !== "idle" && (
+                  <span
+                    title={health.selfReload.summary ?? health.selfReload.error}
+                    className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
+                      health.selfReload.phase === "rolled_back" ||
+                      health.selfReload.phase === "failed"
+                        ? "bg-rose-500/15 text-rose-300 border-rose-500/35"
+                        : "bg-amber-500/15 text-amber-200 border-amber-500/35 animate-pulse"
+                    }`}
+                  >
+                    {t(`selfHost.phase.${health.selfReload.phase}` as Parameters<typeof t>[0])}
+                  </span>
+                )}
               </div>
               <p className="text-[11px] text-zinc-500">{t("brand.subtitle")}</p>
             </div>

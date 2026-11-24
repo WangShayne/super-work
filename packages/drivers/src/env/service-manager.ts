@@ -109,6 +109,7 @@ export function buildLaunchdPlistXml(spec: ServiceUnitSpec): string {
     ["PORT", String(spec.port)],
     ["SUPER_WORK_DATA_DIR", spec.dataDir],
     ["SUPER_WORK_LOG_FILE", spec.logFilePath],
+    ["SUPER_WORK_SUPERVISED", "1"],
     ["PATH", spec.pathEnv || process.env.PATH || "/usr/local/bin:/usr/bin:/bin"],
   ];
   if (spec.authToken?.trim()) {
@@ -164,6 +165,7 @@ export function buildSystemdUnitText(spec: ServiceUnitSpec): string {
     `PORT=${spec.port}`,
     `SUPER_WORK_DATA_DIR=${spec.dataDir}`,
     `SUPER_WORK_LOG_FILE=${spec.logFilePath}`,
+    `SUPER_WORK_SUPERVISED=1`,
     `PATH=${spec.pathEnv || process.env.PATH || "/usr/local/bin:/usr/bin:/bin"}`,
   ];
   if (spec.authToken?.trim()) {

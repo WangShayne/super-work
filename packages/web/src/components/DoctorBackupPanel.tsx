@@ -12,7 +12,12 @@ import {
 } from "lucide-react";
 import { useI18n } from "../i18n.tsx";
 import { api } from "../api.ts";
-import type { BackupArchiveInfo, ServiceStatusResponse, SystemDoctorReport } from "../types.ts";
+import type {
+  BackupArchiveInfo,
+  SelfReloadState,
+  ServiceStatusResponse,
+  SystemDoctorReport,
+} from "../types.ts";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -25,6 +30,8 @@ export function DoctorBackupPanel() {
   const [report, setReport] = useState<SystemDoctorReport | null>(null);
   const [backups, setBackups] = useState<BackupArchiveInfo[]>([]);
   const [serviceInfo, setServiceInfo] = useState<ServiceStatusResponse | null>(null);
+  const [reloadState, setReloadState] = useState<SelfReloadState | null>(null);
+  const [triggeringReload, setTriggeringReload] = useState(false);
   const [loadingDoctor, setLoadingDoctor] = useState(false);
   const [fixingDoctor, setFixingDoctor] = useState(false);
   const [creatingBackup, setCreatingBackup] = useState(false);
@@ -37,14 +44,16 @@ export function DoctorBackupPanel() {
     setLoadingDoctor(true);
     setError(null);
     try {
-      const [doc, bk, svc] = await Promise.all([
+      const [doc, bk, svc, rel] = await Promise.all([
         api.runDoctor(false),
         api.listBackups(),
         api.getSystemService(20).catch(() => null),
+        api.getSelfReloadStatus().catch(() => null),
       ]);
       setReport(doc);
       setBackups(bk.backups);
       if (svc) setServiceInfo(svc);
+      if (rel) setReloadState(rel.reload);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -105,6 +114,25 @@ export function DoctorBackupPanel() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setRestoringId(null);
+    }
+  };
+
+  const handleTriggerReload = async () => {
+    setTriggeringReload(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const { reload } = await api.triggerSelfReload();
+      setReloadState(reload);
+      if (reload.phase === "failed") {
+        setError(reload.error ?? reload.summary ?? "Canary reload failed");
+      } else {
+        setNotice(reload.summary ?? `Reload phase: ${reload.phase}`);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTriggeringReload(false);
     }
   };
 
@@ -313,6 +341,43 @@ export function DoctorBackupPanel() {
           </div>
         )}
         <p className="text-[10px] font-mono text-zinc-500">{t("service.installHint")}</p>
+      </section>
+
+      <section className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-3.5 space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <RefreshCw className="w-4 h-4 text-indigo-400" />
+            <h4 className="text-xs font-semibold text-zinc-100">{t("selfHost.title")}</h4>
+            {reloadState && (
+              <span
+                className={`px-2 py-0.5 rounded-full text-[10px] font-mono border ${
+                  reloadState.phase === "rolled_back" || reloadState.phase === "failed"
+                    ? "bg-rose-500/15 text-rose-300 border-rose-500/35"
+                    : reloadState.phase === "idle"
+                      ? "bg-zinc-800 text-zinc-300 border-zinc-700"
+                      : "bg-amber-500/15 text-amber-200 border-amber-500/35"
+                }`}
+              >
+                {t(`selfHost.phase.${reloadState.phase}` as Parameters<typeof t>[0])}
+              </span>
+            )}
+          </div>
+          <button
+            type="button"
+            disabled={triggeringReload || !reloadState?.selfRepoRoot}
+            onClick={() => void handleTriggerReload()}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-indigo-500/40 bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-200 text-[11px] font-medium disabled:opacity-40 transition"
+          >
+            <RefreshCw className={`w-3 h-3 ${triggeringReload ? "animate-spin" : ""}`} />
+            {triggeringReload ? t("selfHost.reloadingBtn") : t("selfHost.reloadBtn")}
+          </button>
+        </div>
+        <p className="text-[11px] text-zinc-400">{t("selfHost.desc")}</p>
+        {reloadState?.summary && (
+          <div className="text-[10px] font-mono text-zinc-300 bg-zinc-950/70 border border-zinc-800 rounded px-2.5 py-1.5">
+            {reloadState.summary}
+          </div>
+        )}
       </section>
     </div>
   );

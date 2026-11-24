@@ -4,10 +4,12 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SuperWorkKernel, type CliScanReport, type SystemSetupConfig, nowIso } from "@super-work/core";
 import {
+  BunSelfHostRunner,
   ClaudeCodeDriver,
   CliEnvironmentScanner,
   CodexDriver,
   FsArtifactStore,
+  GeminiCliDriver,
   GhCliPollingSource,
   GhOutboxExecutor,
   GitWorktreeProvider,
@@ -15,6 +17,7 @@ import {
   MutableControlPlaneLLM,
   NotificationDispatcher,
   OpenCodeDriver,
+  RELOAD_EXIT_CODE,
   SqliteStateStore,
   WorktreePreviewManager,
   assertSafeHostBinding,
@@ -49,6 +52,7 @@ export async function startDaemon(options?: {
   defaultRepoPath?: string;
   authToken?: string;
   enableMockFallback?: boolean;
+  disableSelfHostRunner?: boolean;
 }): Promise<StartedDaemon> {
   const host = (options?.host ?? process.env.HOST ?? "127.0.0.1").trim();
   const port = options?.port ?? Number(process.env.PORT ?? 4318);
@@ -90,12 +94,43 @@ export async function startDaemon(options?: {
     new ClaudeCodeDriver(),
     new CodexDriver(),
     new OpenCodeDriver(),
+    new GeminiCliDriver(),
     new MockWorkerDriver(),
   ];
 
   const previewProvider = new WorktreePreviewManager();
+  const here = dirname(fileURLToPath(import.meta.url));
+  const selfRepoRoot = resolve(here, "../../..");
+  const isCanaryMode = process.env.SUPER_WORK_CANARY_MODE === "1";
 
-  const kernel = new SuperWorkKernel({
+  let kernel!: SuperWorkKernel;
+  let stopDaemonFn: (() => Promise<void>) | null = null;
+
+  const selfHostRunner =
+    options?.disableSelfHostRunner || isCanaryMode
+      ? undefined
+      : new BunSelfHostRunner({
+          selfRepoRoot,
+          bunPath: process.execPath,
+          serverEntryPath: fileURLToPath(import.meta.url),
+          onTriggerReload: async (reason) => {
+            console.log(`[super-work] Reloading daemon: ${reason}`);
+            if (stopDaemonFn) {
+              await stopDaemonFn().catch(() => {});
+            }
+            if (process.env.SUPER_WORK_SUPERVISED === "1") {
+              process.exit(RELOAD_EXIT_CODE);
+            } else {
+              Bun.spawn([process.execPath, ...process.argv.slice(1)], {
+                stdio: ["ignore", "inherit", "inherit"],
+                env: process.env,
+              });
+              process.exit(0);
+            }
+          },
+        });
+
+  kernel = new SuperWorkKernel({
     stateStore,
     artifactStore,
     workspace,
@@ -103,6 +138,7 @@ export async function startDaemon(options?: {
     drivers,
     outboxExecutor: new GhOutboxExecutor(workspace),
     previewProvider,
+    selfHostRunner,
     dataDir,
   });
 
@@ -142,10 +178,15 @@ export async function startDaemon(options?: {
     }
   }
 
-  const here = dirname(fileURLToPath(import.meta.url));
   const webDistDir = resolve(here, "../../web/dist");
   const notificationDispatcher = new NotificationDispatcher(stateStore);
   const detachNotifications = notificationDispatcher.attachToKernel(kernel);
+
+  // Sync super-work.json contracts across all registered repos at daemon boot
+  const registeredRepos = await stateStore.listRepos();
+  for (const regRepo of registeredRepos) {
+    await kernel.syncRepoContract(regRepo.id).catch(() => {});
+  }
 
   const app = createServerApp({
     kernel,
@@ -166,7 +207,9 @@ export async function startDaemon(options?: {
     );
   }
   kernel.start();
-  ghPoller.start();
+  if (!isCanaryMode) {
+    ghPoller.start();
+  }
 
   const server = Bun.serve({
     hostname: host,
@@ -182,6 +225,7 @@ export async function startDaemon(options?: {
     server.stop(true);
     stateStore.close();
   };
+  stopDaemonFn = stop;
 
   return { server, kernel, stateStore, ghPoller, notificationDispatcher, stop };
 }

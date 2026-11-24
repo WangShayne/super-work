@@ -98,15 +98,33 @@ export function classifyTaskCategory(
 function getCategoryPriorBonus(engine: WorkerEngineId, category: TaskCategory): number {
   switch (category) {
     case "ui":
-      return engine === "claude" ? 0.06 : engine === "opencode" ? 0.02 : 0;
+      return engine === "claude"
+        ? 0.06
+        : engine === "gemini"
+          ? 0.04
+          : engine === "opencode"
+            ? 0.02
+            : 0;
     case "backend":
-      return engine === "codex" ? 0.06 : engine === "claude" ? 0.03 : 0;
+      return engine === "codex"
+        ? 0.06
+        : engine === "claude"
+          ? 0.03
+          : engine === "gemini"
+            ? 0.02
+            : 0;
     case "refactor":
       return engine === "claude" ? 0.05 : engine === "codex" ? 0.04 : 0;
     case "test_ci":
       return engine === "codex" ? 0.06 : engine === "claude" ? 0.03 : 0;
     case "docs_chore":
-      return engine === "opencode" ? 0.06 : engine === "claude" ? 0.02 : 0;
+      return engine === "opencode"
+        ? 0.06
+        : engine === "gemini"
+          ? 0.04
+          : engine === "claude"
+            ? 0.02
+            : 0;
   }
 }
 

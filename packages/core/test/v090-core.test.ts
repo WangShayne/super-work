@@ -285,14 +285,16 @@ describe("v0.9.0 Core Modules (A.1 TDD Guard + B.2 Bandit Router + D.1 DAG Cycle
     expect(detectTicketDependencyCycle(deps, "C", ["A"])).toBe(false);
   });
 
-  it("MCP v1.2.0: exposes 21 tools and advertises version 1.2.0 on initialize", async () => {
-    expect(MCP_TOOL_DEFINITIONS.length).toBe(21);
+  it("MCP v1.3.0: exposes 23 tools and advertises version 1.3.0 on initialize", async () => {
+    expect(MCP_TOOL_DEFINITIONS.length).toBe(23);
     const toolNames = MCP_TOOL_DEFINITIONS.map((t) => t.name);
     expect(toolNames).toContain("analyze_impact");
     expect(toolNames).toContain("manage_checkpoints");
     expect(toolNames).toContain("mutate_dag_node");
     expect(toolNames).toContain("submit_review_comments");
     expect(toolNames).toContain("system_doctor");
+    expect(toolNames).toContain("dispatch_requirement");
+    expect(toolNames).toContain("manage_self_host");
 
     const host: McpToolHost = {
       clarifySpec: async () => ({}),
@@ -318,12 +320,12 @@ describe("v0.9.0 Core Modules (A.1 TDD Guard + B.2 Bandit Router + D.1 DAG Cycle
       { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
       host,
     )) as { result?: { serverInfo?: { version?: string } } };
-    expect(initResp.result?.serverInfo?.version).toBe("1.2.0");
+    expect(initResp.result?.serverInfo?.version).toBe("1.3.0");
 
     const listResp = (await handleMcpJsonRpcMessage(
       { jsonrpc: "2.0", id: 2, method: "tools/list" },
       host,
     )) as { result?: { tools?: Array<{ name: string }> } };
-    expect(listResp.result?.tools?.length).toBe(21);
+    expect(listResp.result?.tools?.length).toBe(23);
   });
 });

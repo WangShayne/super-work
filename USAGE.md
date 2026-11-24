@@ -9,7 +9,7 @@ This guide walks through first-run CLI environment scanning, Control-Plane LLM c
 ## 1. First-Run Setup: CLI Environment Scan & Control-Plane LLM
 
 `super-work` cleanly separates the **Control Plane** from the **Execution Plane**:
-- **Execution Plane (Workers)**: Schedules locally installed coding agent CLIs (`claude`, `codex`, `opencode`, etc.) inside isolated `git worktree` sandboxes.
+- **Execution Plane (Workers)**: Schedules locally installed coding agent CLIs (`claude`, `codex`, `opencode`, `gemini`, etc.) inside isolated `git worktree` sandboxes.
 - **Control Plane (Router / Watchdog)**: Handles event triage, Mandate scoping, and Watchdog L2 semantic recovery.
 
 ### Option A: Web First-Run Setup Wizard (Recommended)
@@ -19,8 +19,8 @@ This guide walks through first-run CLI environment scanning, Control-Plane LLM c
    bun run dev
    ```
 2. On first launch (when `initialized` is false), the **First-Run CLI Scan & LLM Setup** wizard opens automatically. You can also reopen it anytime via the **Env & LLM** button in the top-right header:
-   - **Local CLI Toolchain Scan**: Probes `claude`, `codex`, `opencode`, `gh`, `git`, and `bun` for binary paths, versions, authentication state (`Ready` / `Not Logged In` / `Not Found`), and local model/effort defaults from `~/.claude/settings.json`, `~/.codex/config.toml`, and `~/.config/opencode/opencode.json`.
-   - **Default Engines & CLI Model/Effort Profiles**: Configure global `model` and `effort` (`low` / `medium` / `high` / `xhigh` / `max`) independently for `Claude Code`, `Codex CLI`, and `OpenCode CLI` (`provider/model#variant`) without modifying your local config files; **Dispatch Task** also supports per-task model and effort overrides.
+   - **Local CLI Toolchain Scan**: Probes `claude`, `codex`, `opencode`, `gemini`, `gh`, `git`, and `bun` for binary paths, versions, authentication state (`Ready` / `Not Logged In` / `Not Found`), and local model/effort defaults from `~/.claude/settings.json`, `~/.codex/config.toml`, `~/.config/opencode/opencode.json`, and `~/.gemini/settings.json`.
+   - **Default Engines & CLI Model/Effort Profiles**: Configure global `model` and `effort` (`low` / `medium` / `high` / `xhigh` / `max`) independently for `Claude Code`, `Codex CLI`, `OpenCode CLI` (`provider/model#variant`), and `Gemini CLI` without modifying your local config files; **Dispatch Task** also supports per-task model and effort overrides.
    - **Control-Plane LLM**: Pick one of five presets, click **Test Connection** to verify reachability and latency, and click **Save & Activate** (hot-swaps immediately in memory without restarting the server):
 
 | Preset | Best For | Requirements & Cost |
@@ -63,7 +63,7 @@ bun run setup -- --auto
 5. **Deep Dive Drawer & `@super-work/cli`** (`bun run cli` / `super-work`):
    - `super-work up [-d] [--host 127.0.0.1] [--port 4318]` / `super-work service [install|uninstall|start|stop|status|logs]` — Manage foreground or OS background daemon (`launchd` / `systemd --user`).
    - `super-work campaign ...` / `super-work train [list|flush|eject]` — Drive metric Goal Campaigns and inspect/flush/eject Merge Train queues.
-   - `super-work status`, `ask <question>`, `steer <ticketId> <instruction>`, `blueprints`, `dispatch <title> -d <desc> [--blueprint <id>] [--gate-policy <policy>] [--wait]`, `epic <title> [--preview-only|--wait]`, `inbox [list|approve|reject|batch]`, `eval [list|save|run|delete]`, `doctor [--fix]`, `backup [list|create|restore <id>]`, `bundle [export|import <file>]`, `logs <ticketId> [-f]`, `watch [--repo <id>|--ticket <id>]`, `revert <ticketId>`, `playbook [list|add|toggle|delete|sync --export]` — Control tasks, live steer, Chief-of-Staff queries, Golden Eval benchmarks, knowledge bundles, System Doctor/hot backups & restores, and safe merge reverts from the terminal.
+   - `super-work status`, `intake [--preview] [--wait] "<requirement>"`, `wait <ticketId|epicId>`, `reload [--skip-canary] [--force]`, `ask <question>`, `steer <ticketId> <instruction>`, `blueprints`, `dispatch <title> -d <desc> [--blueprint <id>] [--gate-policy <policy>] [--wait]`, `epic <title> [--preview-only|--wait]`, `inbox [list|approve|reject|batch]`, `eval [list|save|run|delete]`, `doctor [--fix]`, `backup [list|create|restore <id>]`, `bundle [export|import <file>]`, `logs <ticketId> [-f]`, `watch [--repo <id>|--ticket <id>]`, `revert <ticketId>`, `playbook [list|add|toggle|delete|sync --export]` — Drop raw natural-language requirements via `intake`, wait on live SSE progress, trigger Boot Canary self-reloads, live-steer workers, query Chief-of-Staff, run Golden Evals, manage backups/restores, and revert merges safely.
 
 ### 3. Pipeline Templates
 
@@ -77,9 +77,10 @@ bun run setup -- --auto
 
 ## 3. Four Everyday Workflows
 
-### 1. Dispatching a Task or Decomposing an Epic DAG
+### 1. Smart Intake, Single Tickets, or Epics (DAG)
 1. Click **Dispatch Task** in the header:
-   - **Single Ticket**: Enter title, goal/verification notes, pipeline template, preferred engine (+ optional per-task model/effort overrides), and narrow **Mandate Allowed Paths** (out-of-scope edits or `.env*` / `*.pem` / `*.key` touches are automatically reverted and escalated).
+   - **Smart Intake (Default)**: Paste any natural-language requirement (with optional quantitative metric command), click **Preview Route & Scope** to inspect the predicted route (`single_ticket`, `epic_dag`, or `goal_campaign`) and scoped paths, and click **Smart Dispatch**—or run `super-work intake --wait "..."` from your terminal.
+   - **Single Ticket**: Enter title, goal/verification notes, pipeline template, preferred engine (`claude` / `codex` / `opencode` / `gemini` + optional per-task model/effort overrides), and narrow **Mandate Allowed Paths** (out-of-scope edits or `.env*` / `*.pem` / `*.key` touches are automatically reverted and escalated).
    - **Decompose Epic (DAG)**: Switch to the Epic tab, keep **Unified Staging Branch (`super-work/epic/<id>`)** or switch to per-subtask delivery, describe a multi-module requirement, and click **Preview Epic DAG** to inline-edit subtask templates, descriptions, allowed paths, and dependency toggles. Completed subtasks merge into the Epic staging branch, run a final Epic verification gate (with 1 auto-fixup round if needed), and open one consolidated PR or atomic merge.
 
 ### 2. Testing `OBSERVE` vs `AUTO` with GitHub Polling & PR Follow-up Loops
@@ -110,7 +111,9 @@ bun run setup -- --auto
 3. **What if the CLI scan reports `Not Logged In`?**
    - Claude Code: run `claude auth login`
    - Codex CLI: run `codex login`
+   - Gemini CLI: run `gemini` (OAuth) or set `GEMINI_API_KEY`
    - GitHub CLI: run `gh auth login`
    - Then click **Setup → Rescan** in the Web dashboard.
+   - Tip: For self-hosted restarts on `super-work` itself, open **Env & LLM → Doctor & Hot Backup → Self-Host Reload** or run `super-work reload`.
 4. **Where are runtime databases, worktrees, and Spill artifacts stored?**
    - Everything lives inside `.super-work/` (or `SUPER_WORK_DATA_DIR`), which is ignored by `.gitignore`. By default, delivered and cancelled worktree directories are automatically reclaimed while keeping committed branches viewable, or click **Worktrees** in the header strip to run manual GC.

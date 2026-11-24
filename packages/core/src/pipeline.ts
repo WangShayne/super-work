@@ -144,12 +144,14 @@ export function getAlternateEngine(
 ): WorkerEngineId | undefined {
   const preferenceOrder: WorkerEngineId[] =
     current === "claude"
-      ? ["codex", "opencode", "mock"]
+      ? ["codex", "gemini", "opencode", "mock"]
       : current === "codex"
-        ? ["claude", "opencode", "mock"]
-        : current === "opencode"
-          ? ["claude", "codex", "mock"]
-          : ["claude", "codex"];
+        ? ["claude", "gemini", "opencode", "mock"]
+        : current === "gemini"
+          ? ["codex", "claude", "opencode", "mock"]
+          : current === "opencode"
+            ? ["claude", "codex", "gemini", "mock"]
+            : ["claude", "codex", "gemini"];
 
   for (const candidate of preferenceOrder) {
     if (candidate !== current && available.includes(candidate)) {

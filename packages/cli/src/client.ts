@@ -28,10 +28,14 @@ import type {
   RepoContractFile,
   RepoKnowledgeBundle,
   RepoMetricsSummary,
+  RequirementIntakeInput,
+  RequirementIntakePlan,
+  RequirementIntakeResult,
   RestoreCheckpointInput,
   RoutineRun,
   RoutineScheduleKind,
   RoutineSpec,
+  SelfReloadState,
   ServiceDaemonStatus,
   SpecClarificationResult,
   SpillArtifact,
@@ -77,6 +81,7 @@ export interface DaemonHealth {
     activeCampaigns?: number;
     queuedMergeTrain?: number;
   };
+  selfReload?: SelfReloadState;
   timestamp: string;
 }
 
@@ -679,6 +684,34 @@ export class SuperWorkHttpClient {
     logs: { logFilePath: string; exists: boolean; lines: string[] };
   }> {
     return this.request(`/api/system/service?lines=${encodeURIComponent(String(lines))}`);
+  }
+
+  previewIntake(payload: RequirementIntakeInput): Promise<{ plan: RequirementIntakePlan }> {
+    return this.request<{ plan: RequirementIntakePlan }>("/api/intake/preview", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  submitIntake(payload: RequirementIntakeInput): Promise<RequirementIntakeResult> {
+    return this.request<RequirementIntakeResult>("/api/intake", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  getReloadStatus(): Promise<{ reload: SelfReloadState }> {
+    return this.request<{ reload: SelfReloadState }>("/api/system/reload");
+  }
+
+  triggerReload(options?: {
+    force?: boolean;
+    skipCanary?: boolean;
+  }): Promise<{ reload: SelfReloadState }> {
+    return this.request<{ reload: SelfReloadState }>("/api/system/reload", {
+      method: "POST",
+      body: JSON.stringify(options ?? {}),
+    });
   }
 
   async streamEvents(

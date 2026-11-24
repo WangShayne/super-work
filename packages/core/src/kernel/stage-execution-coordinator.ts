@@ -739,7 +739,9 @@ export async function runTicketStageOp(
         ? setupConfig?.codexProfile
         : driver.engine === "opencode"
           ? setupConfig?.opencodeProfile
-          : undefined;
+          : driver.engine === "gemini"
+            ? setupConfig?.geminiProfile
+            : undefined;
   const canApplyModelOverride = Boolean(
     ticket.modelOverride &&
       stage !== "review" &&

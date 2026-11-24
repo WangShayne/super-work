@@ -1,5 +1,5 @@
 export type OperatingMode = "off" | "observe" | "auto";
-export type WorkerEngineId = "claude" | "codex" | "opencode" | "mock";
+export type WorkerEngineId = "claude" | "codex" | "opencode" | "gemini" | "mock";
 export type EnginePreference = WorkerEngineId | "auto";
 export type TaskCategory = "ui" | "backend" | "refactor" | "test_ci" | "docs_chore";
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -580,6 +580,7 @@ export interface HealthResponse {
     activeCampaigns?: number;
     queuedMergeTrain?: number;
   };
+  selfReload?: SelfReloadState;
   timestamp: string;
 }
 
@@ -728,7 +729,7 @@ export interface LiveEventLogEntry {
   raw?: unknown;
 }
 
-export type CliToolId = "claude" | "codex" | "opencode" | "gh" | "git" | "bun";
+export type CliToolId = "claude" | "codex" | "opencode" | "gemini" | "gh" | "git" | "bun";
 
 export interface DetectedCliTool {
   id: CliToolId;
@@ -772,6 +773,7 @@ export interface PublicSetupStatus {
     claudeProfile?: EngineModelProfile;
     codexProfile?: EngineModelProfile;
     opencodeProfile?: EngineModelProfile;
+    geminiProfile?: EngineModelProfile;
     notifications?: Omit<
       NotificationConfig,
       "webhookSecret" | "actionSecret" | "githubWebhookSecret"
@@ -1227,4 +1229,92 @@ export interface ServiceDaemonStatus {
 export interface ServiceStatusResponse {
   status: ServiceDaemonStatus;
   logs: { logFilePath: string; exists: boolean; lines: string[] };
+}
+
+export type RequirementRouteKind = "single_ticket" | "epic_dag" | "goal_campaign";
+
+export interface RequirementIntakeInput {
+  repoId: string;
+  requirement: string;
+  title?: string;
+  preferredRoute?: "auto" | RequirementRouteKind;
+  preferredEngine?: EnginePreference;
+  template?: PipelineTemplateId;
+  tddMode?: boolean;
+  deliveryGatePolicy?: DeliveryGatePolicy;
+  maxBudgetUsd?: number;
+  previewOnly?: boolean;
+  metricCommand?: string;
+  metricRegex?: string;
+  metricUnit?: string;
+  direction?: CampaignDirection;
+  targetValue?: number;
+  modelOverride?: string;
+  effortOverride?: ReasoningEffort;
+}
+
+export interface RequirementIntakePlan {
+  route: RequirementRouteKind;
+  confidence: number;
+  rationale: string;
+  title: string;
+  summary: string;
+  singleSpec?: {
+    description: string;
+    template: PipelineTemplateId;
+    tddMode: boolean;
+    allowedPaths: string[];
+    acceptanceCriteria: string[];
+    priority: number;
+  };
+  epicPlan?: EpicDecompositionPlan & {
+    epicDeliveryMode: EpicDeliveryMode;
+    releaseBarrier?: boolean;
+  };
+  campaignSpec?: {
+    name: string;
+    goalPrompt: string;
+    metricCommand: string;
+    metricRegex?: string;
+    metricUnit?: string;
+    direction: CampaignDirection;
+    targetValue: number;
+    deliveryMode: CampaignDeliveryMode;
+    allowedPaths: string[];
+    maxIterations: number;
+    maxTotalBudgetUsd: number;
+  };
+  probeSteps?: ControlProbeStep[];
+}
+
+export interface RequirementIntakeResult {
+  route: RequirementRouteKind;
+  plan: RequirementIntakePlan;
+  ticket?: Ticket;
+  epic?: Ticket;
+  subtasks?: Ticket[];
+  campaign?: GoalCampaign;
+}
+
+export type SelfReloadPhase =
+  | "idle"
+  | "building"
+  | "canary_probing"
+  | "draining"
+  | "reloading"
+  | "rolled_back"
+  | "failed";
+
+export interface SelfReloadState {
+  phase: SelfReloadPhase;
+  selfRepoRoot?: string;
+  ticketId?: string;
+  commitSha?: string;
+  revertCommitSha?: string;
+  canaryPort?: number;
+  canaryDurationMs?: number;
+  activeRunsRemaining?: number;
+  summary?: string;
+  error?: string;
+  updatedAt: string;
 }

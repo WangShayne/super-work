@@ -6,6 +6,7 @@ import type {
   OutboxExecutor,
   PreviewProvider,
   RepoProbeExecutor,
+  SelfHostRunner,
   StateStore,
   WorkerDriver,
   WorkspaceProvider,
@@ -19,6 +20,7 @@ import type {
   OutboxEntry,
   PlaybookEntry,
   RepoConfig,
+  SelfReloadState,
   SpillArtifact,
   StageKind,
   StageRun,
@@ -40,6 +42,11 @@ export interface KernelCoordinatorContext {
   watchdog: TwoTierWatchdog;
   outboxExecutor: OutboxExecutor;
   previewProvider?: PreviewProvider;
+  selfHostRunner?: SelfHostRunner;
+  selfReloadState: SelfReloadState;
+  setSelfReloadState(next: SelfReloadState): void;
+  hasActiveOutboxFlush(): boolean;
+  revertTicketDelivery(ticketId: string): Promise<{ ticket: Ticket; revertCommitSha: string }>;
   dataDir: string;
   drivers: Map<WorkerEngineId, WorkerDriver>;
   activeTicketRuns: Map<string, Promise<void>>;

@@ -40,6 +40,9 @@ import type {
   RepoContractFile,
   RepoKnowledgeBundle,
   RepoMetricsSummary,
+  RequirementIntakeInput,
+  RequirementIntakePlan,
+  RequirementIntakeResult,
   RestoreCheckpointInput,
   ReviewCommentStatus,
   RoutinePresetTemplate,
@@ -47,6 +50,7 @@ import type {
   RoutineScheduleKind,
   RoutineSpec,
   SandboxMode,
+  SelfReloadState,
   ServiceStatusResponse,
   SmokeCheckConfig,
   SpecClarificationResult,
@@ -642,6 +646,7 @@ export const api = {
     claudeProfile?: EngineModelProfile;
     codexProfile?: EngineModelProfile;
     opencodeProfile?: EngineModelProfile;
+    geminiProfile?: EngineModelProfile;
     notifications?: Partial<NotificationConfig> & {
       clearWebhookSecret?: boolean;
       clearActionSecret?: boolean;
@@ -721,4 +726,24 @@ export const api = {
 
   getSystemService: (lines = 40) =>
     request<ServiceStatusResponse>(`/api/system/service?lines=${encodeURIComponent(String(lines))}`),
+
+  previewIntake: (payload: RequirementIntakeInput) =>
+    request<{ plan: RequirementIntakePlan }>("/api/intake/preview", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  submitIntake: (payload: RequirementIntakeInput) =>
+    request<RequirementIntakeResult>("/api/intake", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  getSelfReloadStatus: () => request<{ reload: SelfReloadState }>("/api/system/reload"),
+
+  triggerSelfReload: (options?: { force?: boolean; skipCanary?: boolean }) =>
+    request<{ reload: SelfReloadState }>("/api/system/reload", {
+      method: "POST",
+      body: JSON.stringify(options ?? {}),
+    }),
 };

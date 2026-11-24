@@ -39,6 +39,9 @@ describe("CliEnvironmentScanner", () => {
         if (sub === "--version") return { exitCode: 0, stdout: "opencode v2.1.2", stderr: "" };
         if (sub.startsWith("auth list")) return { exitCode: 0, stdout: "[]", stderr: "" };
       }
+      if (bin.endsWith("gemini")) {
+        if (sub === "--version") return { exitCode: 0, stdout: "0.66.0", stderr: "" };
+      }
       if (bin.endsWith("gh")) {
         if (sub === "--version") return { exitCode: 0, stdout: "gh version 2.96.0", stderr: "" };
         if (sub === "auth status") {
@@ -69,7 +72,7 @@ describe("CliEnvironmentScanner", () => {
     });
 
     const report = await scanner.scanAll();
-    expect(report.tools).toHaveLength(6);
+    expect(report.tools).toHaveLength(7);
     expect(report.recommendedImplementEngine).toBe("claude");
     expect(report.recommendedReviewEngine).toBe("codex");
 

@@ -64,6 +64,7 @@ export function registerSetupSystemRoutes(ctx: ServerRouteContext): void {
           (m) => m.status === "queued" || m.status === "validating" || m.status === "barrier_waiting",
         ).length,
       },
+      selfReload: kernel.getSelfReloadState(),
       timestamp: nowIso(),
     });
   });
@@ -124,6 +125,7 @@ export function registerSetupSystemRoutes(ctx: ServerRouteContext): void {
       claudeProfile?: EngineModelProfile;
       codexProfile?: EngineModelProfile;
       opencodeProfile?: EngineModelProfile;
+      geminiProfile?: EngineModelProfile;
       notifications?: Partial<NotificationConfig> & {
         clearWebhookSecret?: boolean;
         clearActionSecret?: boolean;
@@ -228,6 +230,10 @@ export function registerSetupSystemRoutes(ctx: ServerRouteContext): void {
         body.opencodeProfile !== undefined
           ? cleanProfile(body.opencodeProfile)
           : (existing?.opencodeProfile ?? {}),
+      geminiProfile:
+        body.geminiProfile !== undefined
+          ? cleanProfile(body.geminiProfile)
+          : (existing?.geminiProfile ?? {}),
       notifications: nextNotifications,
       updatedAt: nowIso(),
     };
@@ -327,5 +333,21 @@ export function registerSetupSystemRoutes(ctx: ServerRouteContext): void {
     const status = await ctx.serviceManager.status();
     const logs = ctx.serviceManager.readLogs(tailLines);
     return c.json({ status, logs });
+  });
+
+  app.get("/api/system/reload", (c) => {
+    return c.json({ reload: kernel.getSelfReloadState() });
+  });
+
+  app.post("/api/system/reload", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      force?: boolean;
+      skipCanary?: boolean;
+    };
+    const reload = await kernel.triggerSelfReload({
+      force: Boolean(body.force),
+      skipCanary: Boolean(body.skipCanary),
+    });
+    return c.json({ reload }, reload.phase === "failed" ? 500 : 202);
   });
 }

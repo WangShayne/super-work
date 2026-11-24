@@ -13,6 +13,7 @@ import type {
   MemorySearchHit,
   MergeTrainEntry,
   MergeTrainEntryStatus,
+  OutboxAction,
   OutboxEntry,
   OutboxStatus,
   PlaybookEntry,
@@ -685,16 +686,25 @@ export class SqliteStateStore implements StateStore {
       );
   }
 
-  async claimNextOutboxEntries(limit: number, nowIso: string): Promise<OutboxEntry[]> {
+  async claimNextOutboxEntries(
+    limit: number,
+    nowIso: string,
+    excludeActions?: OutboxAction[],
+  ): Promise<OutboxEntry[]> {
     const claimTx = this.db.transaction((): OutboxEntry[] => {
+      const excludes = (excludeActions ?? []).filter(Boolean);
+      const excludeClause =
+        excludes.length > 0
+          ? ` AND action NOT IN (${excludes.map(() => "?").join(", ")})`
+          : "";
       const rows = this.db
         .query(
           `SELECT * FROM outbox_entries
-           WHERE status = 'pending' AND next_attempt_at <= ?
+           WHERE status = 'pending' AND next_attempt_at <= ?${excludeClause}
            ORDER BY created_at ASC
            LIMIT ?`,
         )
-        .all(nowIso, limit) as Record<string, unknown>[];
+        .all(nowIso, ...excludes, limit) as Record<string, unknown>[];
 
       const claimed: OutboxEntry[] = [];
       for (const row of rows) {
@@ -716,6 +726,14 @@ export class SqliteStateStore implements StateStore {
       )
       .run(nowIso, nowIso);
     return Number(res.changes ?? 0);
+  }
+
+  checkpointWal(): void {
+    try {
+      this.db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    } catch {
+      // Non-fatal WAL checkpoint
+    }
   }
 
   // --- Daily Budget & Metrics ---

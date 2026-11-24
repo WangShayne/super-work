@@ -193,6 +193,7 @@ export function App() {
       "campaign_updated",
       "merge_train_updated",
       "lifecycle_hook_executed",
+      "self_reload_updated",
     ];
 
     for (const name of eventNames) {
@@ -464,6 +465,10 @@ export function App() {
               defaultTddMode={activeRepo.defaultTddMode}
               defaultEngine={activeRepo.preferredImplementEngine}
               onClose={() => setDispatchOpen(false)}
+              onIntakeSuccess={async (route) => {
+                await refreshAll(activeRepo.id);
+                setActiveTab(route === "goal_campaign" ? "routines" : "board");
+              }}
               onSubmit={async (data) => {
                 await api.createTicket({ repoId: activeRepo.id, ...data });
                 await refreshAll(activeRepo.id);

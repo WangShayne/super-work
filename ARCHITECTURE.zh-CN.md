@@ -36,6 +36,7 @@ flowchart TB
         Claude["ClaudeCodeDriver"]
         Codex["CodexDriver"]
         OpenCode["OpenCodeDriver"]
+        Gemini["GeminiCliDriver"]
         Mock["MockWorkerDriver"]
     end
 
@@ -49,6 +50,7 @@ flowchart TB
     MandateGuard --> Claude
     MandateGuard --> Codex
     MandateGuard --> OpenCode
+    MandateGuard --> Gemini
     MandateGuard --> Mock
     Watchdog -.->|"监控事件流与 Diff 进展"| MandateGuard
     Watchdog -.->|"纠偏 / 换引擎 / 升级交人"| Scheduler
@@ -155,3 +157,8 @@ stateDiagram-v2
 - **指标驱动 `GoalCampaign`（[campaign.ts](./packages/core/src/campaign.ts)、[campaign-coordinator.ts](./packages/core/src/kernel/campaign-coordinator.ts)）**：通过独立 `metric-worktrees/` 测量初始指标基线，默认在隔离分支 `super-work/campaign/<id>`（或 `per_wave_merge`）上逐波次自主迭代并按正则/末行数值对比收益；若出现退化或报错则调用 `resetBranchRef` 执行**单调分支回退**并留存教训；连续 2 轮无增益、达波次上限或预算触顶时熔断转入 `campaign_paused` Inbox 卡交由人工指引或交付。
 - **并行投机合并列车与跨仓释放屏障（[merge-train.ts](./packages/core/src/merge-train.ts)、[merge-train-coordinator.ts](./packages/core/src/kernel/merge-train-coordinator.ts)）**：当仓库仅有 1 笔 `local_merge` 且基线 HEAD 未变且无等待屏障时直接走 **Smart-Bypass 零开销快速通道**；并发入队时在 `train-worktrees/` 按序叠加最多 3 个 `--no-ff` 投机合并槽位并发跑校验，对连续通过的最长前缀执行一次 Fast-Forward 并完整保留各任务独立 `--no-ff` Merge SHA（**单任务 `git revert -m 1` 完整保留**），且通过 `evaluateSpeculativePrefix` 精确定位并驱逐首个失败槽位；跨仓库 Epic 默认开启 `barrierGroupId` 释放屏障并在进入 `barrier_waiting` 时提前物化 `HandoverDigest` 消除跨仓依赖死锁。
 - **确定性 Hooks、不可变 `super-work.json` 与 `ServiceManager`（[lifecycle-hooks.ts](./packages/core/src/kernel/lifecycle-hooks.ts)、[service-manager.ts](./packages/drivers/src/env/service-manager.ts)）**：将 `IMMUTABLE_REPO_PATHS`（`super-work.json`、`**/super-work.json`）纳入 OS 沙箱只读白名单（Worker 可读取、禁止修改并由 Mandate 强制回滚且 `canExpandMandate: false`）；交付与升级链路分别触发阻塞型 `pre_deliver` 与尽责异步 `post_deliver` / `on_escalate` Hook（全量使用脱敏环境变量并注入 `SUPER_WORK_HOOK_*`）；新增零外部依赖 `launchd` / `systemd --user` 守护进程管理、`127.0.0.1` 回环绑定守卫、`10 MB` 日志轮转与 **21 个 MCP 工具（`1.2.0`）**。
+
+### 3.9 `v1.3.0` 自举奠基、智能需求直投与 `GeminiCliDriver`
+- **智能统一需求直投（[intake.ts](./packages/core/src/intake.ts)、[router.ts](./packages/core/src/router.ts)）**：通过 `POST /api/intake`、`POST /api/intake/preview`、`super-work intake` 与 MCP `dispatch_requirement` 接收任意自然语言需求，结合 `ReadOnlyRepoProber` 与 `ControlPlaneLLM.planRequirementIntake` / `heuristicPlanRequirementIntake` 自动路由至作用域收敛的 `single_ticket`、跨包并行 `epic_dag` 或指标驱动 `goal_campaign`。
+- **自举分级自治与 Boot Canary 排空平滑重载（[self-host-coordinator.ts](./packages/core/src/kernel/self-host-coordinator.ts)、[self-host-runner.ts](./packages/drivers/src/env/self-host-runner.ts)、[scripts/dev.ts](./scripts/dev.ts)）**：守护进程启动时同步所有已注册仓库的 `super-work.json`（含 `defaultMode` 与 `defaultDeliveryChannel`）。当自身仓库主干合入非纯文档改动后，触发 `BunSelfHostRunner` 执行构建并在随机端口以 `SUPER_WORK_CANARY_MODE=1` 冷启探活 `/api/health`；探活成功即停止新派单（`isDraining()`）、等待在途任务清空并执行 `PRAGMA wal_checkpoint(TRUNCATE)`，最后以 `RELOAD_EXIT_CODE = 75` 优雅退出由监控循环秒级拉起新进程；若构建或探活失败则自动 `git revert` 坏提交，在线服务不宕机并升级待决告警至收件箱。
+- **四引擎执行池、回环保留沙箱、Monorepo 软链与无饥饿 Outbox（[gemini-cli-driver.ts](./packages/drivers/src/workers/gemini-cli-driver.ts)、[os-sandbox.ts](./packages/drivers/src/sandbox/os-sandbox.ts)、[sqlite-state-store.ts](./packages/drivers/src/storage/sqlite-state-store.ts)）**：接入原生 `GeminiCliDriver`（`-p -o stream-json --skip-trust --approval-mode plan|yolo` 与 delta 增量缓冲），macOS Seatbelt 在 `balanced` 模式下保留 `localhost:*` 测试回环（`strict` 保持纯零网络隔离），工作树自动同步本地 `packages/*` 符号链接，MergeTrain 交付后即刻清理检查点 ref，SQL Outbox 认领通过 `NOT IN` 过滤挂起屏障消除队头饥饿，并将 MCP 升级至 `1.3.0`（**23 个工具**）。

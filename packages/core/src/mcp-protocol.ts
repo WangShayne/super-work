@@ -40,6 +40,8 @@ export interface McpToolHost {
   manageEvals?(args: Record<string, unknown>): Promise<unknown>;
   manageCampaigns?(args: Record<string, unknown>): Promise<unknown>;
   manageMergeTrain?(args: Record<string, unknown>): Promise<unknown>;
+  dispatchRequirement?(args: Record<string, unknown>): Promise<unknown>;
+  manageSelfHost?(args: Record<string, unknown>): Promise<unknown>;
 }
 
 export const MCP_PROTOCOL_VERSIONS = ["2025-03-26", "2024-11-05"] as const;
@@ -78,9 +80,9 @@ export const MCP_TOOL_DEFINITIONS = [
         template: { type: "string", enum: ["fast", "standard", "strict"] },
         allowedPaths: { type: "array", items: { type: "string" } },
         dependsOn: { type: "array", items: { type: "string" } },
-        preferredEngine: { type: "string", enum: ["auto", "claude", "codex", "opencode", "mock"] },
+        preferredEngine: { type: "string", enum: ["auto", "claude", "codex", "opencode", "gemini", "mock"] },
         arenaMode: { type: "boolean" },
-        arenaCompetitorEngine: { type: "string", enum: ["claude", "codex", "opencode", "mock"] },
+        arenaCompetitorEngine: { type: "string", enum: ["claude", "codex", "opencode", "gemini", "mock"] },
         tddMode: { type: "boolean" },
         blueprintId: { type: "string" },
         deliveryGatePolicy: { type: "string", enum: ["always_auto", "risk_gated", "always_signoff"] },
@@ -226,7 +228,7 @@ export const MCP_TOOL_DEFINITIONS = [
         baseCheckpointId: { type: "string" },
         mode: { type: "string", enum: ["in_place", "fork"] },
         prompt: { type: "string" },
-        preferredEngine: { type: "string", enum: ["auto", "claude", "codex", "opencode", "mock"] },
+        preferredEngine: { type: "string", enum: ["auto", "claude", "codex", "opencode", "gemini", "mock"] },
       },
       required: ["action", "ticketId"],
     },
@@ -242,7 +244,7 @@ export const MCP_TOOL_DEFINITIONS = [
         action: { type: "string", enum: ["update", "pause", "resume", "rerun"] },
         title: { type: "string" },
         description: { type: "string" },
-        preferredEngine: { type: "string", enum: ["auto", "claude", "codex", "opencode", "mock"] },
+        preferredEngine: { type: "string", enum: ["auto", "claude", "codex", "opencode", "gemini", "mock"] },
         allowedPaths: { type: "array", items: { type: "string" } },
         dependsOn: { type: "array", items: { type: "string" } },
         tddMode: { type: "boolean" },
@@ -300,7 +302,7 @@ export const MCP_TOOL_DEFINITIONS = [
       properties: {
         ticketId: { type: "string" },
         instruction: { type: "string" },
-        preferredEngine: { type: "string", enum: ["auto", "claude", "codex", "opencode", "mock"] },
+        preferredEngine: { type: "string", enum: ["auto", "claude", "codex", "opencode", "gemini", "mock"] },
       },
       required: ["ticketId", "instruction"],
     },
@@ -379,7 +381,7 @@ export const MCP_TOOL_DEFINITIONS = [
         deliveryMode: { type: "string", enum: ["staging_branch", "per_wave_merge"] },
         allowedPaths: { type: "array", items: { type: "string" } },
         template: { type: "string", enum: ["fast", "standard", "strict"] },
-        preferredEngine: { type: "string", enum: ["auto", "claude", "codex", "opencode"] },
+        preferredEngine: { type: "string", enum: ["auto", "claude", "codex", "opencode", "gemini"] },
         maxIterations: { type: "number" },
         maxTotalBudgetUsd: { type: "number" },
         autoStart: { type: "boolean" },
@@ -404,6 +406,55 @@ export const MCP_TOOL_DEFINITIONS = [
         repoId: { type: "string" },
         entryId: { type: "string" },
         reason: { type: "string" },
+      },
+      required: ["action"],
+    },
+  },
+  {
+    name: "dispatch_requirement",
+    description:
+      "Smart Unified Requirement Intake: pass a raw natural-language requirement and auto-route into a scoped single Ticket, multi-subtask Epic DAG, or metric-driven GoalCampaign (set previewOnly=true to preview the route first).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repoId: { type: "string" },
+        requirement: { type: "string" },
+        title: { type: "string" },
+        preferredRoute: {
+          type: "string",
+          enum: ["auto", "single_ticket", "epic_dag", "goal_campaign"],
+        },
+        preferredEngine: {
+          type: "string",
+          enum: ["auto", "claude", "codex", "opencode", "gemini", "mock"],
+        },
+        template: { type: "string", enum: ["fast", "standard", "strict"] },
+        tddMode: { type: "boolean" },
+        deliveryGatePolicy: {
+          type: "string",
+          enum: ["always_auto", "risk_gated", "always_signoff"],
+        },
+        maxBudgetUsd: { type: "number" },
+        previewOnly: { type: "boolean" },
+        metricCommand: { type: "string" },
+        metricRegex: { type: "string" },
+        metricUnit: { type: "string" },
+        direction: { type: "string", enum: ["increase", "decrease"] },
+        targetValue: { type: "number" },
+      },
+      required: ["repoId", "requirement"],
+    },
+  },
+  {
+    name: "manage_self_host",
+    description:
+      "Inspect self-hosting Canary/Drain reload status or trigger a build + Boot Canary + drain reload on the running super-work daemon.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["status", "reload"] },
+        force: { type: "boolean" },
+        skipCanary: { type: "boolean" },
       },
       required: ["action"],
     },
@@ -492,7 +543,7 @@ async function handleSingleMcpRequest(
             },
             serverInfo: {
               name: "super-work",
-              version: "1.2.0",
+              version: "1.3.0",
             },
           },
         };
@@ -601,6 +652,18 @@ async function handleSingleMcpRequest(
                 throw new Error("manage_merge_train is not implemented on this MCP host");
               }
               result = await host.manageMergeTrain(args);
+              break;
+            case "dispatch_requirement":
+              if (!host.dispatchRequirement) {
+                throw new Error("dispatch_requirement is not implemented on this MCP host");
+              }
+              result = await host.dispatchRequirement(args);
+              break;
+            case "manage_self_host":
+              if (!host.manageSelfHost) {
+                throw new Error("manage_self_host is not implemented on this MCP host");
+              }
+              result = await host.manageSelfHost(args);
               break;
             default:
               return jsonRpcError(id, -32601, `Unknown tool: ${name}`);

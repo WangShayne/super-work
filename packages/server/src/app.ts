@@ -59,6 +59,8 @@ function resolveEventTarget(
       return { repoId: event.repoId };
     case "lifecycle_hook_executed":
       return { repoId: event.repoId, ticketId: event.ticketId };
+    case "self_reload_updated":
+      return { ticketId: event.state.ticketId };
     case "casebook_updated":
       return { repoId: event.repoId, ticketId: event.entry.ticketId };
     case "epic_replanned":

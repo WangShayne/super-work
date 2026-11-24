@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -91,6 +92,7 @@ export class CliEnvironmentScanner {
       this.probeClaude(),
       this.probeCodex(),
       this.probeOpenCode(),
+      this.probeGemini(),
       this.probeGh(),
       this.probeGit(),
       this.probeBun(),
@@ -351,6 +353,71 @@ export class CliEnvironmentScanner {
     };
   }
 
+  private async probeGemini(): Promise<DetectedCliTool> {
+    const binaryPath = this.which("gemini") ?? undefined;
+    if (!binaryPath) {
+      return this.notInstalled("gemini", "Gemini CLI", true);
+    }
+
+    const [verRes, localDefaults] = await Promise.all([
+      this.runCmd([binaryPath, "--version"]),
+      this.readGeminiLocalDefaults(),
+    ]);
+
+    const hasApiKey = Boolean(
+      process.env.GEMINI_API_KEY?.trim() || process.env.GOOGLE_API_KEY?.trim(),
+    );
+    const hasOAuthCreds = existsSync(join(this.homeDir, ".gemini", "oauth_creds.json"));
+    const hasGoogleAccounts = existsSync(join(this.homeDir, ".gemini", "google_accounts.json"));
+    const authenticated =
+      hasApiKey || hasOAuthCreds || hasGoogleAccounts || Boolean(localDefaults.selectedAuthType);
+    const authSummary = hasApiKey
+      ? "API Key"
+      : localDefaults.selectedAuthType
+        ? localDefaults.selectedAuthType
+        : hasOAuthCreds || hasGoogleAccounts
+          ? "oauth-personal"
+          : "not logged in";
+
+    return {
+      id: "gemini",
+      name: "Gemini CLI",
+      installed: true,
+      binaryPath,
+      version: firstLine(verRes.stdout || verRes.stderr),
+      authenticated,
+      authSummary,
+      localDefaultModel: localDefaults.localDefaultModel,
+      workerSupported: true,
+    };
+  }
+
+  private async readGeminiLocalDefaults(): Promise<{
+    localDefaultModel?: string;
+    selectedAuthType?: string;
+  }> {
+    try {
+      const raw = await readFile(join(this.homeDir, ".gemini", "settings.json"), "utf8");
+      const parsed = JSON.parse(raw) as {
+        model?: { name?: string } | string;
+        security?: { auth?: { selectedType?: string } };
+        selectedAuthType?: string;
+      };
+      const localDefaultModel =
+        typeof parsed.model === "string"
+          ? parsed.model
+          : typeof parsed.model?.name === "string"
+            ? parsed.model.name
+            : undefined;
+      const selectedAuthType =
+        parsed.security?.auth?.selectedType ??
+        (typeof parsed.selectedAuthType === "string" ? parsed.selectedAuthType : undefined);
+      return { localDefaultModel, selectedAuthType };
+    } catch {
+      return {};
+    }
+  }
+
   private async probeGh(): Promise<DetectedCliTool> {
     const binaryPath = this.which("gh") ?? undefined;
     if (!binaryPath) {
@@ -445,9 +512,9 @@ export function computeRecommendedEngines(tools: DetectedCliTool[]): {
   recommendedReviewEngine: WorkerEngineId;
 } {
   const byId = new Map(tools.map((t) => [t.id, t]));
-  type CliWorkerId = "claude" | "codex" | "opencode";
-  const implOrder: CliWorkerId[] = ["claude", "codex", "opencode"];
-  const reviewOrder: CliWorkerId[] = ["codex", "claude", "opencode"];
+  type CliWorkerId = "claude" | "codex" | "opencode" | "gemini";
+  const implOrder: CliWorkerId[] = ["claude", "codex", "gemini", "opencode"];
+  const reviewOrder: CliWorkerId[] = ["codex", "gemini", "claude", "opencode"];
 
   const isAuth = (id: CliWorkerId) => {
     const t = byId.get(id);

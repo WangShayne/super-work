@@ -247,10 +247,10 @@ describe("v1.1.0 End-to-End Capabilities (A.1 Probes + A.2 Chief & Batch Inbox +
       expect(remainingPending[0]?.kind).toBe("mandate_violation");
       await kernel.runUntilIdle(30);
 
-      // 5. MCP 1.2.0 (GET /api/mcp + 21 tools + tools/call ask_chief)
+      // 5. MCP (GET /api/mcp + 23 tools + tools/call ask_chief)
       const mcpInfoRes = await fetch(`${baseUrl}/api/mcp`);
       expect(mcpInfoRes.status).toBe(200);
-      expect(((await mcpInfoRes.json()) as { version: string }).version).toBe("1.2.0");
+      expect(((await mcpInfoRes.json()) as { version: string }).version).toBe("1.3.0");
 
       const toolsListRes = await fetch(`${baseUrl}/api/mcp`, {
         method: "POST",
@@ -260,7 +260,7 @@ describe("v1.1.0 End-to-End Capabilities (A.1 Probes + A.2 Chief & Batch Inbox +
       const toolsListJson = (await toolsListRes.json()) as {
         result: { tools: Array<{ name: string }> };
       };
-      expect(toolsListJson.result.tools).toHaveLength(21);
+      expect(toolsListJson.result.tools).toHaveLength(23);
       expect(toolsListJson.result.tools.some((t) => t.name === "steer_ticket")).toBe(true);
       expect(toolsListJson.result.tools.some((t) => t.name === "manage_evals")).toBe(true);
 

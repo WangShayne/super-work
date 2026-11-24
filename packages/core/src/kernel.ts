@@ -59,6 +59,7 @@ import {
   triggerRoutineNowSpec,
   updateRoutineSpec,
 } from "./kernel/routine-coordinator.ts";
+import { handleSelfHostPostMergeOp, triggerManualSelfReloadOp } from "./kernel/self-host-coordinator.ts";
 import { runTicketStageOp } from "./kernel/stage-execution-coordinator.ts";
 import { MemoryManager } from "./memory.ts";
 import { OutboxFatalError, OutboxProcessor } from "./outbox.ts";
@@ -74,6 +75,7 @@ import type {
   OutboxExecutor,
   PreviewProvider,
   RepoProbeExecutor,
+  SelfHostRunner,
   StateStore,
   WorkerDriver,
   WorkspaceProvider,
@@ -110,12 +112,16 @@ import type {
   RepoConfig,
   RepoContractFile,
   RepoKnowledgeBundle,
+  RequirementIntakeInput,
+  RequirementIntakePlan,
+  RequirementIntakeResult,
   RestoreCheckpointInput,
   ReviewCommentStatus,
   ReviewReport,
   RoutineRun,
   RoutineScheduleKind,
   RoutineSpec,
+  SelfReloadState,
   SmokeCheckResult,
   SpecClarificationInput,
   SpecClarificationResult,
@@ -150,6 +156,7 @@ export interface SuperWorkKernelDeps {
   drivers: WorkerDriver[];
   outboxExecutor: OutboxExecutor;
   previewProvider?: PreviewProvider;
+  selfHostRunner?: SelfHostRunner;
   dataDir?: string;
   config?: Partial<KernelConfig>;
 }
@@ -177,6 +184,7 @@ export class SuperWorkKernel {
   readonly outbox: OutboxProcessor;
   readonly outboxExecutor: OutboxExecutor;
   readonly previewProvider?: PreviewProvider;
+  readonly selfHostRunner?: SelfHostRunner;
   readonly dataDir: string;
 
   private readonly drivers = new Map<WorkerEngineId, WorkerDriver>();
@@ -194,6 +202,7 @@ export class SuperWorkKernel {
   private tickingPromise: Promise<number> | null = null;
   private outboxFlushPromise: Promise<unknown> | null = null;
   private stopped = false;
+  private selfReloadState: SelfReloadState;
 
   constructor(deps: SuperWorkKernelDeps) {
     this.config = {
@@ -207,7 +216,13 @@ export class SuperWorkKernel {
     this.llm = deps.llm;
     this.outboxExecutor = deps.outboxExecutor;
     this.previewProvider = deps.previewProvider;
+    this.selfHostRunner = deps.selfHostRunner;
     this.dataDir = deps.dataDir ?? ".super-work";
+    this.selfReloadState = {
+      phase: "idle",
+      ...(deps.selfHostRunner ? { selfRepoRoot: deps.selfHostRunner.selfRepoRoot } : {}),
+      updatedAt: nowIso(),
+    };
     this.previewProvider?.subscribe?.((preview) => {
       this.emitEvent({ type: "preview_updated", preview, timestamp: nowIso() });
     });
@@ -344,6 +359,10 @@ export class SuperWorkKernel {
     if (currentTicket.campaignId) {
       await onCampaignTicketSettledOp(this.coordinatorCtx(), currentTicket, repo).catch(() => {});
     }
+
+    await handleSelfHostPostMergeOp(this.coordinatorCtx(), currentTicket, repo, entry).catch(
+      () => {},
+    );
   }
 
   subscribe(listener: (event: KernelEvent) => void): () => void {
@@ -373,6 +392,13 @@ export class SuperWorkKernel {
       watchdog: this.watchdog,
       outboxExecutor: this.outboxExecutor,
       previewProvider: this.previewProvider,
+      selfHostRunner: this.selfHostRunner,
+      selfReloadState: this.selfReloadState,
+      setSelfReloadState: (next) => {
+        this.selfReloadState = next;
+      },
+      hasActiveOutboxFlush: () => Boolean(this.outboxFlushPromise),
+      revertTicketDelivery: (ticketId) => this.revertTicketDelivery(ticketId),
       dataDir: this.dataDir,
       drivers: this.drivers,
       activeTicketRuns: this.activeTicketRuns,
@@ -582,6 +608,99 @@ export class SuperWorkKernel {
     await Promise.all(allRepos.map((r) => this.syncRepoContract(r.id).catch(() => null)));
     await this.syncRepoContract(input.repoId);
     return this.router.createEpic(input);
+  }
+
+  getSelfReloadState(): SelfReloadState {
+    return this.selfReloadState;
+  }
+
+  isDraining(): boolean {
+    return (
+      this.selfReloadState.phase === "draining" ||
+      this.selfReloadState.phase === "reloading"
+    );
+  }
+
+  async triggerSelfReload(options?: {
+    force?: boolean;
+    skipCanary?: boolean;
+  }): Promise<SelfReloadState> {
+    return triggerManualSelfReloadOp(this.coordinatorCtx(), options);
+  }
+
+  async previewRequirementIntake(
+    input: RequirementIntakeInput,
+  ): Promise<RequirementIntakePlan> {
+    const allRepos = await this.stateStore.listRepos();
+    await Promise.all(allRepos.map((r) => this.syncRepoContract(r.id).catch(() => null)));
+    await this.syncRepoContract(input.repoId);
+    return this.router.previewRequirementIntake(input);
+  }
+
+  async intakeRequirement(
+    input: RequirementIntakeInput,
+  ): Promise<RequirementIntakeResult> {
+    const plan = await this.previewRequirementIntake(input);
+    if (input.previewOnly) {
+      return { route: plan.route, plan };
+    }
+
+    if (plan.route === "goal_campaign" && plan.campaignSpec) {
+      const cmpSpec = plan.campaignSpec;
+      const campaign = await this.createCampaign({
+        repoId: input.repoId,
+        name: cmpSpec.name,
+        goalPrompt: cmpSpec.goalPrompt,
+        metricCommand: cmpSpec.metricCommand,
+        metricRegex: cmpSpec.metricRegex,
+        metricUnit: cmpSpec.metricUnit,
+        direction: cmpSpec.direction,
+        targetValue: cmpSpec.targetValue,
+        deliveryMode: cmpSpec.deliveryMode,
+        allowedPaths: cmpSpec.allowedPaths,
+        template: input.template ?? "standard",
+        preferredEngine: input.preferredEngine,
+        maxIterations: cmpSpec.maxIterations,
+        maxTotalBudgetUsd: input.maxBudgetUsd ?? cmpSpec.maxTotalBudgetUsd,
+        autoStart: true,
+      });
+      return { route: "goal_campaign", plan, campaign };
+    }
+
+    if (plan.route === "epic_dag" && plan.epicPlan) {
+      const { epic, subtasks } = await this.createEpic({
+        repoId: input.repoId,
+        title: plan.title,
+        description: input.requirement.trim(),
+        template: input.template,
+        tddMode: input.tddMode,
+        epicDeliveryMode: plan.epicPlan.epicDeliveryMode,
+        releaseBarrier: plan.epicPlan.releaseBarrier,
+        preferredEngine: input.preferredEngine,
+        modelOverride: input.modelOverride,
+        effortOverride: input.effortOverride,
+        maxCostUsdPerSubtask: input.maxBudgetUsd,
+        subtasks: plan.epicPlan.subtasks,
+      });
+      return { route: "epic_dag", plan, epic, subtasks };
+    }
+
+    const single = plan.singleSpec!;
+    const ticket = await this.createDirectTicket({
+      repoId: input.repoId,
+      title: plan.title,
+      description: single.description,
+      template: input.template ?? single.template,
+      tddMode: input.tddMode ?? single.tddMode,
+      deliveryGatePolicy: input.deliveryGatePolicy,
+      allowedPaths: single.allowedPaths,
+      acceptanceCriteria: single.acceptanceCriteria,
+      preferredEngine: input.preferredEngine,
+      modelOverride: input.modelOverride,
+      effortOverride: input.effortOverride,
+      maxCostUsd: input.maxBudgetUsd,
+    });
+    return { route: "single_ticket", plan, ticket };
   }
 
   async syncRepoContract(repoId: string, force = false): Promise<RepoConfig | null> {
@@ -1146,7 +1265,7 @@ export class SuperWorkKernel {
   }
 
   private async performTick(): Promise<number> {
-    if (this.stopped) return 0;
+    if (this.stopped || this.isDraining()) return 0;
     let launched = 0;
     const initialRepos = await this.stateStore.listRepos();
     const epicById = new Map<string, Ticket>();

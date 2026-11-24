@@ -157,7 +157,7 @@ function nodeAccent(status: Ticket["status"]): string {
 export function DagCanvas({
   tickets,
   repos = [],
-  availableEngines = ["claude", "codex", "opencode", "mock"],
+  availableEngines = ["claude", "codex", "opencode", "gemini", "mock"],
   onInspectTicket,
   onMutated,
 }: DagCanvasProps) {
@@ -442,7 +442,7 @@ export function DagCanvas({
                 className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-2.5 py-1.5 font-mono text-zinc-100 disabled:opacity-50"
               >
                 <option value="auto">auto (Bandit)</option>
-                {Array.from(new Set([...availableEngines, "claude", "codex", "opencode", "mock"])).map(
+                {Array.from(new Set([...availableEngines, "claude", "codex", "opencode", "gemini", "mock"])).map(
                   (eng) => (
                     <option key={eng} value={eng}>
                       {eng}

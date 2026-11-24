@@ -307,6 +307,71 @@ export class GitWorktreeProvider implements WorkspaceProvider {
         }
       }
     }
+
+    await this.syncWorkspacePackageLinks(worktreeAbs);
+  }
+
+  /**
+   * Ensure all local monorepo workspace packages under `packages/*` and `apps/*` inside a
+   * worktree (including newly added packages/workspace:* dependencies) are symlinked cleanly
+   * into `node_modules/` without needing `bun install`.
+   */
+  private async syncWorkspacePackageLinks(worktreeAbs: string): Promise<void> {
+    if (
+      !existsSync(join(worktreeAbs, "packages")) &&
+      !existsSync(join(worktreeAbs, "apps"))
+    ) {
+      return;
+    }
+
+    const ignoredRes = await runGit(["check-ignore", "--no-index", "-q", "node_modules/"], worktreeAbs);
+    if (ignoredRes.exitCode !== 0) return;
+
+    const rootNm = join(worktreeAbs, "node_modules");
+    await mkdir(rootNm, { recursive: true });
+
+    for (const container of ["packages", "apps"]) {
+      const containerDir = join(worktreeAbs, container);
+      if (!existsSync(containerDir)) continue;
+      let entries: string[] = [];
+      try {
+        entries = await readdir(containerDir);
+      } catch {
+        continue;
+      }
+
+      for (const entry of entries) {
+        const pkgDir = join(containerDir, entry);
+        const pkgJsonPath = join(pkgDir, "package.json");
+        if (!existsSync(pkgJsonPath)) continue;
+        let pkgName = "";
+        try {
+          const parsed = JSON.parse(await readFile(pkgJsonPath, "utf8")) as { name?: unknown };
+          if (typeof parsed.name === "string") pkgName = parsed.name.trim();
+        } catch {
+          continue;
+        }
+        if (!pkgName || pkgName.includes("..")) continue;
+
+        const targetLink = join(rootNm, ...pkgName.split("/"));
+        try {
+          const st = await lstat(targetLink);
+          if (st.isSymbolicLink()) {
+            const existingRaw = await readlink(targetLink);
+            const existingAbs = resolve(dirname(targetLink), existingRaw);
+            if (existingAbs === pkgDir) continue;
+            await rm(targetLink, { recursive: true, force: true });
+          } else {
+            continue;
+          }
+        } catch {
+          // Missing symlink -> create below
+        }
+
+        await mkdir(dirname(targetLink), { recursive: true });
+        await symlink(pkgDir, targetLink, "dir").catch(() => {});
+      }
+    }
   }
 
   async integrateDependencyBranches(worktreePath: string, branchNames: string[]): Promise<void> {

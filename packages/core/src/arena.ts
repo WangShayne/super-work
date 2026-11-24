@@ -42,12 +42,14 @@ export function resolveFallbackChain(input: {
 
   const defaultOrder: WorkerEngineId[] =
     input.primaryEngine === "claude"
-      ? ["codex", "opencode", "mock"]
+      ? ["codex", "gemini", "opencode", "mock"]
       : input.primaryEngine === "codex"
-        ? ["claude", "opencode", "mock"]
-        : input.primaryEngine === "opencode"
-          ? ["claude", "codex", "mock"]
-          : ["claude", "codex", "opencode"];
+        ? ["claude", "gemini", "opencode", "mock"]
+        : input.primaryEngine === "gemini"
+          ? ["claude", "codex", "opencode", "mock"]
+          : input.primaryEngine === "opencode"
+            ? ["claude", "codex", "gemini", "mock"]
+            : ["claude", "codex", "gemini", "opencode"];
 
   for (const candidate of defaultOrder) {
     if (!failed.has(candidate) && available.includes(candidate) && !ordered.includes(candidate)) {

@@ -28,7 +28,11 @@ export class OutboxProcessor {
   ) {}
 
   async processDueEntries(limit = 5): Promise<number> {
-    const claimed = await this.stateStore.claimNextOutboxEntries(limit, nowIso());
+    const excludeActions =
+      this.options?.skipActions && this.options.skipActions.size > 0
+        ? Array.from(this.options.skipActions)
+        : undefined;
+    const claimed = await this.stateStore.claimNextOutboxEntries(limit, nowIso(), excludeActions);
     let processed = 0;
 
     for (const entry of claimed) {

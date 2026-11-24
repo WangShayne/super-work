@@ -12,10 +12,13 @@
 
 - **Router + 隔离 Worker 双层架构**：
   - **控制面（`EventIntakeRouter` & `MasterAssessor`）**：统一接收入站触发器（`web`、`github_issue`、`github_pr`、`github_ci`、`cli`），具备 **两层只读代码探针系统（`ReadOnlyRepoProber`：`search_symbols`/`read_file_slice`/`grep_literals`/`git_recent_commits`，严格越界防护与 `.env*` 脱敏，2 轮有界循环）**，提供派单前 **Pre-Flight Spec Studio 预勘探与澄清（`POST /api/specs/clarify` 与 `--clarify`，注入 1-hop / 2+ hop 符号影响面分析）**，注入仓库契约（`super-work.json`）、**命中追踪与衰减自净的 Playbook 经验库**及**混合加权历史判例库（Casebook）**，支持 **跨仓库联合 Epic 与 `--depends-on` 依赖编排（含 1-hop 语义依赖自动串行）**、**自适应引擎多臂老虎机路由（`--engine auto`）与低置信双引擎 Auto-Arena 触发护栏**、**红绿先测试守卫（`--tdd` + `SPEC_TEST_CHALLENGE` 单次回退重审）**、**交互式 DAG 拓扑画布与热修改断点（`--pause-before-run`）**、**回合中零惩罚实时纠偏（Live Steer：`POST /api/tickets/:id/steer`）**、**Worker `[ASK_HUMAN]` 结构化歧义提问（单任务限 1 次，`auto` 模式自动采纳推荐项防卡死）**、**零 LLM 工具调用画像（`StageToolProfile`）**、**阶段 Git 检查点时间旅行 Re-steer**、**定时探测晋升巡航（Probe-to-Promote）**，以及守护进程重启断点自愈。
-  - **执行面（`WorkerDriver` & `GitWorktreeProvider`）**：在独立的 `git worktree` 分支中调度外部 Coding Agent（`ClaudeCodeDriver`、`CodexDriver`、`OpenCodeDriver`、`MockWorkerDriver`），通过 **OS 原生安全沙箱（`sandboxMode`：`balanced` | `strict` | `off`，基于 macOS Seatbelt / Linux `bwrap` + `readOnlyPaths` 测试文件内核级只读锁 + 自动清洗密钥环境变量）** 约束写边界，支持 **`setupCommands` 预热**、**结构化对抗盲审**、**临时服务运行时冒烟 + 零依赖 CDP 无头浏览器门禁（支持交互 `steps` 与纯 TS 像素级视觉回归对比 `visualDiffMode`）**、隐藏 Git ref 阶段检查点与 Worktree GC。
+  - **执行面（`WorkerDriver` & `GitWorktreeProvider`）**：在独立的 `git worktree` 分支中调度外部 Coding Agent（`ClaudeCodeDriver`、`CodexDriver`、`OpenCodeDriver`、`GeminiCliDriver`、`MockWorkerDriver`，并在 Monorepo 工作树自动镜像 `packages/*` 符号链接），通过 **OS 原生安全沙箱（`sandboxMode`：`balanced` | `strict` | `off`，基于 macOS Seatbelt / Linux `bwrap`，`balanced` 下阻断外网的同时保留 `localhost:*` 本地测试回环 + `readOnlyPaths` 测试文件内核级只读锁 + 自动清洗密钥环境变量）** 约束写边界，支持 **`setupCommands` 预热**、**结构化对抗盲审**、**临时服务运行时冒烟 + 零依赖 CDP 无头浏览器门禁（支持交互 `steps` 与纯 TS 像素级视觉回归对比 `visualDiffMode`）**、隐藏 Git ref 阶段检查点与 Worktree GC。
 - **原生 MCP 服务器与双向签名 Webhook**：
-  - **零外部 SDK 的原生 MCP 服务（`v1.2.0`）**：同时提供 Streamable HTTP（`GET/POST /api/mcp`）与 `super-work mcp` stdio 桥接（本地守护进程离线时自动拉起），暴露 **21 个工具**（`clarify_spec`、`dispatch_ticket`、`dispatch_epic`、`list_tickets`、`get_ticket_detail`、`list_inbox`、`resolve_inbox`、`batch_resolve_inbox`、`steer_ticket`、`ask_chief`、`manage_evals`、`manage_campaigns`、`manage_merge_train`、`search_memory_and_casebook`、`trigger_routine`、`manage_preview`、`analyze_impact`、`manage_checkpoints`、`mutate_dag_node`、`submit_review_comments`、`system_doctor`）与 **3 个资源**（`superwork://health`、`superwork://repos`、`superwork://inbox/pending`）。
+  - **零外部 SDK 的原生 MCP 服务（`v1.3.0`）**：同时提供 Streamable HTTP（`GET/POST /api/mcp`）与 `super-work mcp` stdio 桥接（本地守护进程离线时自动拉起），暴露 **23 个工具**（`dispatch_requirement`、`manage_self_host`、`clarify_spec`、`dispatch_ticket`、`dispatch_epic`、`list_tickets`、`get_ticket_detail`、`list_inbox`、`resolve_inbox`、`batch_resolve_inbox`、`steer_ticket`、`ask_chief`、`manage_evals`、`manage_campaigns`、`manage_merge_train`、`search_memory_and_casebook`、`trigger_routine`、`manage_preview`、`analyze_impact`、`manage_checkpoints`、`mutate_dag_node`、`submit_review_comments`、`system_doctor`）与 **3 个资源**（`superwork://health`、`superwork://repos`、`superwork://inbox/pending`）。
   - **双向签名 Webhook 与移动端审批卡**：接收 HMAC-SHA256 验签的 GitHub Webhook（`POST /api/webhooks/github`，`X-Hub-Signature-256`）与 ChatOps 回调（`POST /api/webhooks/chatops`），并在飞书/Slack/Discord/通用 JSON 推送中附带 **防爬虫预览误触发的签名远程审批卡片（`GET/POST /api/webhooks/action`）**，同时支持 macOS 原生通知。
+- **智能需求统一直投（Smart Intake）与自举金丝雀热演进（`v1.3.0`）**：
+  - **智能需求直投（`POST /api/intake` & `/api/intake/preview`）**：支持只丢一句话自然语言需求，控制面结合只读代码探针自动判断直建Scoped单工单（`single_ticket`）、跨模块 `Epic DAG`（`epic_dag`）还是量化 `GoalCampaign`（`goal_campaign`），已集成于 Web 默认派单页、CLI `super-work intake --wait` 与 MCP `dispatch_requirement`。
+  - **Boot Canary + 排空平滑重启 + 坏提交自动 Revert（`BunSelfHostRunner`）**：当 `super-work` 自身仓库主干发生本地合入后，自动构建并在随机临时端口冷启探活 `/api/health`；探活通过即暂停新轮调度、排空在途任务、刷新 SQLite WAL 并平滑退出触发监控进程拉起（退出码 `75`）；若构建或探活失败则自动 `git revert` 坏提交，确保在线守护进程持续可用并推送待决告警至收件箱。
 - **指标驱动目标战役（GoalCampaign）与并行投机合并列车（`v1.2.0`）**：
   - **自治目标战役闭环**：开战先测指标基线（`metricCommand`），支持在隔离暂存分支 `super-work/campaign/<id>`（`staging_branch`）或逐轮合入（`per_wave_merge`）模式下多轮迭代探索；一旦退化或未达增量立即执行**单调分支回退并沉淀教训**，连续 2 轮滞涨、达到轮次上限或预算触顶时自动熔断至 `campaign_paused` 审批卡等待人工提示续跑与最终交付。
   - **并行投机合并列车与跨仓释放屏障**：单任务且 `baseBranch` HEAD 一致且无挂起屏障时走 **Smart-Bypass 零开销快速通道**；多任务并发交付时最多 3 槽位在独立 `train-worktrees/` 内累加 `--no-ff` 预合与门禁验证，一次性 Fast-Forward 至最长通过前缀同时保留每张工单独立的 Merge Commit（**保证一键 `git revert -m 1` 粒度不丢**），并自动二分定位与驱逐失败槽位；跨仓库 Epic 默认通过 `barrierGroupId` 启用联合释放屏障（进入 `barrier_waiting` 时即刻生成 `HandoverDigest`，消除跨仓依赖死锁）。
@@ -64,7 +67,7 @@ super-work/
 ### 前置依赖
 - [Bun](https://bun.sh) `>= 1.3`
 - `git`（被接管的本地仓库需至少有一次初始提交 / 有效 `HEAD`，否则 `git worktree add` 无法创建工作树分支）
-- 可选 Worker / 事件源 CLI（需在 `PATH` 中）：`claude`（Claude Code）、`codex`（Codex CLI）、`opencode`（OpenCode CLI）、`gh`（GitHub CLI）
+- 可选 Worker / 事件源 CLI（需在 `PATH` 中）：`claude`（Claude Code）、`codex`（Codex CLI）、`opencode`（OpenCode CLI）、`gemini`（Gemini CLI）、`gh`（GitHub CLI）
 
 ### 常用命令
 
@@ -119,7 +122,8 @@ bun run dev:web      # 监听 5173 端口的 Vite 开发服务器（自动代理
 
 ## REST、MCP、Webhook 与 SSE 接口概览
 
-- `GET /api/health` — 服务健康状态、当前控制面 LLM 提供者、可用 Worker 引擎（`claude`、`codex`、`opencode`、`mock`）及实时 `activePreviews` 计数
+- `GET /api/health` — 服务健康状态、当前控制面 LLM 提供者、可用 Worker 引擎（`claude`、`codex`、`opencode`、`gemini`、`mock`）、`selfReload` 状态及实时 `activePreviews` 计数
+- `POST /api/intake/preview`、`POST /api/intake` — 智能统一需求直投预演与自动路由派单（`single_ticket` | `epic_dag` | `goal_campaign`）
 - `POST /api/chief/ask` — 基于实时态势、记忆召回与只读代码探针的幕僚长只读问答，附带需人工点击确认的 `ChiefActionSuggestion[]`
 - `GET /api/repos`、`POST /api/repos`、`PATCH /api/repos/:id`、`GET /api/repos/:id/blueprints`、`POST /api/repos/:id/contract/sync`、`POST /api/repos/:id/contract/export`、`GET /api/repos/:id/knowledge-bundle`、`POST /api/repos/:id/knowledge-bundle/import` — 注册仓库、配置 `sandboxMode`、`deliveryGatePolicy`（`always_auto`/`risk_gated`/`always_signoff`）、`riskThreshold`、`sensitivePaths`，查询 **Task Blueprints**、双向同步 `super-work.json` 并导出/导入知识包
 - `GET /api/repos/:id/playbook`、`POST /api/repos/:id/playbook`、`PATCH /api/playbook/:entryId`、`DELETE /api/playbook/:entryId`、`POST /api/repos/:id/playbook/prune` — 管理并一键清理陈旧/失效的经验库（Playbook）规则
@@ -137,11 +141,11 @@ bun run dev:web      # 监听 5173 端口的 Vite 开发服务器（自动代理
 - `POST /api/epics/preview`、`POST /api/epics` — 预览并派发复杂需求 Epic 子任务 DAG 拓扑
 - `GET /api/previews`、`POST /api/previews`、`POST /api/previews/:id/renew`、`DELETE /api/previews/:id` — 启动、查看、续期（+20m TTL）与停止受控 Live Worktree 实时预览实例
 - `GET /api/worktrees`、`POST /api/worktrees/gc` — 查看 Worktree 运行池与一键回收终态/孤儿工作树目录
-- `GET /api/system/doctor`、`POST /api/system/doctor/fix`、`GET /api/system/backups`、`POST /api/system/backups`、`POST /api/system/backups/:id/restore`、`GET /api/system/service` — 运行 System Doctor 诊断清理、`VACUUM INTO` 热备份、带安全快照的原子恢复，以及查询 OS 守护服务状态与日志
+- `GET /api/system/doctor`、`POST /api/system/doctor/fix`、`GET /api/system/backups`、`POST /api/system/backups`、`POST /api/system/backups/:id/restore`、`GET /api/system/service`、`GET /api/system/reload`、`POST /api/system/reload` — 运行 System Doctor 诊断清理、`VACUUM INTO` 热备份、带安全快照的原子恢复、OS 守护服务查询及自举金丝雀热重载
 - `GET /api/inbox`、`POST /api/inbox/:id/resolve`、`POST /api/inbox/batch-resolve` — 审批、驳回或低风险批量处理 Attention Inbox 待决项（含 `campaign_paused`、高风险 `outbox_signoff`、3-Way `merge_conflict`、`clarification_request`、DAG 执行断点与 `SPEC_TEST_CHALLENGE`）
 - `GET /api/tickets/:id/recall`、`GET /api/memory/search?q=...`、`GET /api/artifacts/:id`、`GET /api/artifacts/:id/raw` — 获取 `Chain of Recall` 全链路、FTS5 记忆检索、Spill 文本产物及原生 PNG `screenshot` / `visual_diff` 视觉对比读取
 - `GET /api/outbox`、`GET /api/merge-train`、`POST /api/merge-train/flush`、`POST /api/merge-train/:id/eject` — 查询 `Transactional Outbox` 外发队列，管理并行投机合并列车与跨仓释放屏障
-- `GET /api/mcp`、`POST /api/mcp` — 原生 MCP JSON-RPC 2.0 Streamable HTTP 端点（`v1.2.0`，配合 `super-work mcp` stdio 桥接；提供 **21 个工具** 与 3 个资源）
+- `GET /api/mcp`、`POST /api/mcp` — 原生 MCP JSON-RPC 2.0 Streamable HTTP 端点（`v1.3.0`，配合 `super-work mcp` stdio 桥接；提供 **23 个工具** 与 3 个资源）
 - `POST /api/webhooks/github`、`GET /api/webhooks/action`、`POST /api/webhooks/action`、`POST /api/webhooks/chatops` — HMAC 验签 GitHub 入站事件、防爬虫误触的签名移动端审批卡片页及 ChatOps 交互回调
 - `GET /api/setup/status`、`POST /api/setup/scan`、`POST /api/setup/test-llm`、`POST /api/setup/configure`、`POST /api/notifications/test` — CLI 扫描、控制面大模型、Webhook 安全密钥及 macOS / Webhook 主动通知配置与测试
 - `GET /api/events?repoId=...&ticketId=...` — 实时 Server-Sent Events（SSE）事件流（支持按仓库或含 Epic 子任务的 Ticket 精准过滤，含 `campaign_updated`、`merge_train_updated`、`lifecycle_hook_executed`、`preview_updated`、`review_comment_updated` 与 `eval_run_updated`）

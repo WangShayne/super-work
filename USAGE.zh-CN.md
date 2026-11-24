@@ -9,7 +9,7 @@
 ## 一、 首次运行：CLI 自动扫描与控制面 LLM 配置
 
 `super-work` 采用**控制面 + 执行面**分离架构：
-- **执行面（Worker）**：直接复用本机安装的 Coding Agent CLI（`claude`、`codex`、`opencode` 等）。
+- **执行面（Worker）**：直接复用本机安装的 Coding Agent CLI（`claude`、`codex`、`opencode`、`gemini` 等）。
 - **控制面（Router / Watchdog）**：负责新事件分诊、任务作用域划分以及异常卡死诊断。
 
 ### 方式 A：Web 指挥舱可视化向导（推荐）
@@ -19,8 +19,8 @@
    bun run dev
    ```
 2. 首次启动且尚未完成初始化时，系统会自动弹出 **「首次运行环境扫描与模型配置」** 向导（此后也可随时点击右上角 **环境与模型** 按钮再次打开）：
-   - **本机 CLI 工具链扫描**：自动探测 `claude`、`codex`、`opencode`、`gh`、`git`、`bun` 的安装路径、版本、登录认证状态（`已就绪` / `未登录` / `未安装`）以及 `~/.claude/settings.json`、`~/.codex/config.toml`、`~/.config/opencode/opencode.json` 中的本机默认模型与思考强度。
-   - **默认引擎与 CLI 模型/强度档位**：分别为 `Claude Code`、`Codex CLI` 与 `OpenCode CLI` 配置全局默认模型和思考强度（`low` / `medium` / `high` / `xhigh` / `max`）；留空则沿用本机全局配置文件，填写后由 `super-work` 在派单时透传 `--model` / `--effort`、`-m` / `-c model_reasoning_effort` 或 `provider/model#variant`，**派发任务弹窗也支持对单个任务做临时覆盖**。
+   - **本机 CLI 工具链扫描**：自动探测 `claude`、`codex`、`opencode`、`gemini`、`gh`、`git`、`bun` 的安装路径、版本、登录认证状态（`已就绪` / `未登录` / `未安装`）以及 `~/.claude/settings.json`、`~/.codex/config.toml`、`~/.config/opencode/opencode.json`、`~/.gemini/settings.json` 中的本机默认模型与思考强度。
+   - **默认引擎与 CLI 模型/强度档位**：分别为 `Claude Code`、`Codex CLI`、`OpenCode CLI`（`provider/model#variant`）与 `Gemini CLI` 配置全局默认模型和思考强度（`low` / `medium` / `high` / `xhigh` / `max`）；留空则沿用本机全局配置文件，**派发任务弹窗也支持对单个任务做临时覆盖**。
    - **控制面大模型配置**：从五种方案中任选其一，点击 **「测试连接」** 验证延迟与连通性，再点击 **「完成配置并启用」**（保存后立即热生效，无需重启进程）：
 
 | 方案 | 适用场景 | 费用与依赖 |
@@ -63,7 +63,7 @@ bun run setup -- --auto
 5. **下钻详情抽屉 & 命令行客户端（`bun run cli` / `super-work`）**：
    - `super-work up [-d] [--host 127.0.0.1] [--port 4318]` / `super-work service [install|uninstall|start|stop|status|logs]`：前台/系统常驻守护进程（`launchd` / `systemd --user`）安装与启停管理。
    - `super-work campaign ...` / `super-work train [list|flush|eject]`：终端创建/控制指标驱动目标战役与并行合并列车队列。
-   - `super-work status`、`ask <问题>`、`steer <ticketId> <纠偏指令>`、`blueprints`、`dispatch <title> -d <desc> [--blueprint <id>] [--gate-policy <policy>] [--wait]`、`epic <title> [--preview-only|--wait]`、`inbox [list|approve|reject|batch]`、`eval [list|save|run|delete]`、`doctor [--fix]`、`backup [list|create|restore <id>]`、`bundle [export|import <file>]`、`logs <ticketId> [-f]`、`watch`、`revert <ticketId>`、`playbook [list|add|toggle|delete|sync --export]`。
+   - `super-work status`、`intake [--preview] [--wait] "<需求>"`、`wait <ticketId|epicId>`、`reload [--skip-canary] [--force]`、`ask <问题>`、`steer <ticketId> <纠偏指令>`、`blueprints`、`dispatch <title> -d <desc> [--blueprint <id>] [--gate-policy <policy>] [--wait]`、`epic <title> [--preview-only|--wait]`、`inbox [list|approve|reject|batch]`、`eval [list|save|run|delete]`、`doctor [--fix]`、`backup [list|create|restore <id>]`、`bundle [export|import <file>]`、`logs <ticketId> [-f]`、`watch`、`revert <ticketId>`、`playbook [list|add|toggle|delete|sync --export]`。
 
 ### 3. 三种流水线模板对比
 
@@ -77,9 +77,10 @@ bun run setup -- --auto
 
 ## 三、 四大实战工作流
 
-### 1. 主动派发研发任务与设置 Mandate 边界（含 Epic 拆单 DAG）
+### 1. 智能需求直投、主动单任务与 Epic 拆单 DAG
 1. 点击右上角 **「派发任务」**：
-   - **单任务派发**：填写任务标题与目标说明，选择流水线模板、执行引擎及可选单任务模型/思考强度覆盖，并在 **Mandate 允许修改路径** 中收敛授权目录（触及越界或 `.env*` / `*.pem` / `*.key` 将自动回滚并告警）。
+   - **智能需求直投（默认页签）**：直接丢入自然语言需求（可选填量化优化指标命令），点击 **「预演路由与范围」** 查看自动匹配的路由方案（`single_ticket` / `epic_dag` / `goal_campaign`）与路径作用域，确认后 **「一键智能派发」**；也可在终端执行 `super-work intake --wait "..."`。
+   - **单任务派发**：填写任务标题与目标说明，选择流水线模板、执行引擎（`claude` / `codex` / `opencode` / `gemini` 及可选单任务模型/思考强度覆盖），并在 **Mandate 允许修改路径** 中收敛授权目录（触及越界或 `.env*` / `*.pem` / `*.key` 将自动回滚并告警）。
    - **复杂需求拆单 (Epic DAG)**：切换到 Epic 标签页，默认使用 **统一集成分支 `super-work/epic/<id>`**（也可切回逐子单独立交付），描述跨模块需求后点击 **「AI 预览拆单 DAG」**，可直接编辑每条子任务的模板、描述、授权路径与前置依赖关系；全部子任务汇入集成分支后由内核执行全局终验与单轮集成自愈，最终聚合提交 1 个 PR 或 1 次本地合入。
 
 ### 2. 观察模式下模拟 / 监听 GitHub 事件并审批（含 PR 返修闭环）
@@ -111,7 +112,9 @@ bun run setup -- --auto
 3. **扫描显示 CLI「未登录」怎么处理？**
    - Claude Code：在终端运行 `claude auth login`
    - Codex CLI：在终端运行 `codex login`
+   - Gemini CLI：运行 `gemini` 完成 OAuth 登录，或设置 `GEMINI_API_KEY`
    - GitHub CLI：在终端运行 `gh auth login`
    - 完成后在网页端点击 **设置 → 重新扫描** 即可更新为「已就绪」。
+   - 提示：对 `super-work` 自身开发后可在 **环境与模型 → 系统自检与热备份 → 自举热演进** 手动触发金丝雀重启，或运行 `super-work reload`。
 4. **在哪里查看或清理工作树与数据库？**
    - 所有运行时状态库（`super-work.db`）、Spill 产物与临时 `worktrees/` 均隔离存放在 `.super-work/`（或 `SUPER_WORK_DATA_DIR` 指定目录）下，且已被 `.gitignore` 忽略；开启仓库的「自动回收 Worktree」后，任务交付或取消时会自动回收工作树目录（仍保留分支 Diff 可回看），也可以点击状态栏 **「工作树池」** 一键 GC 清理历史或孤儿目录。

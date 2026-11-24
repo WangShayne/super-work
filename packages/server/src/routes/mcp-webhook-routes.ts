@@ -8,12 +8,14 @@ import type {
   CampaignDeliveryMode,
   CampaignDirection,
   DagNodeMutationInput,
+  DeliveryGatePolicy,
   EnginePreference,
   EpicDeliveryMode,
   InboxItemKind,
   InboxItemStatus,
   McpToolHost,
   PipelineTemplateId,
+  RequirementIntakeInput,
   StageKind,
   SystemSetupConfig,
   TicketStatus,
@@ -419,12 +421,50 @@ export function registerMcpWebhookRoutes(ctx: ServerRouteContext): void {
       }
       throw new Error(`Unknown merge train action: ${action}`);
     },
+    dispatchRequirement: async (args) => {
+      const res = await kernel.intakeRequirement({
+        repoId: String(args.repoId ?? ""),
+        requirement: String(args.requirement ?? ""),
+        title: args.title ? String(args.title) : undefined,
+        preferredRoute: args.preferredRoute as RequirementIntakeInput["preferredRoute"],
+        preferredEngine: args.preferredEngine as EnginePreference | undefined,
+        template: args.template as PipelineTemplateId | undefined,
+        tddMode: args.tddMode !== undefined ? Boolean(args.tddMode) : undefined,
+        deliveryGatePolicy: args.deliveryGatePolicy as DeliveryGatePolicy | undefined,
+        maxBudgetUsd: typeof args.maxBudgetUsd === "number" ? args.maxBudgetUsd : undefined,
+        previewOnly: Boolean(args.previewOnly),
+        metricCommand: args.metricCommand ? String(args.metricCommand) : undefined,
+        metricRegex: args.metricRegex ? String(args.metricRegex) : undefined,
+        metricUnit: args.metricUnit ? String(args.metricUnit) : undefined,
+        direction: args.direction as CampaignDirection | undefined,
+        targetValue: typeof args.targetValue === "number" ? args.targetValue : undefined,
+      });
+      if (!args.previewOnly) {
+        void kernel.tick();
+      }
+      return res;
+    },
+    manageSelfHost: async (args) => {
+      const action = String(args.action ?? "status");
+      if (action === "status") {
+        return { reload: kernel.getSelfReloadState() };
+      }
+      if (action === "reload") {
+        return {
+          reload: await kernel.triggerSelfReload({
+            force: Boolean(args.force),
+            skipCanary: Boolean(args.skipCanary),
+          }),
+        };
+      }
+      throw new Error(`Unknown self-host action: ${action}`);
+    },
   });
 
   app.get("/api/mcp", (c) => {
     return c.json({
       name: "super-work",
-      version: "1.2.0",
+      version: "1.3.0",
       transport: "streamable-http",
       endpoint: "/api/mcp",
     });

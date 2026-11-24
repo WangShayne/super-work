@@ -54,6 +54,14 @@ export async function syncRepoContractOp(
 
   const updatedRepo: RepoConfig = {
     ...repo,
+    mode:
+      !repo.contractSyncedHash && contract.defaultMode
+        ? contract.defaultMode
+        : repo.mode,
+    defaultDeliveryChannel:
+      contract.defaultDeliveryChannel !== undefined
+        ? contract.defaultDeliveryChannel
+        : repo.defaultDeliveryChannel,
     defaultTemplate: contract.defaultTemplate ?? repo.defaultTemplate,
     defaultTddMode:
       contract.defaultTddMode !== undefined ? Boolean(contract.defaultTddMode) : repo.defaultTddMode,
@@ -173,6 +181,8 @@ export async function exportRepoContractOp(
 
   const contract: RepoContractFile = {
     version: 1,
+    defaultMode: repo.mode,
+    ...(repo.defaultDeliveryChannel ? { defaultDeliveryChannel: repo.defaultDeliveryChannel } : {}),
     defaultTemplate: repo.defaultTemplate,
     ...(repo.defaultTddMode !== undefined ? { defaultTddMode: repo.defaultTddMode } : {}),
     ...(repo.deliveryGatePolicy ? { deliveryGatePolicy: repo.deliveryGatePolicy } : {}),

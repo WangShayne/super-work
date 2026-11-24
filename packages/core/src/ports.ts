@@ -1,6 +1,7 @@
 import type {
   ArenaCandidateResult,
   ArtifactKind,
+  CampaignDirection,
   CasebookEntry,
   ChainOfRecall,
   ConflictFileHunk,
@@ -24,6 +25,7 @@ import type {
   MemorySearchHit,
   MergeTrainEntry,
   MergeTrainEntryStatus,
+  OutboxAction,
   OutboxEntry,
   OutboxStatus,
   PipelineTemplateId,
@@ -34,6 +36,7 @@ import type {
   RepoContractFile,
   RepoMetricsSummary,
   RepoProbeContextPack,
+  RequirementIntakePlan,
   RestoreCheckpointInput,
   RevertResult,
   ReviewCommentStatus,
@@ -150,6 +153,44 @@ export interface ControlPlaneLLM {
     probeContext?: RepoProbeContextPack;
     probeExecutor?: RepoProbeExecutor;
   }): Promise<{ answer: string; highlights?: string[]; probeSteps?: ControlProbeStep[] }>;
+  planRequirementIntake?(input: {
+    repo: RepoConfig;
+    title: string;
+    requirement: string;
+    defaultTemplate: PipelineTemplateId;
+    defaultTddMode?: boolean;
+    repoStructure?: string;
+    playbookRules?: string;
+    conventions?: string;
+    availableRepos?: Array<{ id: string; name: string; structure?: string }>;
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
+    metricHint?: {
+      metricCommand?: string;
+      targetValue?: number;
+      direction?: CampaignDirection;
+      metricUnit?: string;
+      metricRegex?: string;
+    };
+  }): Promise<RequirementIntakePlan>;
+}
+
+export interface CanaryBootResult {
+  ok: boolean;
+  buildOk: boolean;
+  canaryPort?: number;
+  durationMs: number;
+  summary: string;
+  errorOutput?: string;
+}
+
+export interface SelfHostRunner {
+  readonly selfRepoRoot: string;
+  verifyBuildAndCanaryBoot(options?: {
+    commitSha?: string;
+    timeoutMs?: number;
+  }): Promise<CanaryBootResult>;
+  triggerProcessReload(reason: string): Promise<void>;
 }
 
 export interface WorkerDriver {
@@ -341,8 +382,13 @@ export interface StateStore {
   getOutboxEntry(id: string): Promise<OutboxEntry | null>;
   listOutboxEntries(filter?: { repoId?: string; ticketId?: string; status?: OutboxStatus }): Promise<OutboxEntry[]>;
   updateOutboxEntry(entry: OutboxEntry): Promise<void>;
-  claimNextOutboxEntries(limit: number, nowIso: string): Promise<OutboxEntry[]>;
+  claimNextOutboxEntries(
+    limit: number,
+    nowIso: string,
+    excludeActions?: OutboxAction[],
+  ): Promise<OutboxEntry[]>;
   requeueInterruptedOutboxEntries(nowIso: string): Promise<number>;
+  checkpointWal?(): Promise<void> | void;
 
   // Daily Budget & Metrics
   getDailyRepoSpendUsd(repoId: string, utcDatePrefix: string): Promise<number>;

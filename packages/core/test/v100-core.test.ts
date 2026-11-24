@@ -252,8 +252,8 @@ describe("v1.0.0 Core Engines (A.1 Risk Gate + D.1 Blueprints + B.2 Conflict Con
     expect(spans.toArray()).toHaveLength(2);
   });
 
-  it("D.1 MCP v1.2.0: exposes submit_review_comments and system_doctor among 21 tools", async () => {
-    expect(MCP_TOOL_DEFINITIONS).toHaveLength(21);
+  it("D.1 MCP: exposes submit_review_comments and system_doctor among 23 tools", async () => {
+    expect(MCP_TOOL_DEFINITIONS).toHaveLength(23);
     const seen: string[] = [];
     const stubHost: McpToolHost = {
       getHealth: async () => ({ ok: true }),

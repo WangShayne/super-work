@@ -9,6 +9,7 @@ import type {
   DagNodeMutationInput,
   EnginePreference,
   PipelineTemplateId,
+  RequirementRouteKind,
   StageKind,
   Ticket,
   WorkerEngineId,
@@ -81,9 +82,13 @@ function parseCliArgs(argv: string[]): ParsedArgs {
     "lines",
     "reason",
     "delivery-mode",
+    "title",
+    "route",
+    "gate-policy",
+    "blueprint",
   ]);
   const optionalEngineFlags = new Set(["arena"]);
-  const engineValues = new Set(["claude", "codex", "opencode", "mock"]);
+  const engineValues = new Set(["claude", "codex", "opencode", "gemini", "mock"]);
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -382,17 +387,24 @@ async function waitForTicketCompletion(
 }
 
 function printHelp(stdout: (line: string) => void): void {
-  stdout(`super-work v1.2.0 CLI
+  stdout(`super-work v1.3.0 CLI
 
 Usage:
   super-work up [-d|--detach] [--host 127.0.0.1] [--port 4318] [--data-dir path] [--token <token>]
   super-work service [install [--no-start] | uninstall | start | stop | status | logs [--lines 80]] [--host <addr>] [--port <n>] [--data-dir <path>] [--token <token>] [--json]
+  super-work reload [--force] [--skip-canary] [--auto-start] [--json]
   super-work mcp [--url http://localhost:4318] [--token <token>] [--no-auto-start]
   super-work status [--repo <id>] [--auto-start] [--json]
+  super-work intake <requirement> [--title <title>] [--repo <id>] [--route auto|single_ticket|epic_dag|goal_campaign]
+                    [--template fast|standard|strict] [--engine auto|claude|codex|opencode|gemini|mock] [--tdd]
+                    [--gate-policy always_auto|risk_gated|always_signoff] [--budget <usd>]
+                    [--metric <cmd> --target <num> [--direction increase|decrease] [--unit <u>]]
+                    [--preview-only] [--wait] [--timeout-ms <ms>] [--auto-start] [--json]
+  super-work wait <ticketOrEpicId> [--timeout-ms <ms>] [--auto-start] [--json]
   super-work ask <question> [--repo <id>] [--auto-start] [--json]
-  super-work steer <ticketId> <instruction> [--engine auto|claude|codex|opencode|mock] [--auto-start] [--json]
+  super-work steer <ticketId> <instruction> [--engine auto|claude|codex|opencode|gemini|mock] [--auto-start] [--json]
   super-work dispatch <title> [-d|--desc <text>] [--repo <id>] [--blueprint <id>] [--gate-policy <policy>] [--paths <csv>] [--depends-on <csv>]
-                      [--template fast|standard|strict] [--engine auto|claude|codex|opencode|mock]
+                      [--template fast|standard|strict] [--engine auto|claude|codex|opencode|gemini|mock]
                       [--tdd] [--pause-before-run] [--arena [engine]] [--clarify] [--clarify-only]
                       [--budget <usd>] [--wait] [--auto-start] [--json]
   super-work epic <title> [-d|--desc <text>] [--repo <id>] [--template fast|standard|strict] [--tdd]
@@ -2219,6 +2231,146 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
       }
       stderr(`Unknown train subcommand: ${subCmd}`);
       return 1;
+    }
+
+    if (cmd === "intake") {
+      const requirement = positionals.slice(1).join(" ").trim() || getStringFlag(flags, "d", "desc", "description");
+      if (!requirement) {
+        stderr("Error: requirement text is required. Usage: super-work intake <requirement> [--wait] [--preview-only]");
+        return 1;
+      }
+      const title = getStringFlag(flags, "title");
+      const routeRaw = getStringFlag(flags, "route");
+      const preferredRoute =
+        routeRaw === "single_ticket" || routeRaw === "epic_dag" || routeRaw === "goal_campaign"
+          ? (routeRaw as RequirementRouteKind)
+          : "auto";
+      const template = getStringFlag(flags, "template") as PipelineTemplateId | undefined;
+      const preferredEngine = getStringFlag(flags, "engine") as EnginePreference | undefined;
+      const tddMode = flags.tdd !== undefined ? Boolean(flags.tdd) : undefined;
+      const gatePolicyRaw = getStringFlag(flags, "gate-policy");
+      const deliveryGatePolicy =
+        gatePolicyRaw === "always_auto" ||
+        gatePolicyRaw === "risk_gated" ||
+        gatePolicyRaw === "always_signoff"
+          ? gatePolicyRaw
+          : undefined;
+      const budgetStr = getStringFlag(flags, "budget");
+      const maxBudgetUsd = budgetStr ? Number(budgetStr) : undefined;
+      const metricCommand = getStringFlag(flags, "metric");
+      const metricRegex = getStringFlag(flags, "regex");
+      const metricUnit = getStringFlag(flags, "unit");
+      const dirRaw = getStringFlag(flags, "direction");
+      const direction =
+        dirRaw === "increase" || dirRaw === "decrease"
+          ? (dirRaw as CampaignDirection)
+          : undefined;
+      const targetStr = getStringFlag(flags, "target");
+      const targetValue = targetStr !== undefined ? Number(targetStr) : undefined;
+      const previewOnly = Boolean(flags["preview-only"]);
+      const wait = Boolean(flags.wait);
+
+      const res = await withAutoStart(
+        baseUrl,
+        autoStart,
+        async () => {
+          const repoId = await resolveTargetRepoId(client, getStringFlag(flags, "repo"));
+          return client.submitIntake({
+            repoId,
+            requirement,
+            title,
+            preferredRoute,
+            preferredEngine,
+            template,
+            tddMode,
+            deliveryGatePolicy,
+            maxBudgetUsd: Number.isFinite(maxBudgetUsd) ? maxBudgetUsd : undefined,
+            previewOnly,
+            metricCommand,
+            metricRegex,
+            metricUnit,
+            direction,
+            targetValue: Number.isFinite(targetValue) ? targetValue : undefined,
+          });
+        },
+        stdout,
+      );
+
+      if (previewOnly) {
+        if (asJson) {
+          stdout(JSON.stringify(res, null, 2));
+          return 0;
+        }
+        stdout(`Intake Route: ${res.route} (confidence=${Math.round(res.plan.confidence * 100)}%)`);
+        stdout(`Title: ${res.plan.title}`);
+        stdout(`Rationale: ${res.plan.rationale}`);
+        stdout(`Summary: ${res.plan.summary}`);
+        return 0;
+      }
+
+      const watchId = res.ticket?.id ?? res.epic?.id;
+      if (!wait || !watchId) {
+        if (asJson) {
+          stdout(JSON.stringify(res, null, 2));
+        } else if (res.ticket) {
+          stdout(`Intake -> Ticket ${res.ticket.id} (${res.ticket.status}): ${res.ticket.title}`);
+        } else if (res.epic) {
+          stdout(
+            `Intake -> Epic ${res.epic.id} (${res.subtasks?.length ?? 0} subtasks): ${res.epic.title}`,
+          );
+        } else if (res.campaign) {
+          stdout(`Intake -> GoalCampaign ${res.campaign.id} (${res.campaign.status}): ${res.campaign.name}`);
+        }
+        return 0;
+      }
+
+      const timeoutMsRaw = Number(getStringFlag(flags, "timeout-ms") ?? options?.waitTimeoutMs ?? 300_000);
+      stdout(`Intake -> ${watchId} (${res.route}); streaming live progress...`);
+      const finalTicket = await waitForTicketCompletion(client, watchId, stdout, timeoutMsRaw);
+      stdout(
+        asJson
+          ? JSON.stringify({ ...res, finalTicket }, null, 2)
+          : `${watchId} finished with status=${finalTicket.status} cost=$${finalTicket.costUsd.toFixed(4)}${finalTicket.mergedCommitSha ? ` sha=${finalTicket.mergedCommitSha}` : ""}`,
+      );
+      return finalTicket.status === "delivered" ? 0 : 1;
+    }
+
+    if (cmd === "wait") {
+      const targetId = positionals[1];
+      if (!targetId) {
+        stderr("Error: ticket or epic id is required. Usage: super-work wait <ticketOrEpicId>");
+        return 1;
+      }
+      const timeoutMsRaw = Number(getStringFlag(flags, "timeout-ms") ?? options?.waitTimeoutMs ?? 300_000);
+      const finalTicket = await withAutoStart(
+        baseUrl,
+        autoStart,
+        () => waitForTicketCompletion(client, targetId, stdout, timeoutMsRaw),
+        stdout,
+      );
+      stdout(
+        asJson
+          ? JSON.stringify({ ticket: finalTicket }, null, 2)
+          : `${finalTicket.id} finished with status=${finalTicket.status} cost=$${finalTicket.costUsd.toFixed(4)}`,
+      );
+      return finalTicket.status === "delivered" ? 0 : 1;
+    }
+
+    if (cmd === "reload") {
+      const force = Boolean(flags.force);
+      const skipCanary = Boolean(flags["skip-canary"]);
+      const { reload } = await withAutoStart(
+        baseUrl,
+        autoStart,
+        () => client.triggerReload({ force, skipCanary }),
+        stdout,
+      );
+      stdout(
+        asJson
+          ? JSON.stringify({ reload }, null, 2)
+          : `Self-host reload state: phase=${reload.phase}${reload.summary ? ` — ${reload.summary}` : ""}`,
+      );
+      return reload.phase === "failed" ? 1 : 0;
     }
 
     stderr(`Unknown command: ${cmd}`);

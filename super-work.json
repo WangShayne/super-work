@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "defaultMode": "auto",
+  "defaultDeliveryChannel": "local_merge",
+  "defaultTemplate": "standard",
+  "defaultTddMode": false,
+  "deliveryGatePolicy": "risk_gated",
+  "riskThreshold": 65,
+  "sensitivePaths": [
+    "packages/core/src/kernel/**",
+    "packages/drivers/src/sandbox/**",
+    "packages/server/src/index.ts",
+    "scripts/dev.ts"
+  ],
+  "verificationCommands": [
+    "bun run typecheck",
+    "bun test",
+    "bun run build"
+  ],
+  "sandboxMode": "balanced",
+  "forbiddenPaths": [
+    ".env",
+    ".env.*",
+    "**/.env",
+    "**/.env.*",
+    "**/*.pem",
+    "**/*.key"
+  ],
+  "conventions": "TypeScript + Bun 5-package monorepo (@super-work/core, @super-work/drivers, @super-work/server, @super-work/cli, @super-work/web). Maintain zero unnecessary third-party npm dependencies, preserve OS Seatbelt/bwrap sandbox isolation, keep every Vite JS bundle chunk < 500 kB, never use window.confirm or window.alert, and pair user-facing Web changes with bilingual zh-CN/en i18n keys.",
+  "playbook": [
+    {
+      "rule": "Keep every packages/web Vite build JS chunk under 500 kB via React.lazy or manualChunks.",
+      "scopePaths": ["packages/web/**"],
+      "pinned": true
+    },
+    {
+      "rule": "Mirror new core/server capabilities across REST, CLI, MCP, and bilingual zh-CN/en Web UI without adding third-party dependencies.",
+      "scopePaths": ["**"],
+      "pinned": true
+    }
+  ],
+  "blueprints": [
+    {
+      "id": "bp_self_feature",
+      "name": "Self-Host Feature",
+      "description": "Standard plan->implement->review->rebase self-evolution pipeline with risk-gated merge train delivery.",
+      "template": "standard",
+      "deliveryGatePolicy": "risk_gated",
+      "riskThreshold": 65,
+      "allowedPaths": ["packages/**"],
+      "acceptanceCriteria": [
+        "bun run typecheck exits 0",
+        "bun test passes with 0 failures",
+        "bun run build passes with all chunks < 500 kB"
+      ]
+    },
+    {
+      "id": "bp_kernel_hardening",
+      "name": "Kernel / Sandbox Guarded Change",
+      "description": "TDD-first guarded change touching kernel or sandbox internals with explicit delivery sign-off.",
+      "template": "strict",
+      "tddMode": true,
+      "deliveryGatePolicy": "always_signoff",
+      "allowedPaths": ["packages/core/**", "packages/drivers/**"],
+      "acceptanceCriteria": [
+        "Unit & integration tests added for edge cases",
+        "bun run typecheck and bun test pass cleanly"
+      ]
+    }
+  ]
+}

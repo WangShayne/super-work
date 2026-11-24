@@ -8,6 +8,7 @@ import type {
   PipelineTemplateId,
   ReasoningEffort,
   RepoConfig,
+  RequirementIntakeInput,
   RestoreCheckpointInput,
   ReviewCommentStatus,
   SubmitReviewCommentsInput,
@@ -439,6 +440,71 @@ export function registerTicketRoutes(ctx: ServerRouteContext): void {
         answers: body.answers,
       });
       return c.json({ clarification });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("Repository not found") ? 404 : 400);
+    }
+  });
+
+  // --- v1.3.0 Unified Smart Requirement Intake ---
+  app.post("/api/intake/preview", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as Partial<RequirementIntakeInput>;
+    if (!body.repoId || !body.requirement?.trim()) {
+      return c.json({ error: "repoId and requirement are required" }, 400);
+    }
+    try {
+      const plan = await kernel.previewRequirementIntake({
+        repoId: body.repoId,
+        requirement: body.requirement.trim(),
+        title: body.title?.trim() || undefined,
+        preferredRoute: body.preferredRoute,
+        preferredEngine: body.preferredEngine,
+        template: body.template,
+        tddMode: body.tddMode,
+        deliveryGatePolicy: body.deliveryGatePolicy,
+        maxBudgetUsd: body.maxBudgetUsd,
+        metricCommand: body.metricCommand,
+        metricRegex: body.metricRegex,
+        metricUnit: body.metricUnit,
+        direction: body.direction,
+        targetValue: body.targetValue,
+      });
+      return c.json({ plan });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("Repository not found") ? 404 : 400);
+    }
+  });
+
+  app.post("/api/intake", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as Partial<RequirementIntakeInput>;
+    if (!body.repoId || !body.requirement?.trim()) {
+      return c.json({ error: "repoId and requirement are required" }, 400);
+    }
+    try {
+      const result = await kernel.intakeRequirement({
+        repoId: body.repoId,
+        requirement: body.requirement.trim(),
+        title: body.title?.trim() || undefined,
+        preferredRoute: body.preferredRoute,
+        preferredEngine: body.preferredEngine,
+        template: body.template,
+        tddMode: body.tddMode,
+        deliveryGatePolicy: body.deliveryGatePolicy,
+        maxBudgetUsd: body.maxBudgetUsd,
+        previewOnly: Boolean(body.previewOnly),
+        metricCommand: body.metricCommand,
+        metricRegex: body.metricRegex,
+        metricUnit: body.metricUnit,
+        direction: body.direction,
+        targetValue: body.targetValue,
+        modelOverride: body.modelOverride,
+        effortOverride: body.effortOverride,
+      });
+      if (!body.previewOnly) {
+        void kernel.tick();
+      }
+      return c.json(result, body.previewOnly ? 200 : 201);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return c.json({ error: msg }, msg.includes("Repository not found") ? 404 : 400);

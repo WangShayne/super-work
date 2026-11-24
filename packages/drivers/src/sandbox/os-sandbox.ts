@@ -64,6 +64,7 @@ const ENGINE_ALLOWED_PREFIXES: Record<SanitizedEnvOptions["engine"], string[]> =
     "GOOGLE_GENERATIVE_AI_",
     "OPENCODE_",
   ],
+  gemini: ["GEMINI_", "GOOGLE_", "VERTEX_", "CLOUD_ML_REGION"],
   mock: [],
   verification: [
     "PORT",
@@ -282,6 +283,7 @@ export function buildMacosSeatbeltProfile(input: SeatbeltProfileInput): string {
     ".claude.json",
     ".codex",
     ".opencode",
+    ".gemini",
     ".config",
     ".cache",
     ".local",
@@ -382,9 +384,17 @@ export function buildMacosSeatbeltProfile(input: SeatbeltProfileInput): string {
     );
   }
 
-  // 4. Network isolation under strict mode or explicit allowNetwork === false
-  if (input.mode === "strict" || input.allowNetwork === false) {
+  // 4. Network isolation:
+  //    - strict mode denies all network traffic (including loopback).
+  //    - balanced mode with allowNetwork === false denies external internet while preserving localhost loopback/unix sockets for local test servers.
+  if (input.mode === "strict") {
     lines.push("(deny network*)");
+  } else if (input.allowNetwork === false) {
+    lines.push("(deny network*)");
+    lines.push('(allow network-bind (local ip "localhost:*"))');
+    lines.push('(allow network-inbound (local ip "localhost:*"))');
+    lines.push('(allow network-outbound (remote ip "localhost:*"))');
+    lines.push("(allow network* (local unix-socket) (remote unix-socket))");
   }
 
   return lines.join("\n");
@@ -510,7 +520,7 @@ export function wrapCommandWithOsSandbox(options: WrapSandboxOptions): WrappedSa
         args.push("--ro-bind", absRo, absRo);
       }
     }
-    if (mode === "strict" || options.allowNetwork === false) {
+    if (mode === "strict") {
       args.push("--unshare-net");
     }
     args.push(...options.commandArgv);

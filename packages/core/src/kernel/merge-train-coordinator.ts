@@ -249,6 +249,10 @@ async function markSlotDelivered(
       : {}),
     updatedAt: ts,
   };
+  if (repo.autoCleanupWorktree !== false || outbox.action === "local_merge") {
+    await ctx.workspace.cleanupTicketCheckpoints?.(repo.rootPath, ticket.id).catch(() => {});
+    await ctx.stateStore.markCheckpointsCleaned(ticket.id, ts).catch(() => {});
+  }
   await ctx.stateStore.saveTicket(deliveredTicket);
   ctx.emitEvent({ type: "ticket_updated", ticket: deliveredTicket, timestamp: ts });
 

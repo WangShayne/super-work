@@ -24,5 +24,6 @@ export * from "./pipeline.ts";
 export * from "./watchdog.ts";
 export * from "./outbox.ts";
 export * from "./epic.ts";
+export * from "./intake.ts";
 export * from "./router.ts";
 export * from "./kernel.ts";

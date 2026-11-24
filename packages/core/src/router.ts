@@ -1,6 +1,11 @@
 import { applyBlueprintToTicketInput, resolveRepoBlueprints } from "./blueprints.ts";
 import { classifyTaskCategory } from "./engine-router.ts";
 import { heuristicDecomposeEpic, sanitizeEpicSubtasks } from "./epic.ts";
+import {
+  heuristicPlanRequirementIntake,
+  normalizeRequirementIntakePlan,
+  synthesizeRequirementTitle,
+} from "./intake.ts";
 import { createDefaultMandate, mandateScopesOverlap, matchesPathScope } from "./mandate.ts";
 import { getFirstStage } from "./pipeline.ts";
 import { formatPlaybookContext } from "./playbook.ts";
@@ -23,6 +28,8 @@ import type {
   PipelineTemplateId,
   RepoConfig,
   RepoProbeContextPack,
+  RequirementIntakeInput,
+  RequirementIntakePlan,
   SymbolImpactReport,
   Thread,
   Ticket,
@@ -715,6 +722,92 @@ export class EventIntakeRouter {
       repoStructure,
       availableRepos,
     });
+  }
+
+  async previewRequirementIntake(input: RequirementIntakeInput): Promise<RequirementIntakePlan> {
+    const repo = await this.stateStore.getRepo(input.repoId);
+    if (!repo) {
+      throw new Error(`Repository not found: ${input.repoId}`);
+    }
+    const defaultTemplate = input.template ?? repo.defaultTemplate;
+    const defaultTddMode = input.tddMode ?? repo.defaultTddMode ?? false;
+    const title = synthesizeRequirementTitle(input.requirement, input.title);
+
+    const [allRepos, repoStructure, playbookEntries] = await Promise.all([
+      this.stateStore.listRepos(),
+      this.resolveRepoStructure(repo),
+      this.stateStore.listPlaybookEntries(repo.id, { onlyEnabled: true }),
+    ]);
+
+    const availableRepos =
+      allRepos.length > 1
+        ? await Promise.all(
+            allRepos.map(async (r) => ({
+              id: r.id,
+              name: r.name,
+              structure: r.id === repo.id ? repoStructure : await this.resolveRepoStructure(r),
+            })),
+          )
+        : [{ id: repo.id, name: repo.name, structure: repoStructure }];
+
+    const playbookRules = formatPlaybookContext(playbookEntries, ["**"]) || undefined;
+    const probeContext = this.repoPreProbeProvider
+      ? await this.repoPreProbeProvider(
+          repo.rootPath,
+          `${title}\n${input.requirement}`,
+          repo.forbiddenPaths,
+        ).catch(() => undefined)
+      : undefined;
+    const probeExecutor = this.buildProbeExecutor(repo);
+
+    const metricHint =
+      input.metricCommand?.trim() || input.targetValue !== undefined
+        ? {
+            metricCommand: input.metricCommand?.trim(),
+            targetValue: input.targetValue,
+            direction: input.direction,
+            metricUnit: input.metricUnit,
+            metricRegex: input.metricRegex,
+          }
+        : undefined;
+
+    const fallbackInput = {
+      repo,
+      title,
+      requirement: input.requirement,
+      preferredRoute: input.preferredRoute,
+      defaultTemplate,
+      defaultTddMode,
+      maxBudgetUsd: input.maxBudgetUsd,
+      repoStructure,
+      availableRepos,
+      probeContext,
+      metricHint,
+    };
+
+    if (this.llm.planRequirementIntake) {
+      try {
+        const llmPlan = await this.llm.planRequirementIntake({
+          repo,
+          title,
+          requirement: input.requirement,
+          defaultTemplate,
+          defaultTddMode,
+          repoStructure,
+          playbookRules,
+          conventions: repo.conventions,
+          availableRepos,
+          probeContext,
+          probeExecutor,
+          metricHint,
+        });
+        return normalizeRequirementIntakePlan(llmPlan, fallbackInput);
+      } catch {
+        // Fallback to deterministic intake planner on LLM error
+      }
+    }
+
+    return heuristicPlanRequirementIntake(fallbackInput);
   }
 
   async createEpic(input: CreateEpicInput): Promise<{ epic: Ticket; subtasks: Ticket[] }> {

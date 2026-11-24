@@ -7,9 +7,12 @@ import {
   getAlternateEngine,
   heuristicDecomposeEpic,
   heuristicDistillPlaybookLesson,
+  heuristicPlanRequirementIntake,
   normalizeEpicDecompositionPlan,
+  normalizeRequirementIntakePlan,
 } from "@super-work/core";
 import type {
+  CampaignDirection,
   ControlPlaneLLM,
   ControlProbeRequest,
   ControlProbeStep,
@@ -22,6 +25,7 @@ import type {
   RepoConfig,
   RepoProbeContextPack,
   RepoProbeExecutor,
+  RequirementIntakePlan,
   SpecClarificationResult,
   StageRun,
   SystemSetupConfig,
@@ -173,7 +177,7 @@ const WATCHDOG_SCHEMA = {
     },
     reason: { type: "string" },
     hint: { type: "string" },
-    targetEngine: { type: "string", enum: ["claude", "codex", "opencode", "mock"] },
+    targetEngine: { type: "string", enum: ["claude", "codex", "opencode", "gemini", "mock"] },
   },
   required: ["action", "reason"],
 };
@@ -230,6 +234,46 @@ const CHIEF_ANSWER_SCHEMA = {
     highlights: { type: "array", items: { type: "string" } },
   },
   required: ["answer"],
+};
+
+const REQUIREMENT_INTAKE_SCHEMA = {
+  type: "object",
+  properties: {
+    route: { type: "string", enum: ["single_ticket", "epic_dag", "goal_campaign"] },
+    confidence: { type: "number" },
+    rationale: { type: "string" },
+    title: { type: "string" },
+    summary: { type: "string" },
+    singleSpec: {
+      type: "object",
+      properties: {
+        description: { type: "string" },
+        template: { type: "string", enum: ["fast", "standard", "strict"] },
+        tddMode: { type: "boolean" },
+        allowedPaths: { type: "array", items: { type: "string" } },
+        acceptanceCriteria: { type: "array", items: { type: "string" } },
+        priority: { type: "number" },
+      },
+    },
+    epicPlan: EPIC_DECOMPOSITION_SCHEMA,
+    campaignSpec: {
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        goalPrompt: { type: "string" },
+        metricCommand: { type: "string" },
+        metricRegex: { type: "string" },
+        metricUnit: { type: "string" },
+        direction: { type: "string", enum: ["increase", "decrease"] },
+        targetValue: { type: "number" },
+        deliveryMode: { type: "string", enum: ["staging_branch", "per_wave_merge"] },
+        allowedPaths: { type: "array", items: { type: "string" } },
+        maxIterations: { type: "number" },
+        maxTotalBudgetUsd: { type: "number" },
+      },
+    },
+  },
+  required: ["route", "confidence", "rationale", "title", "summary"],
 };
 
 const PROBE_PROMPT_GUIDE = [
@@ -649,6 +693,63 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
     };
   }
 
+  async planRequirementIntake(input: {
+    repo: RepoConfig;
+    title: string;
+    requirement: string;
+    defaultTemplate: PipelineTemplateId;
+    defaultTddMode?: boolean;
+    repoStructure?: string;
+    playbookRules?: string;
+    conventions?: string;
+    availableRepos?: Array<{ id: string; name: string; structure?: string }>;
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
+    metricHint?: {
+      metricCommand?: string;
+      targetValue?: number;
+      direction?: CampaignDirection;
+      metricUnit?: string;
+      metricRegex?: string;
+    };
+  }): Promise<RequirementIntakePlan> {
+    const { result: parsed, probeSteps } = await runWithOptionalProbes<
+      Partial<RequirementIntakePlan>
+    >({
+      probeContext: input.probeContext,
+      probeExecutor: input.probeExecutor,
+      invoke: async (probeTranscript, allowProbes) => {
+        const sys = [
+          "You are the Super-agent Unified Requirement Router.",
+          "Decide the best execution route for a raw software requirement:",
+          "- `single_ticket`: coherent single feature/fix cleanly executable on one branch; provide narrowed `singleSpec.allowedPaths` aligned to real files/modules.",
+          "- `epic_dag`: complex or multi-package/multi-repo feature requiring 2-6 concurrent or staged subtasks with disjoint `allowedPaths` in `epicPlan`.",
+          "- `goal_campaign`: quantitative optimization ONLY when an executable `metricCommand` and numeric `targetValue` exist.",
+          allowProbes ? PROBE_PROMPT_GUIDE : "",
+          "Output ONLY valid JSON matching the schema:",
+          JSON.stringify(REQUIREMENT_INTAKE_SCHEMA),
+        ]
+          .filter(Boolean)
+          .join("\n");
+        const user = JSON.stringify({
+          repo: { id: input.repo.id, name: input.repo.name, defaultTemplate: input.defaultTemplate },
+          availableRepos: input.availableRepos,
+          repoStructure: input.repoStructure,
+          conventions: input.conventions,
+          playbookRules: input.playbookRules,
+          probeEvidence: input.probeContext?.deterministicSummary,
+          extraProbeFindings: probeTranscript || undefined,
+          metricHint: input.metricHint,
+          title: input.title,
+          requirement: input.requirement,
+        });
+        return this.chatJson<Partial<RequirementIntakePlan>>(sys, user);
+      },
+    });
+    const norm = normalizeRequirementIntakePlan(parsed, input);
+    return probeSteps.length > 0 ? { ...norm, probeSteps } : norm;
+  }
+
   private async chatJson<T>(systemPrompt: string, userPrompt: string): Promise<T> {
     const url = `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`;
     const res = await fetch(url, {
@@ -887,6 +988,50 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
     };
   }
 
+  async planRequirementIntake(input: {
+    repo: RepoConfig;
+    title: string;
+    requirement: string;
+    defaultTemplate: PipelineTemplateId;
+    defaultTddMode?: boolean;
+    repoStructure?: string;
+    playbookRules?: string;
+    conventions?: string;
+    availableRepos?: Array<{ id: string; name: string; structure?: string }>;
+    probeContext?: RepoProbeContextPack;
+    metricHint?: {
+      metricCommand?: string;
+      targetValue?: number;
+      direction?: CampaignDirection;
+      metricUnit?: string;
+      metricRegex?: string;
+    };
+  }): Promise<RequirementIntakePlan> {
+    const prompt = [
+      "Route a raw software requirement to `single_ticket`, `epic_dag`, or `goal_campaign` (only choose `goal_campaign` when a valid metricCommand and numeric targetValue exist). Narrow allowedPaths using real repo structure.",
+      `Repo: ${input.repo.name} (${input.repo.id}), DefaultTemplate: ${input.defaultTemplate}`,
+      input.availableRepos && input.availableRepos.length > 1
+        ? `AvailableRepos: ${JSON.stringify(input.availableRepos)}`
+        : "",
+      input.repoStructure ? `RepoStructure:\n${input.repoStructure}` : "",
+      input.probeContext?.deterministicSummary
+        ? `ProbeEvidence:\n${input.probeContext.deterministicSummary}`
+        : "",
+      input.conventions ? `Conventions:\n${input.conventions}` : "",
+      input.playbookRules ? `Playbook:\n${input.playbookRules}` : "",
+      input.metricHint ? `MetricHint: ${JSON.stringify(input.metricHint)}` : "",
+      `Title: ${input.title}`,
+      `Requirement: ${input.requirement}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    const parsed = await this.runClaudeJson<Partial<RequirementIntakePlan>>(
+      prompt,
+      REQUIREMENT_INTAKE_SCHEMA,
+    );
+    return normalizeRequirementIntakePlan(parsed, input);
+  }
+
   private async runClaudeJson<T>(prompt: string, schema: Record<string, unknown>): Promise<T> {
     const resolvedBin = resolveExecutable(this.claudeBin);
     if (!resolvedBin) {
@@ -1121,6 +1266,50 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
     };
   }
 
+  async planRequirementIntake(input: {
+    repo: RepoConfig;
+    title: string;
+    requirement: string;
+    defaultTemplate: PipelineTemplateId;
+    defaultTddMode?: boolean;
+    repoStructure?: string;
+    playbookRules?: string;
+    conventions?: string;
+    availableRepos?: Array<{ id: string; name: string; structure?: string }>;
+    probeContext?: RepoProbeContextPack;
+    metricHint?: {
+      metricCommand?: string;
+      targetValue?: number;
+      direction?: CampaignDirection;
+      metricUnit?: string;
+      metricRegex?: string;
+    };
+  }): Promise<RequirementIntakePlan> {
+    const prompt = [
+      "Route a raw software requirement to `single_ticket`, `epic_dag`, or `goal_campaign` (only choose `goal_campaign` when a valid metricCommand and numeric targetValue exist). Narrow allowedPaths using real repo structure.",
+      `Repo: ${input.repo.name} (${input.repo.id}), DefaultTemplate: ${input.defaultTemplate}`,
+      input.availableRepos && input.availableRepos.length > 1
+        ? `AvailableRepos: ${JSON.stringify(input.availableRepos)}`
+        : "",
+      input.repoStructure ? `RepoStructure:\n${input.repoStructure}` : "",
+      input.probeContext?.deterministicSummary
+        ? `ProbeEvidence:\n${input.probeContext.deterministicSummary}`
+        : "",
+      input.conventions ? `Conventions:\n${input.conventions}` : "",
+      input.playbookRules ? `Playbook:\n${input.playbookRules}` : "",
+      input.metricHint ? `MetricHint: ${JSON.stringify(input.metricHint)}` : "",
+      `Title: ${input.title}`,
+      `Requirement: ${input.requirement}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    const parsed = await this.runCodexJson<Partial<RequirementIntakePlan>>(
+      prompt,
+      REQUIREMENT_INTAKE_SCHEMA,
+    );
+    return normalizeRequirementIntakePlan(parsed, input);
+  }
+
   private async runCodexJson<T>(prompt: string, schema: Record<string, unknown>): Promise<T> {
     const resolvedBin = resolveExecutable(this.codexBin);
     if (!resolvedBin) {
@@ -1348,6 +1537,26 @@ export class HeuristicControlLLM implements ControlPlaneLLM {
   }): Promise<SpecClarificationResult> {
     return buildHeuristicSpecClarification(input);
   }
+
+  async planRequirementIntake(input: {
+    repo: RepoConfig;
+    title: string;
+    requirement: string;
+    defaultTemplate: PipelineTemplateId;
+    defaultTddMode?: boolean;
+    repoStructure?: string;
+    availableRepos?: Array<{ id: string; name: string; structure?: string }>;
+    probeContext?: RepoProbeContextPack;
+    metricHint?: {
+      metricCommand?: string;
+      targetValue?: number;
+      direction?: CampaignDirection;
+      metricUnit?: string;
+      metricRegex?: string;
+    };
+  }): Promise<RequirementIntakePlan> {
+    return heuristicPlanRequirementIntake(input);
+  }
 }
 
 export class CompositeControlPlaneLLM implements ControlPlaneLLM {
@@ -1502,6 +1711,37 @@ export class CompositeControlPlaneLLM implements ControlPlaneLLM {
       answer: input.contextSummary,
       probeSteps: input.probeContext?.probeSteps,
     };
+  }
+
+  async planRequirementIntake(input: {
+    repo: RepoConfig;
+    title: string;
+    requirement: string;
+    defaultTemplate: PipelineTemplateId;
+    defaultTddMode?: boolean;
+    repoStructure?: string;
+    playbookRules?: string;
+    conventions?: string;
+    availableRepos?: Array<{ id: string; name: string; structure?: string }>;
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
+    metricHint?: {
+      metricCommand?: string;
+      targetValue?: number;
+      direction?: CampaignDirection;
+      metricUnit?: string;
+      metricRegex?: string;
+    };
+  }): Promise<RequirementIntakePlan> {
+    for (const provider of this.chain) {
+      if (!provider.planRequirementIntake) continue;
+      try {
+        return await provider.planRequirementIntake(input);
+      } catch {
+        // Fallback to next control-plane provider
+      }
+    }
+    return heuristicPlanRequirementIntake(input);
   }
 }
 
@@ -1721,6 +1961,32 @@ export class MutableControlPlaneLLM implements ControlPlaneLLM {
       answer: input.contextSummary,
       probeSteps: input.probeContext?.probeSteps,
     });
+  }
+
+  planRequirementIntake(input: {
+    repo: RepoConfig;
+    title: string;
+    requirement: string;
+    defaultTemplate: PipelineTemplateId;
+    defaultTddMode?: boolean;
+    repoStructure?: string;
+    playbookRules?: string;
+    conventions?: string;
+    availableRepos?: Array<{ id: string; name: string; structure?: string }>;
+    probeContext?: RepoProbeContextPack;
+    probeExecutor?: RepoProbeExecutor;
+    metricHint?: {
+      metricCommand?: string;
+      targetValue?: number;
+      direction?: CampaignDirection;
+      metricUnit?: string;
+      metricRegex?: string;
+    };
+  }): Promise<RequirementIntakePlan> {
+    if (this.current.planRequirementIntake) {
+      return this.current.planRequirementIntake(input);
+    }
+    return Promise.resolve(heuristicPlanRequirementIntake(input));
   }
 }
 

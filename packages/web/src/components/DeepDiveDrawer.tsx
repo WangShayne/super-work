@@ -763,6 +763,7 @@ export function DeepDiveDrawer({
                         <option value="claude">claude</option>
                         <option value="codex">codex</option>
                         <option value="opencode">opencode</option>
+                        <option value="gemini">gemini</option>
                         <option value="mock">mock</option>
                       </select>
                       <button

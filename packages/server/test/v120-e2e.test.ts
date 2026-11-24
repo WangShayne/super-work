@@ -220,7 +220,7 @@ describe("v1.2.0 End-to-End Capabilities (A Campaigns + B MergeTrain/Barrier + C
       server.stop(true);
       store.close();
     }
-  });
+  }, 15_000);
 
   it("Pillar B: executes Smart-Bypass, 3-ticket Speculative Merge Train culprit ejection & revert, plus Cross-Repo Release Barrier", async () => {
     const dir = await mkdtemp(join(tmpdir(), "sw-v120-e2e-trn-"));
@@ -449,8 +449,9 @@ describe("v1.2.0 End-to-End Capabilities (A Campaigns + B MergeTrain/Barrier + C
     expect(await readFile(join(repoApi, "src/api.ts"), "utf8")).toContain("API_V = 2");
     expect(await readFile(join(repoWeb, "src/web.ts"), "utf8")).toContain("WEB_V = 2");
 
+    await kernel.stop();
     store.close();
-  });
+  }, 15_000);
 
   it("Pillar C.1 & D & MCP 21 + CLI: enforces immutable super-work.json, lifecycle hooks, Service API, and CLI commands", async () => {
     const dir = await mkdtemp(join(tmpdir(), "sw-v120-e2e-hooks-"));
@@ -588,7 +589,7 @@ describe("v1.2.0 End-to-End Capabilities (A Campaigns + B MergeTrain/Barrier + C
       expect(svcJson.status.dataDir).toBe(dir);
 
       const mcpInfo = (await (await fetch(`${baseUrl}/api/mcp`)).json()) as { version: string };
-      expect(mcpInfo.version).toBe("1.2.0");
+      expect(mcpInfo.version).toBe("1.3.0");
 
       const toolsList = (await (
         await fetch(`${baseUrl}/api/mcp`, {
@@ -597,7 +598,7 @@ describe("v1.2.0 End-to-End Capabilities (A Campaigns + B MergeTrain/Barrier + C
           body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
         })
       ).json()) as { result: { tools: Array<{ name: string }> } };
-      expect(toolsList.result.tools).toHaveLength(21);
+      expect(toolsList.result.tools).toHaveLength(23);
       expect(toolsList.result.tools.some((t) => t.name === "manage_campaigns")).toBe(true);
       expect(toolsList.result.tools.some((t) => t.name === "manage_merge_train")).toBe(true);
 
@@ -630,5 +631,5 @@ describe("v1.2.0 End-to-End Capabilities (A Campaigns + B MergeTrain/Barrier + C
       server.stop(true);
       store.close();
     }
-  });
+  }, 15_000);
 });
