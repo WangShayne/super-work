@@ -39,6 +39,7 @@ import type {
   EpicDecompositionPlan,
   EpicDeliveryMode,
   EpicSubtaskSpec,
+  LifecycleHooksConfig,
   ManagedWorktreeItem,
   OperatingMode,
   PipelineTemplateId,
@@ -94,6 +95,7 @@ interface RepoSettingsModalProps {
       | "riskThreshold"
       | "sensitivePaths"
       | "blueprints"
+      | "hooks"
     > & {
       maxConcurrentWorkers?: number | null;
       dailyBudgetUsd?: number | null;
@@ -106,6 +108,7 @@ interface RepoSettingsModalProps {
       riskThreshold?: number | null;
       sensitivePaths?: string[] | null;
       blueprints?: TaskBlueprint[] | null;
+      hooks?: LifecycleHooksConfig | null;
     },
   ) => Promise<void>;
 }
@@ -142,6 +145,10 @@ export function RepoSettingsModal({
   const [forbiddenInput, setForbiddenInput] = useState("");
   const [conventions, setConventions] = useState("");
   const [previewCommand, setPreviewCommand] = useState("");
+  const [preDeliverHooksInput, setPreDeliverHooksInput] = useState("");
+  const [postDeliverHooksInput, setPostDeliverHooksInput] = useState("");
+  const [onEscalateHooksInput, setOnEscalateHooksInput] = useState("");
+  const [hookTimeoutInput, setHookTimeoutInput] = useState("60");
   const [smokeEnabled, setSmokeEnabled] = useState(false);
   const [smokeStartCmd, setSmokeStartCmd] = useState("");
   const [smokeReadyUrl, setSmokeReadyUrl] = useState("");
@@ -223,6 +230,10 @@ export function RepoSettingsModal({
     setForbiddenInput((repo.forbiddenPaths ?? []).join(", "));
     setConventions(repo.conventions ?? "");
     setPreviewCommand(repo.previewCommand ?? "");
+    setPreDeliverHooksInput((repo.hooks?.preDeliver ?? []).join("\n"));
+    setPostDeliverHooksInput((repo.hooks?.postDeliver ?? []).join("\n"));
+    setOnEscalateHooksInput((repo.hooks?.onEscalate ?? []).join("\n"));
+    setHookTimeoutInput(String(repo.hooks?.timeoutSec ?? 60));
     setSmokeEnabled(Boolean(repo.smokeCheck?.enabled));
     setSmokeStartCmd(repo.smokeCheck?.startCommand ?? "");
     setSmokeReadyUrl(repo.smokeCheck?.readyUrl ?? "");
@@ -369,6 +380,24 @@ export function RepoSettingsModal({
         forbiddenPaths,
         conventions: conventions.trim() || null,
         previewCommand: previewCommand.trim() || null,
+        hooks: (() => {
+          const preDeliver = preDeliverHooksInput.split("\n").map((s) => s.trim()).filter(Boolean);
+          const postDeliver = postDeliverHooksInput.split("\n").map((s) => s.trim()).filter(Boolean);
+          const onEscalate = onEscalateHooksInput.split("\n").map((s) => s.trim()).filter(Boolean);
+          const parsedHookTimeout = Number(hookTimeoutInput.trim());
+          if (preDeliver.length === 0 && postDeliver.length === 0 && onEscalate.length === 0) {
+            return null;
+          }
+          return {
+            ...(preDeliver.length > 0 ? { preDeliver } : {}),
+            ...(postDeliver.length > 0 ? { postDeliver } : {}),
+            ...(onEscalate.length > 0 ? { onEscalate } : {}),
+            timeoutSec:
+              Number.isFinite(parsedHookTimeout) && parsedHookTimeout > 0
+                ? Math.min(600, Math.max(5, Math.floor(parsedHookTimeout)))
+                : 60,
+          };
+        })(),
         smokeCheck: smokeCheckPayload,
         maxConcurrentWorkers:
           maxConcurrentInput.trim() && Number.isFinite(parsedMaxConcurrent) && parsedMaxConcurrent > 0
@@ -420,6 +449,10 @@ export function RepoSettingsModal({
           ? JSON.stringify(res.repo.smokeCheck.browserCheck.steps)
           : "",
       );
+      setPreDeliverHooksInput((res.repo.hooks?.preDeliver ?? []).join("\n"));
+      setPostDeliverHooksInput((res.repo.hooks?.postDeliver ?? []).join("\n"));
+      setOnEscalateHooksInput((res.repo.hooks?.onEscalate ?? []).join("\n"));
+      setHookTimeoutInput(String(res.repo.hooks?.timeoutSec ?? 60));
       await loadPlaybook(repo.id);
       onRefresh?.();
       setContractNotice(`Synced super-work.json (${res.repo.contractSyncedAt ?? "ok"})`);
@@ -1215,6 +1248,67 @@ export function RepoSettingsModal({
                       <p className="text-[11px] text-zinc-500">{t("modal.repoSettings.smokeHint")}</p>
                     </>
                   )}
+                </div>
+
+                <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-3.5 space-y-3">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <span className="font-semibold text-zinc-200 flex items-center gap-1.5">
+                      <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
+                      {t("hooks.title")}
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[11px] text-zinc-400">timeoutSec</span>
+                      <input
+                        type="number"
+                        min={5}
+                        max={600}
+                        value={hookTimeoutInput}
+                        onChange={(e) => setHookTimeoutInput(e.target.value)}
+                        className="w-16 bg-zinc-900 border border-zinc-800 rounded px-2 py-0.5 font-mono text-[11px] text-zinc-100"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-emerald-300/90 bg-emerald-500/10 border border-emerald-500/25 rounded-lg px-2.5 py-1.5">
+                    {t("hooks.immutableNote")}
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    <div>
+                      <label className="block text-[11px] text-zinc-400 mb-1">
+                        pre_deliver (blocking)
+                      </label>
+                      <textarea
+                        rows={2}
+                        value={preDeliverHooksInput}
+                        onChange={(e) => setPreDeliverHooksInput(e.target.value)}
+                        placeholder="bun run typecheck"
+                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 font-mono text-[11px] text-zinc-100"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-zinc-400 mb-1">
+                        post_deliver (async)
+                      </label>
+                      <textarea
+                        rows={2}
+                        value={postDeliverHooksInput}
+                        onChange={(e) => setPostDeliverHooksInput(e.target.value)}
+                        placeholder="./scripts/notify.sh"
+                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 font-mono text-[11px] text-zinc-100"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-zinc-400 mb-1">
+                        on_escalate (async)
+                      </label>
+                      <textarea
+                        rows={2}
+                        value={onEscalateHooksInput}
+                        onChange={(e) => setOnEscalateHooksInput(e.target.value)}
+                        placeholder="./scripts/page.sh"
+                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 font-mono text-[11px] text-zinc-100"
+                      />
+                    </div>
+                  </div>
                 </div>
               </>
             )}

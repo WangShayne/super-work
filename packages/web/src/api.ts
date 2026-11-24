@@ -6,6 +6,7 @@ import type {
   ChainOfRecall,
   ChiefAskResult,
   CliScanReport,
+  CreateCampaignInput,
   DagNodeMutationInput,
   DeliveryChannel,
   DeliveryGatePolicy,
@@ -16,13 +17,17 @@ import type {
   EpicSubtaskSpec,
   EvalCase,
   EvalRunRecord,
+  GoalCampaign,
+  GoalCampaignWave,
   HealthResponse,
   ImportKnowledgeBundleResult,
   InboxItem,
+  LifecycleHooksConfig,
   LlmConnectionTestResult,
   LlmProviderPreset,
   ManagedWorktreeItem,
   MemorySearchHit,
+  MergeTrainEntry,
   NotificationConfig,
   OperatingMode,
   OutboxEntry,
@@ -42,6 +47,7 @@ import type {
   RoutineScheduleKind,
   RoutineSpec,
   SandboxMode,
+  ServiceStatusResponse,
   SmokeCheckConfig,
   SpecClarificationResult,
   SpillArtifact,
@@ -109,6 +115,7 @@ export const api = {
     preferredReviewEngine?: WorkerEngineId;
     verificationCommands?: string[];
     defaultDeliveryChannel?: DeliveryChannel;
+    hooks?: LifecycleHooksConfig;
   }) => request<{ repo: RepoConfig }>("/api/repos", { method: "POST", body: JSON.stringify(payload) }),
 
   patchRepo: (
@@ -126,6 +133,7 @@ export const api = {
       | "riskThreshold"
       | "sensitivePaths"
       | "blueprints"
+      | "hooks"
     > & {
       maxConcurrentWorkers?: number | null;
       dailyBudgetUsd?: number | null;
@@ -138,6 +146,7 @@ export const api = {
       riskThreshold?: number | null;
       sensitivePaths?: string[] | null;
       blueprints?: TaskBlueprint[] | null;
+      hooks?: LifecycleHooksConfig | null;
     },
   ) =>
     request<{ repo: RepoConfig }>(`/api/repos/${id}`, {
@@ -466,6 +475,8 @@ export const api = {
     template?: PipelineTemplateId;
     tddMode?: boolean;
     epicDeliveryMode?: EpicDeliveryMode;
+    releaseBarrier?: boolean;
+    barrierGroupId?: string;
     preferredEngine?: EnginePreference;
     modelOverride?: string;
     effortOverride?: ReasoningEffort;
@@ -651,4 +662,63 @@ export const api = {
       method: "POST",
       body: JSON.stringify(notifications ? { notifications } : {}),
     }),
+
+  listCampaigns: (repoId?: string) =>
+    request<{ campaigns: GoalCampaign[] }>(
+      repoId ? `/api/campaigns?repoId=${encodeURIComponent(repoId)}` : "/api/campaigns",
+    ),
+
+  getCampaign: (id: string) =>
+    request<{ campaign: GoalCampaign; waves: GoalCampaignWave[] }>(
+      `/api/campaigns/${encodeURIComponent(id)}`,
+    ),
+
+  createCampaign: (payload: CreateCampaignInput) =>
+    request<{ campaign: GoalCampaign }>("/api/campaigns", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  startCampaign: (id: string, note?: string) =>
+    request<{ campaign: GoalCampaign }>(`/api/campaigns/${encodeURIComponent(id)}/start`, {
+      method: "POST",
+      body: JSON.stringify(note ? { note } : {}),
+    }),
+
+  pauseCampaign: (id: string, reason?: string) =>
+    request<{ campaign: GoalCampaign }>(`/api/campaigns/${encodeURIComponent(id)}/pause`, {
+      method: "POST",
+      body: JSON.stringify(reason ? { reason } : {}),
+    }),
+
+  deliverCampaign: (id: string, action: "local_merge" | "push_and_create_pr" = "local_merge") =>
+    request<{ campaign: GoalCampaign }>(`/api/campaigns/${encodeURIComponent(id)}/deliver`, {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    }),
+
+  deleteCampaign: (id: string) =>
+    request<{ ok: boolean; id: string }>(`/api/campaigns/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+
+  listMergeTrain: (repoId?: string) =>
+    request<{ entries: MergeTrainEntry[] }>(
+      repoId ? `/api/merge-train?repoId=${encodeURIComponent(repoId)}` : "/api/merge-train",
+    ),
+
+  flushMergeTrain: (repoId?: string) =>
+    request<{ mergedCount: number }>("/api/merge-train/flush", {
+      method: "POST",
+      body: JSON.stringify(repoId ? { repoId } : {}),
+    }),
+
+  ejectMergeTrainEntry: (id: string, reason?: string) =>
+    request<{ entry: MergeTrainEntry }>(`/api/merge-train/${encodeURIComponent(id)}/eject`, {
+      method: "POST",
+      body: JSON.stringify(reason ? { reason } : {}),
+    }),
+
+  getSystemService: (lines = 40) =>
+    request<ServiceStatusResponse>(`/api/system/service?lines=${encodeURIComponent(String(lines))}`),
 };

@@ -15,11 +15,15 @@ import type {
   EpicSubtaskSpec,
   EvalCase,
   EvalRunRecord,
+  GoalCampaign,
+  GoalCampaignWave,
   HandoverDigest,
   InboxItem,
   InboxItemStatus,
   Mandate,
   MemorySearchHit,
+  MergeTrainEntry,
+  MergeTrainEntryStatus,
   OutboxEntry,
   OutboxStatus,
   PipelineTemplateId,
@@ -265,6 +269,37 @@ export interface WorkspaceProvider {
     worktreePath: string,
     baseRef: string,
   ): Promise<{ addedLines: number; deletedLines: number; changedFiles: string[] }>;
+
+  // Deterministic Lifecycle Hooks, Goal Campaigns & Speculative Merge Train (v1.2.0)
+  runLifecycleHooks?(input: {
+    cwd: string;
+    commands: string[];
+    timeoutSec?: number;
+    hookEnv: Record<string, string>;
+  }): Promise<VerificationRunResult>;
+  measureMetricAtRef?(input: {
+    rootRepoPath: string;
+    gitRef: string;
+    metricCommand: string;
+    timeoutSec?: number;
+    sandboxMode?: SandboxMode;
+    forbiddenPaths?: string[];
+  }): Promise<{ ok: boolean; rawOutput: string; exitCode: number; durationMs: number }>;
+  resetBranchRef?(rootRepoPath: string, branchName: string, targetCommitSha: string): Promise<void>;
+  prepareSpeculativeMergeSlot?(input: {
+    rootRepoPath: string;
+    baseCommitSha: string;
+    branchName: string;
+    commitMessage: string;
+    slotLabel: string;
+  }): Promise<{ ok: boolean; worktreePath: string; mergedCommitSha?: string; conflictSummary?: string }>;
+  fastForwardBranchToCommit?(input: {
+    rootRepoPath: string;
+    baseBranch: string;
+    targetCommitSha: string;
+    cleanupWorktrees?: string[];
+    deleteBranches?: string[];
+  }): Promise<string>;
 }
 
 export interface StateStore {
@@ -380,6 +415,24 @@ export interface StateStore {
   // System Settings
   getSystemSetting<T>(key: string): Promise<T | null>;
   setSystemSetting<T>(key: string, value: T): Promise<void>;
+
+  // Goal Campaigns (v1.2.0 Pillar A)
+  saveCampaign?(campaign: GoalCampaign): Promise<void>;
+  getCampaign?(id: string): Promise<GoalCampaign | null>;
+  listCampaigns?(repoId?: string): Promise<GoalCampaign[]>;
+  deleteCampaign?(id: string): Promise<boolean>;
+  saveCampaignWave?(wave: GoalCampaignWave): Promise<void>;
+  listCampaignWaves?(campaignId: string): Promise<GoalCampaignWave[]>;
+
+  // Speculative Merge Train (v1.2.0 Pillar B)
+  saveMergeTrainEntry?(entry: MergeTrainEntry): Promise<void>;
+  getMergeTrainEntry?(id: string): Promise<MergeTrainEntry | null>;
+  listMergeTrainEntries?(filter?: {
+    repoId?: string;
+    barrierGroupId?: string;
+    status?: MergeTrainEntryStatus;
+  }): Promise<MergeTrainEntry[]>;
+  nextMergeTrainPosition?(repoId: string): Promise<number>;
 }
 
 export interface ArtifactStore {
@@ -444,6 +497,10 @@ export interface DirectTicketInput {
   effortOverride?: ReasoningEffort;
   acceptanceCriteria?: string[];
   threadKey?: string;
+  campaignId?: string;
+  campaignWave?: number;
+  targetBranch?: string;
+  barrierGroupId?: string;
 }
 
 export interface CreateEpicInput {
@@ -453,6 +510,8 @@ export interface CreateEpicInput {
   template?: PipelineTemplateId;
   tddMode?: boolean;
   epicDeliveryMode?: EpicDeliveryMode;
+  releaseBarrier?: boolean;
+  barrierGroupId?: string;
   preferredEngine?: EnginePreference;
   modelOverride?: string;
   effortOverride?: ReasoningEffort;

@@ -107,6 +107,13 @@ export interface SharedPlaybookRuleSpec {
   pinned?: boolean;
 }
 
+export interface LifecycleHooksConfig {
+  preDeliver?: string[];
+  postDeliver?: string[];
+  onEscalate?: string[];
+  timeoutSec?: number;
+}
+
 export interface RepoContractFile {
   version?: 1;
   defaultTemplate?: PipelineTemplateId;
@@ -123,6 +130,7 @@ export interface RepoContractFile {
   conventions?: string;
   playbook?: SharedPlaybookRuleSpec[];
   blueprints?: TaskBlueprint[];
+  hooks?: LifecycleHooksConfig;
 }
 
 export type RoutineScheduleKind = "interval" | "cron";
@@ -312,6 +320,7 @@ export interface RepoConfig {
   riskThreshold?: number;
   sensitivePaths?: string[];
   blueprints?: TaskBlueprint[];
+  hooks?: LifecycleHooksConfig;
   preferredImplementEngine: EnginePreference;
   preferredReviewEngine: WorkerEngineId;
   fallbackEngines?: WorkerEngineId[];
@@ -422,6 +431,11 @@ export interface Ticket {
   conflictResolutionCount?: number;
   clarificationCount?: number;
   steerCount?: number;
+  campaignId?: string;
+  campaignWave?: number;
+  targetBranch?: string;
+  barrierGroupId?: string;
+  baseHeadAtRebase?: string;
   inlineMemory: InlineMemory;
   handoverDigest?: HandoverDigest;
   costUsd: number;
@@ -503,7 +517,8 @@ export interface InboxItem {
     | "pr_followup"
     | "arena_tiebreak"
     | "epic_replan"
-    | "clarification_request";
+    | "clarification_request"
+    | "campaign_paused";
   status: "pending" | "approved" | "rejected";
   title: string;
   summary: string;
@@ -562,6 +577,8 @@ export interface HealthResponse {
     reclaimableWorktrees?: number;
     activeRoutines?: number;
     activePreviews?: number;
+    activeCampaigns?: number;
+    queuedMergeTrain?: number;
   };
   timestamp: string;
 }
@@ -1090,4 +1107,124 @@ export interface ImportKnowledgeBundleResult {
   importedCasebook: number;
   importedBlueprints: number;
   skippedDuplicates: number;
+}
+
+export type CampaignDirection = "increase" | "decrease";
+export type CampaignDeliveryMode = "staging_branch" | "per_wave_merge";
+export type CampaignStatus = "idle" | "running" | "paused" | "completed" | "delivered" | "failed";
+export type CampaignWaveStatus = "running" | "improved" | "unchanged" | "regressed" | "failed";
+
+export interface GoalCampaign {
+  id: string;
+  repoId: string;
+  name: string;
+  goalPrompt: string;
+  metricCommand: string;
+  metricRegex?: string;
+  metricUnit?: string;
+  direction: CampaignDirection;
+  baselineValue?: number;
+  currentValue?: number;
+  targetValue: number;
+  deliveryMode: CampaignDeliveryMode;
+  stagingBranch?: string;
+  lastGoodCommitSha?: string;
+  allowedPaths: string[];
+  template: PipelineTemplateId;
+  preferredEngine?: EnginePreference;
+  maxIterations: number;
+  completedWaves: number;
+  maxTotalBudgetUsd: number;
+  totalCostUsd: number;
+  consecutiveNoImproveCount: number;
+  activeTicketId?: string;
+  pauseReason?: string;
+  deliveredPrUrl?: string;
+  deliveredCommitSha?: string;
+  status: CampaignStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GoalCampaignWave {
+  id: string;
+  campaignId: string;
+  repoId: string;
+  waveNumber: number;
+  ticketId?: string;
+  status: CampaignWaveStatus;
+  beforeValue: number;
+  measuredValue?: number;
+  delta?: number;
+  commitSha?: string;
+  rolledBack?: boolean;
+  costUsd: number;
+  summary: string;
+  startedAt: string;
+  completedAt?: string;
+}
+
+export interface CreateCampaignInput {
+  repoId: string;
+  name: string;
+  goalPrompt: string;
+  metricCommand: string;
+  metricRegex?: string;
+  metricUnit?: string;
+  direction: CampaignDirection;
+  targetValue: number;
+  deliveryMode?: CampaignDeliveryMode;
+  allowedPaths?: string[];
+  template?: PipelineTemplateId;
+  preferredEngine?: EnginePreference;
+  maxIterations?: number;
+  maxTotalBudgetUsd?: number;
+  autoStart?: boolean;
+}
+
+export type MergeTrainEntryStatus =
+  | "queued"
+  | "barrier_waiting"
+  | "validating"
+  | "merged"
+  | "ejected"
+  | "barrier_blocked";
+
+export interface MergeTrainEntry {
+  id: string;
+  repoId: string;
+  ticketId: string;
+  outboxId: string;
+  branchName: string;
+  baseBranch: string;
+  barrierGroupId?: string;
+  position: number;
+  status: MergeTrainEntryStatus;
+  bypassedSpeculation?: boolean;
+  speculativeCommitSha?: string;
+  mergedCommitSha?: string;
+  errorSummary?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ServiceDaemonStatus {
+  platform: "darwin" | "linux" | "unsupported";
+  manager: "launchd" | "systemd" | "none";
+  installed: boolean;
+  running: boolean;
+  pid?: number;
+  serviceFilePath?: string;
+  dataDir: string;
+  host: string;
+  port: number;
+  logFilePath: string;
+  logByteSize?: number;
+  webUiBuilt: boolean;
+  detail: string;
+}
+
+export interface ServiceStatusResponse {
+  status: ServiceDaemonStatus;
+  logs: { logFilePath: string; exists: boolean; lines: string[] };
 }

@@ -37,6 +37,7 @@ interface CommandPaletteModalProps {
   onInspectTicket: (ticketId: string) => void;
   onOpenDispatch: () => void;
   onOpenDoctor: () => void;
+  onOpenMergeTrain?: () => void;
   onRefresh: () => void;
 }
 
@@ -52,6 +53,7 @@ export function CommandPaletteModal({
   onInspectTicket,
   onOpenDispatch,
   onOpenDoctor,
+  onOpenMergeTrain,
   onRefresh,
 }: CommandPaletteModalProps) {
   const { locale, t } = useI18n();
@@ -158,12 +160,36 @@ export function CommandPaletteModal({
           onOpenDoctor();
         },
       },
+      {
+        id: "cmd_campaigns",
+        label: t("cmd.openCampaigns"),
+        hint: "Goal Campaigns",
+        icon: Sparkles,
+        run: () => {
+          onSwitchTab("routines");
+          onClose();
+        },
+      },
+      ...(onOpenMergeTrain
+        ? [
+            {
+              id: "cmd_merge_train",
+              label: t("cmd.openMergeTrain"),
+              hint: "Merge Train",
+              icon: Bot,
+              run: () => {
+                onClose();
+                onOpenMergeTrain();
+              },
+            },
+          ]
+        : []),
     ];
     if (!qLower) return items;
     return items.filter(
       (i) => i.label.toLowerCase().includes(qLower) || i.hint.toLowerCase().includes(qLower),
     );
-  }, [qLower, inboxItems, t, onClose, onOpenDispatch, onSwitchTab, onOpenDoctor]);
+  }, [qLower, inboxItems, t, onClose, onOpenDispatch, onSwitchTab, onOpenDoctor, onOpenMergeTrain]);
 
   if (!open) return null;
 

@@ -1,51 +1,60 @@
 import { copyFileSync, existsSync, rmSync } from "node:fs";
 import { Database } from "bun:sqlite";
 import type {
-  ArenaCandidateResult,
   CasebookEntry,
   ChainOfRecall,
-  ConflictFileHunk,
-  ConflictSemanticContext,
-  DeliveryGatePolicy,
   EngineMetricRow,
-  EpicReplanProposal,
-  EvalCandidateRun,
   EvalCase,
   EvalRunRecord,
-  HandoverDigest,
+  GoalCampaign,
+  GoalCampaignWave,
   InboxItem,
   InboxItemStatus,
   MemorySearchHit,
+  MergeTrainEntry,
+  MergeTrainEntryStatus,
   OutboxEntry,
   OutboxStatus,
   PlaybookEntry,
   RepoConfig,
   RepoMetricsSummary,
-  ReviewCommentAuthor,
   ReviewCommentStatus,
-  ReviewSeverity,
   RoutineRun,
   RoutineSpec,
-  SmokeCheckConfig,
   SpillArtifact,
-  StageKind,
   StageRun,
-  StageSpan,
-  StageToolProfile,
   StateStore,
-  TaskBlueprint,
-  TaskCategory,
   Thread,
   Ticket,
   TicketCheckpoint,
-  TicketImpactSummary,
   TicketReviewComment,
-  TicketRiskAssessment,
   TicketStatus,
   Trigger,
   WorkerEngineId,
 } from "@super-work/core";
 import { TERMINAL_TICKET_STATUSES, buildEngineCategoryMatrix } from "@super-work/core";
+import {
+  mapArtifactRow,
+  mapCasebookRow,
+  mapCheckpointRow,
+  mapEvalCaseRow,
+  mapEvalRunRow,
+  mapGoalCampaignRow,
+  mapGoalCampaignWaveRow,
+  mapInboxRow,
+  mapMergeTrainEntryRow,
+  mapOutboxRow,
+  mapPlaybookRow,
+  mapRepoRow,
+  mapReviewCommentRow,
+  mapRoutineRow,
+  mapRoutineRunRow,
+  mapStageRunRow,
+  mapThreadRow,
+  mapTicketRow,
+  mapTriggerRow,
+} from "./sqlite-mappers.ts";
+import { initializeSqliteSchema } from "./sqlite-schema.ts";
 
 export function tokenizeFtsQuery(rawQuery: string): string | null {
   // Keep alphanumeric, underscore, and CJK characters; split into safe double-quoted OR terms
@@ -69,570 +78,11 @@ export class SqliteStateStore implements StateStore {
   constructor(dbPath: string) {
     this.dbPath = dbPath;
     this.db = new Database(dbPath, { create: true });
-    this.init();
+    initializeSqliteSchema(this.db);
   }
 
   close(): void {
     this.db.close();
-  }
-
-  private init(): void {
-    this.db.run("PRAGMA journal_mode = WAL;");
-    this.db.run("PRAGMA foreign_keys = ON;");
-    this.db.run("PRAGMA busy_timeout = 5000;");
-
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS repos (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        root_path TEXT NOT NULL,
-        base_branch TEXT NOT NULL,
-        mode TEXT NOT NULL,
-        github_repo TEXT,
-        default_template TEXT NOT NULL,
-        preferred_implement_engine TEXT NOT NULL,
-        preferred_review_engine TEXT NOT NULL,
-        auto_cleanup_worktree INTEGER NOT NULL DEFAULT 1,
-        verification_commands_json TEXT NOT NULL DEFAULT '[]',
-        default_delivery_channel TEXT NOT NULL DEFAULT 'auto_pr_or_branch',
-        max_concurrent_workers INTEGER,
-        daily_budget_usd REAL,
-        daily_budget_override_usd REAL,
-        daily_budget_override_date TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS triggers (
-        id TEXT PRIMARY KEY,
-        repo_id TEXT NOT NULL,
-        source TEXT NOT NULL,
-        external_ref TEXT,
-        thread_key TEXT NOT NULL,
-        title TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        raw_text TEXT NOT NULL,
-        created_at TEXT NOT NULL
-      );
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_triggers_extref
-        ON triggers(repo_id, external_ref)
-        WHERE external_ref IS NOT NULL;
-      CREATE INDEX IF NOT EXISTS idx_triggers_thread
-        ON triggers(repo_id, thread_key, created_at);
-
-      CREATE TABLE IF NOT EXISTS threads (
-        id TEXT PRIMARY KEY,
-        repo_id TEXT NOT NULL,
-        thread_key TEXT NOT NULL,
-        subscribed_ticket_id TEXT,
-        metadata_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        UNIQUE(repo_id, thread_key)
-      );
-
-      CREATE TABLE IF NOT EXISTS tickets (
-        id TEXT PRIMARY KEY,
-        repo_id TEXT NOT NULL,
-        thread_id TEXT NOT NULL,
-        source_trigger_id TEXT NOT NULL,
-        title TEXT NOT NULL,
-        description TEXT NOT NULL,
-        status TEXT NOT NULL,
-        template TEXT NOT NULL,
-        current_stage TEXT NOT NULL,
-        stage_retries INTEGER NOT NULL DEFAULT 0,
-        mandate_json TEXT NOT NULL,
-        depends_on_json TEXT NOT NULL,
-        parent_ticket_id TEXT,
-        is_epic INTEGER NOT NULL DEFAULT 0,
-        subtask_key TEXT,
-        epic_delivery_mode TEXT,
-        pr_number INTEGER,
-        pr_url TEXT,
-        pr_auto_followup_count INTEGER NOT NULL DEFAULT 0,
-        pending_violation_paths_json TEXT,
-        worktree_path TEXT,
-        branch_name TEXT,
-        worktree_cleaned_at TEXT,
-        native_sessions_json TEXT NOT NULL,
-        preferred_engine TEXT,
-        active_engine TEXT,
-        model_override TEXT,
-        effort_override TEXT,
-        inline_memory_json TEXT NOT NULL,
-        cost_usd REAL NOT NULL DEFAULT 0,
-        priority INTEGER NOT NULL DEFAULT 1,
-        error_message TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_tickets_repo_status
-        ON tickets(repo_id, status, priority DESC, created_at ASC);
-
-      CREATE TABLE IF NOT EXISTS stage_runs (
-        id TEXT PRIMARY KEY,
-        ticket_id TEXT NOT NULL,
-        stage TEXT NOT NULL,
-        engine TEXT NOT NULL,
-        status TEXT NOT NULL,
-        native_session_id TEXT,
-        cost_usd REAL NOT NULL DEFAULT 0,
-        started_at TEXT NOT NULL,
-        completed_at TEXT,
-        summary TEXT,
-        spill_transcript_id TEXT
-      );
-      CREATE INDEX IF NOT EXISTS idx_stage_runs_ticket
-        ON stage_runs(ticket_id, started_at ASC);
-
-      CREATE TABLE IF NOT EXISTS artifacts (
-        id TEXT PRIMARY KEY,
-        ticket_id TEXT NOT NULL,
-        stage_run_id TEXT,
-        kind TEXT NOT NULL,
-        summary TEXT NOT NULL,
-        storage_uri TEXT NOT NULL,
-        byte_size INTEGER NOT NULL,
-        created_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_artifacts_ticket
-        ON artifacts(ticket_id, created_at ASC);
-
-      CREATE TABLE IF NOT EXISTS inbox_items (
-        id TEXT PRIMARY KEY,
-        repo_id TEXT NOT NULL,
-        ticket_id TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        status TEXT NOT NULL,
-        title TEXT NOT NULL,
-        summary TEXT NOT NULL,
-        context_payload_json TEXT NOT NULL,
-        resolution_note TEXT,
-        created_at TEXT NOT NULL,
-        resolved_at TEXT
-      );
-      CREATE INDEX IF NOT EXISTS idx_inbox_status
-        ON inbox_items(status, created_at DESC);
-
-      CREATE TABLE IF NOT EXISTS outbox_entries (
-        id TEXT PRIMARY KEY,
-        repo_id TEXT NOT NULL,
-        ticket_id TEXT NOT NULL,
-        action TEXT NOT NULL,
-        idempotency_key TEXT NOT NULL UNIQUE,
-        payload_json TEXT NOT NULL,
-        status TEXT NOT NULL,
-        attempts INTEGER NOT NULL DEFAULT 0,
-        next_attempt_at TEXT NOT NULL,
-        last_error TEXT,
-        result_payload_json TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_outbox_pending
-        ON outbox_entries(status, next_attempt_at);
-
-      CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
-        entity_type,
-        entity_id,
-        ticket_id,
-        repo_id,
-        title,
-        body
-      );
-
-      CREATE TABLE IF NOT EXISTS playbook_entries (
-        id TEXT PRIMARY KEY,
-        repo_id TEXT NOT NULL,
-        rule TEXT NOT NULL,
-        scope_paths_json TEXT NOT NULL DEFAULT '["**"]',
-        source TEXT NOT NULL,
-        source_ticket_id TEXT,
-        enabled INTEGER NOT NULL DEFAULT 1,
-        pinned INTEGER NOT NULL DEFAULT 0,
-        hit_count INTEGER NOT NULL DEFAULT 0,
-        last_matched_at TEXT,
-        suspect INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_playbook_repo
-        ON playbook_entries(repo_id, enabled, pinned, updated_at DESC);
-
-      CREATE TABLE IF NOT EXISTS routines (
-        id TEXT PRIMARY KEY,
-        repo_id TEXT NOT NULL,
-        name TEXT NOT NULL,
-        prompt TEXT NOT NULL,
-        schedule_kind TEXT NOT NULL,
-        interval_minutes INTEGER,
-        cron_expr TEXT,
-        active_hours_start TEXT,
-        active_hours_end TEXT,
-        allowed_paths_json TEXT NOT NULL DEFAULT '["**"]',
-        template TEXT NOT NULL,
-        preferred_engine TEXT,
-        max_budget_usd REAL NOT NULL DEFAULT 1.5,
-        enabled INTEGER NOT NULL DEFAULT 1,
-        active_ticket_id TEXT,
-        last_run_at TEXT,
-        last_run_status TEXT,
-        next_run_at TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_routines_repo
-        ON routines(repo_id, enabled, next_run_at);
-
-      CREATE TABLE IF NOT EXISTS routine_runs (
-        id TEXT PRIMARY KEY,
-        routine_id TEXT NOT NULL,
-        repo_id TEXT NOT NULL,
-        status TEXT NOT NULL,
-        summary TEXT NOT NULL,
-        changed_files_json TEXT NOT NULL DEFAULT '[]',
-        promoted_ticket_id TEXT,
-        cost_usd REAL NOT NULL DEFAULT 0,
-        started_at TEXT NOT NULL,
-        completed_at TEXT
-      );
-      CREATE INDEX IF NOT EXISTS idx_routine_runs_routine
-        ON routine_runs(routine_id, started_at DESC);
-
-      CREATE TABLE IF NOT EXISTS casebook_entries (
-        id TEXT PRIMARY KEY,
-        repo_id TEXT NOT NULL,
-        ticket_id TEXT NOT NULL UNIQUE,
-        title TEXT NOT NULL,
-        goal_summary TEXT NOT NULL,
-        solution_summary TEXT NOT NULL,
-        pitfalls_and_fixes TEXT,
-        changed_files_json TEXT NOT NULL DEFAULT '[]',
-        scope_paths_json TEXT NOT NULL DEFAULT '["**"]',
-        exported_symbols_json TEXT NOT NULL DEFAULT '[]',
-        reverted INTEGER NOT NULL DEFAULT 0,
-        hit_count INTEGER NOT NULL DEFAULT 0,
-        last_matched_at TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_casebook_repo
-        ON casebook_entries(repo_id, reverted, updated_at DESC);
-
-      CREATE TABLE IF NOT EXISTS system_settings (
-        key TEXT PRIMARY KEY,
-        value_json TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS ticket_checkpoints (
-        id TEXT PRIMARY KEY,
-        ticket_id TEXT NOT NULL,
-        repo_id TEXT NOT NULL,
-        stage_run_id TEXT,
-        stage TEXT NOT NULL,
-        engine TEXT,
-        label TEXT NOT NULL,
-        git_ref TEXT NOT NULL,
-        commit_sha TEXT NOT NULL,
-        changed_files_json TEXT NOT NULL DEFAULT '[]',
-        verification_passed INTEGER,
-        created_at TEXT NOT NULL,
-        cleaned_at TEXT
-      );
-      CREATE INDEX IF NOT EXISTS idx_checkpoints_ticket
-        ON ticket_checkpoints(ticket_id, created_at ASC);
-
-      CREATE TABLE IF NOT EXISTS ticket_review_comments (
-        id TEXT PRIMARY KEY,
-        ticket_id TEXT NOT NULL,
-        repo_id TEXT NOT NULL,
-        file_path TEXT NOT NULL,
-        line INTEGER NOT NULL,
-        side TEXT,
-        code_snippet TEXT,
-        author TEXT NOT NULL,
-        severity TEXT,
-        body TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'open',
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_review_comments_ticket
-        ON ticket_review_comments(ticket_id, created_at ASC);
-
-      CREATE TABLE IF NOT EXISTS eval_cases (
-        id TEXT PRIMARY KEY,
-        repo_id TEXT NOT NULL,
-        source_ticket_id TEXT,
-        title TEXT NOT NULL,
-        description TEXT NOT NULL,
-        base_commit_sha TEXT NOT NULL,
-        allowed_paths_json TEXT NOT NULL,
-        forbidden_paths_json TEXT NOT NULL,
-        tdd_mode INTEGER NOT NULL DEFAULT 0,
-        locked_test_paths_json TEXT,
-        verification_commands_json TEXT NOT NULL DEFAULT '[]',
-        smoke_check_json TEXT,
-        reference_metrics_json TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_eval_cases_repo
-        ON eval_cases(repo_id, created_at DESC);
-
-      CREATE TABLE IF NOT EXISTS eval_runs (
-        id TEXT PRIMARY KEY,
-        eval_case_id TEXT NOT NULL,
-        repo_id TEXT NOT NULL,
-        status TEXT NOT NULL,
-        engines_json TEXT NOT NULL,
-        results_json TEXT NOT NULL,
-        max_budget_usd REAL NOT NULL,
-        total_cost_usd REAL NOT NULL DEFAULT 0,
-        started_at TEXT NOT NULL,
-        completed_at TEXT
-      );
-      CREATE INDEX IF NOT EXISTS idx_eval_runs_case
-        ON eval_runs(eval_case_id, started_at DESC);
-    `);
-
-    const repoCols = this.db
-      .query("PRAGMA table_info(repos)")
-      .all() as Array<{ name: string }>;
-    const existingRepoCols = new Set(repoCols.map((c) => c.name));
-    if (!existingRepoCols.has("auto_cleanup_worktree")) {
-      this.db.run("ALTER TABLE repos ADD COLUMN auto_cleanup_worktree INTEGER NOT NULL DEFAULT 1;");
-    }
-    if (!existingRepoCols.has("verification_commands_json")) {
-      this.db.run(
-        "ALTER TABLE repos ADD COLUMN verification_commands_json TEXT NOT NULL DEFAULT '[]';",
-      );
-    }
-    if (!existingRepoCols.has("default_delivery_channel")) {
-      this.db.run(
-        "ALTER TABLE repos ADD COLUMN default_delivery_channel TEXT NOT NULL DEFAULT 'auto_pr_or_branch';",
-      );
-    }
-    if (!existingRepoCols.has("max_concurrent_workers")) {
-      this.db.run("ALTER TABLE repos ADD COLUMN max_concurrent_workers INTEGER;");
-    }
-    if (!existingRepoCols.has("daily_budget_usd")) {
-      this.db.run("ALTER TABLE repos ADD COLUMN daily_budget_usd REAL;");
-    }
-    if (!existingRepoCols.has("daily_budget_override_usd")) {
-      this.db.run("ALTER TABLE repos ADD COLUMN daily_budget_override_usd REAL;");
-    }
-    if (!existingRepoCols.has("daily_budget_override_date")) {
-      this.db.run("ALTER TABLE repos ADD COLUMN daily_budget_override_date TEXT;");
-    }
-    if (!existingRepoCols.has("setup_commands_json")) {
-      this.db.run("ALTER TABLE repos ADD COLUMN setup_commands_json TEXT NOT NULL DEFAULT '[]';");
-    }
-    if (!existingRepoCols.has("forbidden_paths_json")) {
-      this.db.run("ALTER TABLE repos ADD COLUMN forbidden_paths_json TEXT NOT NULL DEFAULT '[]';");
-    }
-    if (!existingRepoCols.has("conventions")) {
-      this.db.run("ALTER TABLE repos ADD COLUMN conventions TEXT;");
-    }
-    if (!existingRepoCols.has("contract_synced_hash")) {
-      this.db.run("ALTER TABLE repos ADD COLUMN contract_synced_hash TEXT;");
-    }
-    if (!existingRepoCols.has("contract_synced_at")) {
-      this.db.run("ALTER TABLE repos ADD COLUMN contract_synced_at TEXT;");
-    }
-    if (!existingRepoCols.has("smoke_check_json")) {
-      this.db.run("ALTER TABLE repos ADD COLUMN smoke_check_json TEXT;");
-    }
-    if (!existingRepoCols.has("fallback_engines_json")) {
-      this.db.run("ALTER TABLE repos ADD COLUMN fallback_engines_json TEXT;");
-    }
-    if (!existingRepoCols.has("sandbox_mode")) {
-      this.db.run("ALTER TABLE repos ADD COLUMN sandbox_mode TEXT;");
-    }
-    if (!existingRepoCols.has("preview_command")) {
-      this.db.run("ALTER TABLE repos ADD COLUMN preview_command TEXT;");
-    }
-    if (!existingRepoCols.has("default_tdd_mode")) {
-      this.db.run("ALTER TABLE repos ADD COLUMN default_tdd_mode INTEGER NOT NULL DEFAULT 0;");
-    }
-
-    const cols = this.db
-      .query("PRAGMA table_info(tickets)")
-      .all() as Array<{ name: string }>;
-    const existingCols = new Set(cols.map((c) => c.name));
-    if (!existingCols.has("preferred_engine")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN preferred_engine TEXT;");
-    }
-    if (!existingCols.has("model_override")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN model_override TEXT;");
-    }
-    if (!existingCols.has("effort_override")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN effort_override TEXT;");
-    }
-    if (!existingCols.has("worktree_cleaned_at")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN worktree_cleaned_at TEXT;");
-    }
-    if (!existingCols.has("parent_ticket_id")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN parent_ticket_id TEXT;");
-    }
-    if (!existingCols.has("is_epic")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN is_epic INTEGER NOT NULL DEFAULT 0;");
-    }
-    if (!existingCols.has("subtask_key")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN subtask_key TEXT;");
-    }
-    if (!existingCols.has("epic_delivery_mode")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN epic_delivery_mode TEXT;");
-    }
-    if (!existingCols.has("pr_number")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN pr_number INTEGER;");
-    }
-    if (!existingCols.has("pr_url")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN pr_url TEXT;");
-    }
-    if (!existingCols.has("pr_auto_followup_count")) {
-      this.db.run(
-        "ALTER TABLE tickets ADD COLUMN pr_auto_followup_count INTEGER NOT NULL DEFAULT 0;",
-      );
-    }
-    if (!existingCols.has("pending_violation_paths_json")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN pending_violation_paths_json TEXT;");
-    }
-    if (!existingCols.has("merged_commit_sha")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN merged_commit_sha TEXT;");
-    }
-    if (!existingCols.has("reverted_at")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN reverted_at TEXT;");
-    }
-    if (!existingCols.has("revert_commit_sha")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN revert_commit_sha TEXT;");
-    }
-    if (!existingCols.has("handover_digest_json")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN handover_digest_json TEXT;");
-    }
-    if (!existingCols.has("routine_id")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN routine_id TEXT;");
-    }
-    if (!existingCols.has("failed_engines_json")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN failed_engines_json TEXT;");
-    }
-    if (!existingCols.has("arena_mode")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN arena_mode INTEGER NOT NULL DEFAULT 0;");
-    }
-    if (!existingCols.has("arena_competitor_engine")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN arena_competitor_engine TEXT;");
-    }
-    if (!existingCols.has("arena_candidates_json")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN arena_candidates_json TEXT;");
-    }
-    if (!existingCols.has("arena_winner_id")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN arena_winner_id TEXT;");
-    }
-    if (!existingCols.has("epic_replan_count")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN epic_replan_count INTEGER NOT NULL DEFAULT 0;");
-    }
-    if (!existingCols.has("epic_replan_history_json")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN epic_replan_history_json TEXT;");
-    }
-    if (!existingCols.has("pending_epic_replan_json")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN pending_epic_replan_json TEXT;");
-    }
-    if (!existingCols.has("tdd_mode")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN tdd_mode INTEGER NOT NULL DEFAULT 0;");
-    }
-    if (!existingCols.has("locked_test_paths_json")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN locked_test_paths_json TEXT;");
-    }
-    if (!existingCols.has("spec_test_commit_sha")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN spec_test_commit_sha TEXT;");
-    }
-    if (!existingCols.has("spec_test_challenge_count")) {
-      this.db.run(
-        "ALTER TABLE tickets ADD COLUMN spec_test_challenge_count INTEGER NOT NULL DEFAULT 0;",
-      );
-    }
-    if (!existingCols.has("task_category")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN task_category TEXT;");
-    }
-    if (!existingCols.has("routing_rationale")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN routing_rationale TEXT;");
-    }
-    if (!existingCols.has("auto_arena_escalated")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN auto_arena_escalated INTEGER NOT NULL DEFAULT 0;");
-    }
-    if (!existingCols.has("impact_summary_json")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN impact_summary_json TEXT;");
-    }
-    if (!existingCols.has("pause_before_run")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN pause_before_run INTEGER NOT NULL DEFAULT 0;");
-    }
-    if (!existingCols.has("blueprint_id")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN blueprint_id TEXT;");
-    }
-    if (!existingCols.has("delivery_gate_policy")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN delivery_gate_policy TEXT;");
-    }
-    if (!existingCols.has("risk_threshold")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN risk_threshold INTEGER;");
-    }
-    if (!existingCols.has("risk_assessment_json")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN risk_assessment_json TEXT;");
-    }
-    if (!existingCols.has("conflict_resolution_count")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN conflict_resolution_count INTEGER NOT NULL DEFAULT 0;");
-    }
-    if (!existingCols.has("conflict_context_json")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN conflict_context_json TEXT;");
-    }
-    if (!existingCols.has("clarification_count")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN clarification_count INTEGER NOT NULL DEFAULT 0;");
-    }
-    if (!existingCols.has("steer_count")) {
-      this.db.run("ALTER TABLE tickets ADD COLUMN steer_count INTEGER NOT NULL DEFAULT 0;");
-    }
-
-    if (!existingRepoCols.has("delivery_gate_policy")) {
-      this.db.run("ALTER TABLE repos ADD COLUMN delivery_gate_policy TEXT;");
-    }
-    if (!existingRepoCols.has("risk_threshold")) {
-      this.db.run("ALTER TABLE repos ADD COLUMN risk_threshold INTEGER;");
-    }
-    if (!existingRepoCols.has("sensitive_paths_json")) {
-      this.db.run("ALTER TABLE repos ADD COLUMN sensitive_paths_json TEXT;");
-    }
-    if (!existingRepoCols.has("blueprints_json")) {
-      this.db.run("ALTER TABLE repos ADD COLUMN blueprints_json TEXT;");
-    }
-
-    const stageRunCols = this.db
-      .query("PRAGMA table_info(stage_runs)")
-      .all() as Array<{ name: string }>;
-    const existingStageRunCols = new Set(stageRunCols.map((c) => c.name));
-    if (!existingStageRunCols.has("spans_json")) {
-      this.db.run("ALTER TABLE stage_runs ADD COLUMN spans_json TEXT;");
-    }
-    if (!existingStageRunCols.has("tool_profile_json")) {
-      this.db.run("ALTER TABLE stage_runs ADD COLUMN tool_profile_json TEXT;");
-    }
-    if (!existingStageRunCols.has("steered")) {
-      this.db.run("ALTER TABLE stage_runs ADD COLUMN steered INTEGER NOT NULL DEFAULT 0;");
-    }
-
-    const playbookCols = this.db
-      .query("PRAGMA table_info(playbook_entries)")
-      .all() as Array<{ name: string }>;
-    const existingPlaybookCols = new Set(playbookCols.map((c) => c.name));
-    if (!existingPlaybookCols.has("hit_count")) {
-      this.db.run("ALTER TABLE playbook_entries ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0;");
-    }
-    if (!existingPlaybookCols.has("last_matched_at")) {
-      this.db.run("ALTER TABLE playbook_entries ADD COLUMN last_matched_at TEXT;");
-    }
-    if (!existingPlaybookCols.has("suspect")) {
-      this.db.run("ALTER TABLE playbook_entries ADD COLUMN suspect INTEGER NOT NULL DEFAULT 0;");
-    }
   }
 
   // --- Repos ---
@@ -642,13 +92,13 @@ export class SqliteStateStore implements StateStore {
         `INSERT INTO repos (
           id, name, root_path, base_branch, mode, github_repo, default_template, default_tdd_mode,
           preferred_implement_engine, preferred_review_engine, fallback_engines_json, auto_cleanup_worktree,
-          verification_commands_json, setup_commands_json, smoke_check_json, preview_command, sandbox_mode, forbidden_paths_json,
+          verification_commands_json, setup_commands_json, hooks_json, smoke_check_json, preview_command, sandbox_mode, forbidden_paths_json,
           conventions, contract_synced_hash, contract_synced_at,
           default_delivery_channel,
           max_concurrent_workers, daily_budget_usd, daily_budget_override_usd, daily_budget_override_date,
           delivery_gate_policy, risk_threshold, sensitive_paths_json, blueprints_json,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           root_path = excluded.root_path,
@@ -663,6 +113,7 @@ export class SqliteStateStore implements StateStore {
           auto_cleanup_worktree = excluded.auto_cleanup_worktree,
           verification_commands_json = excluded.verification_commands_json,
           setup_commands_json = excluded.setup_commands_json,
+          hooks_json = excluded.hooks_json,
           smoke_check_json = excluded.smoke_check_json,
           preview_command = excluded.preview_command,
           sandbox_mode = excluded.sandbox_mode,
@@ -696,6 +147,7 @@ export class SqliteStateStore implements StateStore {
         repo.autoCleanupWorktree === false ? 0 : 1,
         JSON.stringify(repo.verificationCommands ?? []),
         JSON.stringify(repo.setupCommands ?? []),
+        repo.hooks ? JSON.stringify(repo.hooks) : null,
         repo.smokeCheck ? JSON.stringify(repo.smokeCheck) : null,
         repo.previewCommand ?? null,
         repo.sandboxMode ?? null,
@@ -820,10 +272,11 @@ export class SqliteStateStore implements StateStore {
           task_category, routing_rationale, auto_arena_escalated, impact_summary_json, pause_before_run,
           blueprint_id, delivery_gate_policy, risk_threshold, risk_assessment_json, conflict_resolution_count, conflict_context_json,
           clarification_count, steer_count,
-          routine_id, epic_replan_count, epic_replan_history_json, pending_epic_replan_json,
+          routine_id, campaign_id, campaign_wave, target_branch, barrier_group_id, base_head_at_rebase,
+          epic_replan_count, epic_replan_history_json, pending_epic_replan_json,
           model_override, effort_override,
           inline_memory_json, handover_digest_json, cost_usd, priority, error_message, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           title = excluded.title,
           description = excluded.description,
@@ -873,6 +326,11 @@ export class SqliteStateStore implements StateStore {
           clarification_count = excluded.clarification_count,
           steer_count = excluded.steer_count,
           routine_id = excluded.routine_id,
+          campaign_id = excluded.campaign_id,
+          campaign_wave = excluded.campaign_wave,
+          target_branch = excluded.target_branch,
+          barrier_group_id = excluded.barrier_group_id,
+          base_head_at_rebase = excluded.base_head_at_rebase,
           epic_replan_count = excluded.epic_replan_count,
           epic_replan_history_json = excluded.epic_replan_history_json,
           pending_epic_replan_json = excluded.pending_epic_replan_json,
@@ -938,6 +396,11 @@ export class SqliteStateStore implements StateStore {
         ticket.clarificationCount ?? 0,
         ticket.steerCount ?? 0,
         ticket.routineId ?? null,
+        ticket.campaignId ?? null,
+        ticket.campaignWave ?? null,
+        ticket.targetBranch ?? null,
+        ticket.barrierGroupId ?? null,
+        ticket.baseHeadAtRebase ?? null,
         ticket.epicReplanCount ?? 0,
         ticket.epicReplanHistory ? JSON.stringify(ticket.epicReplanHistory) : null,
         ticket.pendingEpicReplan ? JSON.stringify(ticket.pendingEpicReplan) : null,
@@ -1932,7 +1395,7 @@ export class SqliteStateStore implements StateStore {
     return row ? mapReviewCommentRow(row) : null;
   }
 
-  // --- System Maintenance (v1.0.0 C.1) ---
+  // --- System Maintenance (v1.0.0 C.1 + v1.1.0 D.1) ---
   async checkDatabaseIntegrity(): Promise<{ ok: boolean; detail: string; walPages?: number }> {
     const row = this.db.query("PRAGMA quick_check;").get() as { quick_check?: string } | null;
     const status = String(row?.quick_check ?? "ok");
@@ -1959,7 +1422,6 @@ export class SqliteStateStore implements StateStore {
       throw new Error(`Backup file not found: ${backupFilePath}`);
     }
 
-    // Validate snapshot integrity BEFORE touching the live database
     const probeDb = new Database(backupFilePath, { readonly: true });
     let integrityStatus = "unknown";
     try {
@@ -1978,7 +1440,7 @@ export class SqliteStateStore implements StateStore {
     copyFileSync(backupFilePath, this.dbPath);
 
     this.db = new Database(this.dbPath, { create: true });
-    this.init();
+    initializeSqliteSchema(this.db);
 
     const postCheck = await this.checkDatabaseIntegrity();
     return {
@@ -2110,6 +1572,229 @@ export class SqliteStateStore implements StateStore {
     return rows.map(mapEvalRunRow);
   }
 
+  // --- Goal Campaigns (v1.2.0 Pillar A) ---
+  async saveCampaign(campaign: GoalCampaign): Promise<void> {
+    this.db
+      .query(
+        `INSERT INTO goal_campaigns (
+          id, repo_id, name, goal_prompt, metric_command, metric_regex, metric_unit,
+          direction, baseline_value, current_value, target_value, delivery_mode,
+          staging_branch, last_good_commit_sha, allowed_paths_json, template, preferred_engine,
+          max_iterations, completed_waves, max_total_budget_usd, total_cost_usd,
+          consecutive_no_improve_count, active_ticket_id, pause_reason,
+          delivered_pr_url, delivered_commit_sha, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          goal_prompt = excluded.goal_prompt,
+          metric_command = excluded.metric_command,
+          metric_regex = excluded.metric_regex,
+          metric_unit = excluded.metric_unit,
+          direction = excluded.direction,
+          baseline_value = excluded.baseline_value,
+          current_value = excluded.current_value,
+          target_value = excluded.target_value,
+          delivery_mode = excluded.delivery_mode,
+          staging_branch = excluded.staging_branch,
+          last_good_commit_sha = excluded.last_good_commit_sha,
+          allowed_paths_json = excluded.allowed_paths_json,
+          template = excluded.template,
+          preferred_engine = excluded.preferred_engine,
+          max_iterations = excluded.max_iterations,
+          completed_waves = excluded.completed_waves,
+          max_total_budget_usd = excluded.max_total_budget_usd,
+          total_cost_usd = excluded.total_cost_usd,
+          consecutive_no_improve_count = excluded.consecutive_no_improve_count,
+          active_ticket_id = excluded.active_ticket_id,
+          pause_reason = excluded.pause_reason,
+          delivered_pr_url = excluded.delivered_pr_url,
+          delivered_commit_sha = excluded.delivered_commit_sha,
+          status = excluded.status,
+          updated_at = excluded.updated_at`,
+      )
+      .run(
+        campaign.id,
+        campaign.repoId,
+        campaign.name,
+        campaign.goalPrompt,
+        campaign.metricCommand,
+        campaign.metricRegex ?? null,
+        campaign.metricUnit ?? null,
+        campaign.direction,
+        campaign.baselineValue ?? null,
+        campaign.currentValue ?? null,
+        campaign.targetValue,
+        campaign.deliveryMode,
+        campaign.stagingBranch ?? null,
+        campaign.lastGoodCommitSha ?? null,
+        JSON.stringify(campaign.allowedPaths ?? ["**"]),
+        campaign.template,
+        campaign.preferredEngine ?? null,
+        campaign.maxIterations,
+        campaign.completedWaves,
+        campaign.maxTotalBudgetUsd,
+        campaign.totalCostUsd,
+        campaign.consecutiveNoImproveCount,
+        campaign.activeTicketId ?? null,
+        campaign.pauseReason ?? null,
+        campaign.deliveredPrUrl ?? null,
+        campaign.deliveredCommitSha ?? null,
+        campaign.status,
+        campaign.createdAt,
+        campaign.updatedAt,
+      );
+  }
+
+  async getCampaign(id: string): Promise<GoalCampaign | null> {
+    const row = this.db
+      .query("SELECT * FROM goal_campaigns WHERE id = ?")
+      .get(id) as Record<string, unknown> | null;
+    return row ? mapGoalCampaignRow(row) : null;
+  }
+
+  async listCampaigns(repoId?: string): Promise<GoalCampaign[]> {
+    const rows = (
+      repoId
+        ? this.db
+            .query("SELECT * FROM goal_campaigns WHERE repo_id = ? ORDER BY created_at DESC")
+            .all(repoId)
+        : this.db.query("SELECT * FROM goal_campaigns ORDER BY created_at DESC").all()
+    ) as Record<string, unknown>[];
+    return rows.map(mapGoalCampaignRow);
+  }
+
+  async deleteCampaign(id: string): Promise<boolean> {
+    const tx = this.db.transaction(() => {
+      this.db.query("DELETE FROM goal_campaign_waves WHERE campaign_id = ?").run(id);
+      return this.db.query("DELETE FROM goal_campaigns WHERE id = ?").run(id);
+    });
+    const res = tx();
+    return Number(res.changes ?? 0) > 0;
+  }
+
+  async saveCampaignWave(wave: GoalCampaignWave): Promise<void> {
+    this.db
+      .query(
+        `INSERT INTO goal_campaign_waves (
+          id, campaign_id, repo_id, wave_number, ticket_id, status,
+          before_value, measured_value, delta, commit_sha, rolled_back,
+          cost_usd, summary, started_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          ticket_id = excluded.ticket_id,
+          status = excluded.status,
+          before_value = excluded.before_value,
+          measured_value = excluded.measured_value,
+          delta = excluded.delta,
+          commit_sha = excluded.commit_sha,
+          rolled_back = excluded.rolled_back,
+          cost_usd = excluded.cost_usd,
+          summary = excluded.summary,
+          completed_at = excluded.completed_at`,
+      )
+      .run(
+        wave.id,
+        wave.campaignId,
+        wave.repoId,
+        wave.waveNumber,
+        wave.ticketId ?? null,
+        wave.status,
+        wave.beforeValue,
+        wave.measuredValue ?? null,
+        wave.delta ?? null,
+        wave.commitSha ?? null,
+        wave.rolledBack ? 1 : 0,
+        wave.costUsd,
+        wave.summary,
+        wave.startedAt,
+        wave.completedAt ?? null,
+      );
+  }
+
+  async listCampaignWaves(campaignId: string): Promise<GoalCampaignWave[]> {
+    const rows = this.db
+      .query("SELECT * FROM goal_campaign_waves WHERE campaign_id = ? ORDER BY wave_number ASC")
+      .all(campaignId) as Record<string, unknown>[];
+    return rows.map(mapGoalCampaignWaveRow);
+  }
+
+  // --- Speculative Merge Train (v1.2.0 Pillar B) ---
+  async saveMergeTrainEntry(entry: MergeTrainEntry): Promise<void> {
+    this.db
+      .query(
+        `INSERT INTO merge_train_entries (
+          id, repo_id, ticket_id, outbox_id, branch_name, base_branch, barrier_group_id,
+          position, status, bypassed_speculation, speculative_commit_sha, merged_commit_sha,
+          error_summary, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          status = excluded.status,
+          position = excluded.position,
+          bypassed_speculation = excluded.bypassed_speculation,
+          speculative_commit_sha = excluded.speculative_commit_sha,
+          merged_commit_sha = excluded.merged_commit_sha,
+          error_summary = excluded.error_summary,
+          updated_at = excluded.updated_at`,
+      )
+      .run(
+        entry.id,
+        entry.repoId,
+        entry.ticketId,
+        entry.outboxId,
+        entry.branchName,
+        entry.baseBranch,
+        entry.barrierGroupId ?? null,
+        entry.position,
+        entry.status,
+        entry.bypassedSpeculation ? 1 : 0,
+        entry.speculativeCommitSha ?? null,
+        entry.mergedCommitSha ?? null,
+        entry.errorSummary ?? null,
+        entry.createdAt,
+        entry.updatedAt,
+      );
+  }
+
+  async getMergeTrainEntry(id: string): Promise<MergeTrainEntry | null> {
+    const row = this.db
+      .query("SELECT * FROM merge_train_entries WHERE id = ?")
+      .get(id) as Record<string, unknown> | null;
+    return row ? mapMergeTrainEntryRow(row) : null;
+  }
+
+  async listMergeTrainEntries(filter?: {
+    repoId?: string;
+    barrierGroupId?: string;
+    status?: MergeTrainEntryStatus;
+  }): Promise<MergeTrainEntry[]> {
+    const conds: string[] = [];
+    const params: string[] = [];
+    if (filter?.repoId) {
+      conds.push("repo_id = ?");
+      params.push(filter.repoId);
+    }
+    if (filter?.barrierGroupId) {
+      conds.push("barrier_group_id = ?");
+      params.push(filter.barrierGroupId);
+    }
+    if (filter?.status) {
+      conds.push("status = ?");
+      params.push(filter.status);
+    }
+    const where = conds.length > 0 ? `WHERE ${conds.join(" AND ")}` : "";
+    const rows = this.db
+      .query(`SELECT * FROM merge_train_entries ${where} ORDER BY position ASC, created_at ASC`)
+      .all(...params) as Record<string, unknown>[];
+    return rows.map(mapMergeTrainEntryRow);
+  }
+
+  async nextMergeTrainPosition(repoId: string): Promise<number> {
+    const row = this.db
+      .query("SELECT COALESCE(MAX(position), 0) AS max_pos FROM merge_train_entries WHERE repo_id = ?")
+      .get(repoId) as { max_pos: number } | null;
+    return Number(row?.max_pos ?? 0) + 1;
+  }
+
   // --- System Settings ---
   async getSystemSetting<T>(key: string): Promise<T | null> {
     const row = this.db
@@ -2134,473 +1819,4 @@ export class SqliteStateStore implements StateStore {
       )
       .run(key, JSON.stringify(value), new Date().toISOString());
   }
-}
-
-function mapRepoRow(r: Record<string, unknown>): RepoConfig {
-  return {
-    id: String(r.id),
-    name: String(r.name),
-    rootPath: String(r.root_path),
-    baseBranch: String(r.base_branch),
-    mode: r.mode as RepoConfig["mode"],
-    githubRepo: r.github_repo ? String(r.github_repo) : undefined,
-    defaultTemplate: r.default_template as RepoConfig["defaultTemplate"],
-    defaultTddMode: Boolean(r.default_tdd_mode),
-    preferredImplementEngine: r.preferred_implement_engine as RepoConfig["preferredImplementEngine"],
-    preferredReviewEngine: r.preferred_review_engine as RepoConfig["preferredReviewEngine"],
-    fallbackEngines: r.fallback_engines_json
-      ? (JSON.parse(String(r.fallback_engines_json)) as WorkerEngineId[])
-      : undefined,
-    autoCleanupWorktree:
-      r.auto_cleanup_worktree === undefined || r.auto_cleanup_worktree === null
-        ? true
-        : Boolean(r.auto_cleanup_worktree),
-    verificationCommands: r.verification_commands_json
-      ? (JSON.parse(String(r.verification_commands_json)) as string[])
-      : [],
-    setupCommands: r.setup_commands_json
-      ? (JSON.parse(String(r.setup_commands_json)) as string[])
-      : [],
-    smokeCheck: r.smoke_check_json
-      ? (JSON.parse(String(r.smoke_check_json)) as SmokeCheckConfig)
-      : undefined,
-    previewCommand: r.preview_command ? String(r.preview_command) : undefined,
-    sandboxMode: r.sandbox_mode ? (String(r.sandbox_mode) as RepoConfig["sandboxMode"]) : undefined,
-    forbiddenPaths: r.forbidden_paths_json
-      ? (JSON.parse(String(r.forbidden_paths_json)) as string[])
-      : [],
-    conventions: r.conventions ? String(r.conventions) : undefined,
-    contractSyncedHash: r.contract_synced_hash ? String(r.contract_synced_hash) : undefined,
-    contractSyncedAt: r.contract_synced_at ? String(r.contract_synced_at) : undefined,
-    defaultDeliveryChannel: (r.default_delivery_channel
-      ? String(r.default_delivery_channel)
-      : "auto_pr_or_branch") as RepoConfig["defaultDeliveryChannel"],
-    maxConcurrentWorkers:
-      r.max_concurrent_workers !== null && r.max_concurrent_workers !== undefined
-        ? Number(r.max_concurrent_workers)
-        : undefined,
-    dailyBudgetUsd:
-      r.daily_budget_usd !== null && r.daily_budget_usd !== undefined
-        ? Number(r.daily_budget_usd)
-        : undefined,
-    dailyBudgetOverrideUsd:
-      r.daily_budget_override_usd !== null && r.daily_budget_override_usd !== undefined
-        ? Number(r.daily_budget_override_usd)
-        : undefined,
-    dailyBudgetOverrideDate: r.daily_budget_override_date
-      ? String(r.daily_budget_override_date)
-      : undefined,
-    deliveryGatePolicy: r.delivery_gate_policy
-      ? (String(r.delivery_gate_policy) as DeliveryGatePolicy)
-      : undefined,
-    riskThreshold:
-      r.risk_threshold !== null && r.risk_threshold !== undefined
-        ? Number(r.risk_threshold)
-        : undefined,
-    sensitivePaths: r.sensitive_paths_json
-      ? (JSON.parse(String(r.sensitive_paths_json)) as string[])
-      : undefined,
-    blueprints: r.blueprints_json
-      ? (JSON.parse(String(r.blueprints_json)) as TaskBlueprint[])
-      : undefined,
-    createdAt: String(r.created_at),
-    updatedAt: String(r.updated_at),
-  };
-}
-
-function mapTriggerRow(r: Record<string, unknown>): Trigger {
-  return {
-    id: String(r.id),
-    repoId: String(r.repo_id),
-    source: r.source as Trigger["source"],
-    externalRef: r.external_ref ? String(r.external_ref) : undefined,
-    threadKey: String(r.thread_key),
-    title: String(r.title),
-    payload: JSON.parse(String(r.payload_json)),
-    rawText: String(r.raw_text),
-    createdAt: String(r.created_at),
-  };
-}
-
-function mapThreadRow(r: Record<string, unknown>): Thread {
-  return {
-    id: String(r.id),
-    repoId: String(r.repo_id),
-    threadKey: String(r.thread_key),
-    subscribedTicketId: r.subscribed_ticket_id ? String(r.subscribed_ticket_id) : undefined,
-    metadata: JSON.parse(String(r.metadata_json)),
-    createdAt: String(r.created_at),
-    updatedAt: String(r.updated_at),
-  };
-}
-
-function mapTicketRow(r: Record<string, unknown>): Ticket {
-  return {
-    id: String(r.id),
-    repoId: String(r.repo_id),
-    threadId: String(r.thread_id),
-    sourceTriggerId: String(r.source_trigger_id),
-    title: String(r.title),
-    description: String(r.description),
-    status: r.status as Ticket["status"],
-    template: r.template as Ticket["template"],
-    currentStage: r.current_stage as Ticket["currentStage"],
-    stageRetries: Number(r.stage_retries),
-    mandate: JSON.parse(String(r.mandate_json)),
-    dependsOn: JSON.parse(String(r.depends_on_json)),
-    parentTicketId: r.parent_ticket_id ? String(r.parent_ticket_id) : undefined,
-    isEpic: Boolean(r.is_epic),
-    subtaskKey: r.subtask_key ? String(r.subtask_key) : undefined,
-    epicDeliveryMode: r.epic_delivery_mode
-      ? (String(r.epic_delivery_mode) as Ticket["epicDeliveryMode"])
-      : undefined,
-    prNumber:
-      r.pr_number !== null && r.pr_number !== undefined ? Number(r.pr_number) : undefined,
-    prUrl: r.pr_url ? String(r.pr_url) : undefined,
-    prAutoFollowupCount:
-      r.pr_auto_followup_count !== null && r.pr_auto_followup_count !== undefined
-        ? Number(r.pr_auto_followup_count)
-        : undefined,
-    pendingViolationPaths: r.pending_violation_paths_json
-      ? (JSON.parse(String(r.pending_violation_paths_json)) as string[])
-      : undefined,
-    mergedCommitSha: r.merged_commit_sha ? String(r.merged_commit_sha) : undefined,
-    revertedAt: r.reverted_at ? String(r.reverted_at) : undefined,
-    revertCommitSha: r.revert_commit_sha ? String(r.revert_commit_sha) : undefined,
-    worktreePath: r.worktree_path ? String(r.worktree_path) : undefined,
-    branchName: r.branch_name ? String(r.branch_name) : undefined,
-    worktreeCleanedAt: r.worktree_cleaned_at ? String(r.worktree_cleaned_at) : undefined,
-    nativeSessions: JSON.parse(String(r.native_sessions_json)),
-    preferredEngine: r.preferred_engine
-      ? (String(r.preferred_engine) as Ticket["preferredEngine"])
-      : undefined,
-    activeEngine: r.active_engine ? (String(r.active_engine) as Ticket["activeEngine"]) : undefined,
-    failedEngines: r.failed_engines_json
-      ? (JSON.parse(String(r.failed_engines_json)) as WorkerEngineId[])
-      : undefined,
-    arenaMode: r.arena_mode ? Boolean(r.arena_mode) : undefined,
-    arenaCompetitorEngine: r.arena_competitor_engine
-      ? (String(r.arena_competitor_engine) as WorkerEngineId)
-      : undefined,
-    arenaCandidates: r.arena_candidates_json
-      ? (JSON.parse(String(r.arena_candidates_json)) as ArenaCandidateResult[])
-      : undefined,
-    arenaWinnerId: r.arena_winner_id ? String(r.arena_winner_id) : undefined,
-    tddMode: Boolean(r.tdd_mode),
-    lockedTestPaths: r.locked_test_paths_json
-      ? (JSON.parse(String(r.locked_test_paths_json)) as string[])
-      : undefined,
-    specTestCommitSha: r.spec_test_commit_sha ? String(r.spec_test_commit_sha) : undefined,
-    specTestChallengeCount:
-      r.spec_test_challenge_count !== null && r.spec_test_challenge_count !== undefined
-        ? Number(r.spec_test_challenge_count)
-        : undefined,
-    taskCategory: r.task_category ? (String(r.task_category) as TaskCategory) : undefined,
-    routingRationale: r.routing_rationale ? String(r.routing_rationale) : undefined,
-    autoArenaEscalated: Boolean(r.auto_arena_escalated),
-    impactSummary: r.impact_summary_json
-      ? (JSON.parse(String(r.impact_summary_json)) as TicketImpactSummary)
-      : undefined,
-    pauseBeforeRun: Boolean(r.pause_before_run),
-    blueprintId: r.blueprint_id ? String(r.blueprint_id) : undefined,
-    deliveryGatePolicy: r.delivery_gate_policy
-      ? (String(r.delivery_gate_policy) as DeliveryGatePolicy)
-      : undefined,
-    riskThreshold:
-      r.risk_threshold !== null && r.risk_threshold !== undefined
-        ? Number(r.risk_threshold)
-        : undefined,
-    riskAssessment: r.risk_assessment_json
-      ? (JSON.parse(String(r.risk_assessment_json)) as TicketRiskAssessment)
-      : undefined,
-    conflictResolutionCount:
-      r.conflict_resolution_count !== null && r.conflict_resolution_count !== undefined
-        ? Number(r.conflict_resolution_count)
-        : undefined,
-    conflictContext: r.conflict_context_json
-      ? (JSON.parse(String(r.conflict_context_json)) as ConflictSemanticContext)
-      : undefined,
-    clarificationCount:
-      r.clarification_count !== null && r.clarification_count !== undefined
-        ? Number(r.clarification_count)
-        : undefined,
-    steerCount:
-      r.steer_count !== null && r.steer_count !== undefined ? Number(r.steer_count) : undefined,
-    routineId: r.routine_id ? String(r.routine_id) : undefined,
-    epicReplanCount:
-      r.epic_replan_count !== null && r.epic_replan_count !== undefined
-        ? Number(r.epic_replan_count)
-        : undefined,
-    epicReplanHistory: r.epic_replan_history_json
-      ? (JSON.parse(String(r.epic_replan_history_json)) as EpicReplanProposal[])
-      : undefined,
-    pendingEpicReplan: r.pending_epic_replan_json
-      ? (JSON.parse(String(r.pending_epic_replan_json)) as EpicReplanProposal)
-      : undefined,
-    modelOverride: r.model_override ? String(r.model_override) : undefined,
-    effortOverride: r.effort_override
-      ? (String(r.effort_override) as Ticket["effortOverride"])
-      : undefined,
-    inlineMemory: JSON.parse(String(r.inline_memory_json)),
-    handoverDigest: r.handover_digest_json
-      ? (JSON.parse(String(r.handover_digest_json)) as HandoverDigest)
-      : undefined,
-    costUsd: Number(r.cost_usd),
-    priority: Number(r.priority),
-    errorMessage: r.error_message ? String(r.error_message) : undefined,
-    createdAt: String(r.created_at),
-    updatedAt: String(r.updated_at),
-  };
-}
-
-function mapStageRunRow(r: Record<string, unknown>): StageRun {
-  return {
-    id: String(r.id),
-    ticketId: String(r.ticket_id),
-    stage: r.stage as StageRun["stage"],
-    engine: r.engine as StageRun["engine"],
-    status: r.status as StageRun["status"],
-    nativeSessionId: r.native_session_id ? String(r.native_session_id) : undefined,
-    costUsd: Number(r.cost_usd),
-    startedAt: String(r.started_at),
-    completedAt: r.completed_at ? String(r.completed_at) : undefined,
-    summary: r.summary ? String(r.summary) : undefined,
-    spillTranscriptId: r.spill_transcript_id ? String(r.spill_transcript_id) : undefined,
-    spans: r.spans_json ? (JSON.parse(String(r.spans_json)) as StageSpan[]) : undefined,
-    toolProfile: r.tool_profile_json
-      ? (JSON.parse(String(r.tool_profile_json)) as StageToolProfile)
-      : undefined,
-    steered: r.steered ? Boolean(r.steered) : undefined,
-  };
-}
-
-function mapArtifactRow(r: Record<string, unknown>): SpillArtifact {
-  return {
-    id: String(r.id),
-    ticketId: String(r.ticket_id),
-    stageRunId: r.stage_run_id ? String(r.stage_run_id) : undefined,
-    kind: r.kind as SpillArtifact["kind"],
-    summary: String(r.summary),
-    storageUri: String(r.storage_uri),
-    byteSize: Number(r.byte_size),
-    createdAt: String(r.created_at),
-  };
-}
-
-function mapInboxRow(r: Record<string, unknown>): InboxItem {
-  return {
-    id: String(r.id),
-    repoId: String(r.repo_id),
-    ticketId: String(r.ticket_id),
-    kind: r.kind as InboxItem["kind"],
-    status: r.status as InboxItem["status"],
-    title: String(r.title),
-    summary: String(r.summary),
-    contextPayload: JSON.parse(String(r.context_payload_json)),
-    resolutionNote: r.resolution_note ? String(r.resolution_note) : undefined,
-    createdAt: String(r.created_at),
-    resolvedAt: r.resolved_at ? String(r.resolved_at) : undefined,
-  };
-}
-
-function mapOutboxRow(r: Record<string, unknown>): OutboxEntry {
-  return {
-    id: String(r.id),
-    repoId: String(r.repo_id),
-    ticketId: String(r.ticket_id),
-    action: r.action as OutboxEntry["action"],
-    idempotencyKey: String(r.idempotency_key),
-    payload: JSON.parse(String(r.payload_json)),
-    status: r.status as OutboxEntry["status"],
-    attempts: Number(r.attempts),
-    nextAttemptAt: String(r.next_attempt_at),
-    lastError: r.last_error ? String(r.last_error) : undefined,
-    resultPayload: r.result_payload_json ? JSON.parse(String(r.result_payload_json)) : undefined,
-    createdAt: String(r.created_at),
-    updatedAt: String(r.updated_at),
-  };
-}
-
-function mapPlaybookRow(r: Record<string, unknown>): PlaybookEntry {
-  return {
-    id: String(r.id),
-    repoId: String(r.repo_id),
-    rule: String(r.rule),
-    scopePaths: r.scope_paths_json ? (JSON.parse(String(r.scope_paths_json)) as string[]) : ["**"],
-    source: r.source as PlaybookEntry["source"],
-    sourceTicketId: r.source_ticket_id ? String(r.source_ticket_id) : undefined,
-    enabled: Boolean(r.enabled),
-    pinned: Boolean(r.pinned),
-    hitCount:
-      r.hit_count !== null && r.hit_count !== undefined ? Number(r.hit_count) : 0,
-    lastMatchedAt: r.last_matched_at ? String(r.last_matched_at) : undefined,
-    suspect: Boolean(r.suspect),
-    createdAt: String(r.created_at),
-    updatedAt: String(r.updated_at),
-  };
-}
-
-function mapRoutineRow(r: Record<string, unknown>): RoutineSpec {
-  return {
-    id: String(r.id),
-    repoId: String(r.repo_id),
-    name: String(r.name),
-    prompt: String(r.prompt),
-    scheduleKind: String(r.schedule_kind) as RoutineSpec["scheduleKind"],
-    intervalMinutes:
-      r.interval_minutes !== null && r.interval_minutes !== undefined
-        ? Number(r.interval_minutes)
-        : undefined,
-    cronExpr: r.cron_expr ? String(r.cron_expr) : undefined,
-    activeHoursStart: r.active_hours_start ? String(r.active_hours_start) : undefined,
-    activeHoursEnd: r.active_hours_end ? String(r.active_hours_end) : undefined,
-    allowedPaths: r.allowed_paths_json
-      ? (JSON.parse(String(r.allowed_paths_json)) as string[])
-      : ["**"],
-    template: String(r.template) as RoutineSpec["template"],
-    preferredEngine: r.preferred_engine
-      ? (String(r.preferred_engine) as WorkerEngineId)
-      : undefined,
-    maxBudgetUsd: Number(r.max_budget_usd ?? 1.5),
-    enabled: Boolean(r.enabled),
-    activeTicketId: r.active_ticket_id ? String(r.active_ticket_id) : undefined,
-    lastRunAt: r.last_run_at ? String(r.last_run_at) : undefined,
-    lastRunStatus: r.last_run_status
-      ? (String(r.last_run_status) as RoutineRun["status"])
-      : undefined,
-    nextRunAt: r.next_run_at ? String(r.next_run_at) : undefined,
-    createdAt: String(r.created_at),
-    updatedAt: String(r.updated_at),
-  };
-}
-
-function mapRoutineRunRow(r: Record<string, unknown>): RoutineRun {
-  return {
-    id: String(r.id),
-    routineId: String(r.routine_id),
-    repoId: String(r.repo_id),
-    status: String(r.status) as RoutineRun["status"],
-    summary: String(r.summary),
-    changedFiles: r.changed_files_json
-      ? (JSON.parse(String(r.changed_files_json)) as string[])
-      : [],
-    promotedTicketId: r.promoted_ticket_id ? String(r.promoted_ticket_id) : undefined,
-    costUsd: Number(r.cost_usd ?? 0),
-    startedAt: String(r.started_at),
-    completedAt: r.completed_at ? String(r.completed_at) : undefined,
-  };
-}
-
-function mapCasebookRow(r: Record<string, unknown>): CasebookEntry {
-  return {
-    id: String(r.id),
-    repoId: String(r.repo_id),
-    ticketId: String(r.ticket_id),
-    title: String(r.title),
-    goalSummary: String(r.goal_summary),
-    solutionSummary: String(r.solution_summary),
-    pitfallsAndFixes: r.pitfalls_and_fixes ? String(r.pitfalls_and_fixes) : undefined,
-    changedFiles: r.changed_files_json
-      ? (JSON.parse(String(r.changed_files_json)) as string[])
-      : [],
-    scopePaths: r.scope_paths_json
-      ? (JSON.parse(String(r.scope_paths_json)) as string[])
-      : ["**"],
-    exportedSymbols: r.exported_symbols_json
-      ? (JSON.parse(String(r.exported_symbols_json)) as string[])
-      : [],
-    reverted: Boolean(r.reverted),
-    hitCount: Number(r.hit_count ?? 0),
-    lastMatchedAt: r.last_matched_at ? String(r.last_matched_at) : undefined,
-    createdAt: String(r.created_at),
-    updatedAt: String(r.updated_at),
-  };
-}
-
-function mapCheckpointRow(r: Record<string, unknown>): TicketCheckpoint {
-  return {
-    id: String(r.id),
-    ticketId: String(r.ticket_id),
-    repoId: String(r.repo_id),
-    stageRunId: r.stage_run_id ? String(r.stage_run_id) : undefined,
-    stage: String(r.stage) as StageKind | "baseline",
-    engine: r.engine ? (String(r.engine) as WorkerEngineId) : undefined,
-    label: String(r.label),
-    gitRef: String(r.git_ref),
-    commitSha: String(r.commit_sha),
-    changedFiles: r.changed_files_json
-      ? (JSON.parse(String(r.changed_files_json)) as string[])
-      : [],
-    verificationPassed:
-      r.verification_passed === null || r.verification_passed === undefined
-        ? undefined
-        : Boolean(r.verification_passed),
-    createdAt: String(r.created_at),
-    cleanedAt: r.cleaned_at ? String(r.cleaned_at) : undefined,
-  };
-}
-
-function mapReviewCommentRow(r: Record<string, unknown>): TicketReviewComment {
-  return {
-    id: String(r.id),
-    ticketId: String(r.ticket_id),
-    repoId: String(r.repo_id),
-    filePath: String(r.file_path),
-    line: Number(r.line),
-    side: r.side ? (String(r.side) as "new" | "old") : undefined,
-    codeSnippet: r.code_snippet ? String(r.code_snippet) : undefined,
-    author: String(r.author) as ReviewCommentAuthor,
-    severity: r.severity ? (String(r.severity) as ReviewSeverity) : undefined,
-    body: String(r.body),
-    status: String(r.status) as ReviewCommentStatus,
-    createdAt: String(r.created_at),
-    updatedAt: String(r.updated_at),
-  };
-}
-
-function mapEvalCaseRow(r: Record<string, unknown>): EvalCase {
-  return {
-    id: String(r.id),
-    repoId: String(r.repo_id),
-    sourceTicketId: r.source_ticket_id ? String(r.source_ticket_id) : undefined,
-    title: String(r.title),
-    description: String(r.description),
-    baseCommitSha: String(r.base_commit_sha),
-    allowedPaths: r.allowed_paths_json
-      ? (JSON.parse(String(r.allowed_paths_json)) as string[])
-      : ["**"],
-    forbiddenPaths: r.forbidden_paths_json
-      ? (JSON.parse(String(r.forbidden_paths_json)) as string[])
-      : [],
-    tddMode: Boolean(r.tdd_mode),
-    lockedTestPaths: r.locked_test_paths_json
-      ? (JSON.parse(String(r.locked_test_paths_json)) as string[])
-      : undefined,
-    verificationCommands: r.verification_commands_json
-      ? (JSON.parse(String(r.verification_commands_json)) as string[])
-      : [],
-    smokeCheck: r.smoke_check_json
-      ? (JSON.parse(String(r.smoke_check_json)) as SmokeCheckConfig)
-      : undefined,
-    referenceMetrics: r.reference_metrics_json
-      ? (JSON.parse(String(r.reference_metrics_json)) as EvalCase["referenceMetrics"])
-      : undefined,
-    createdAt: String(r.created_at),
-    updatedAt: String(r.updated_at),
-  };
-}
-
-function mapEvalRunRow(r: Record<string, unknown>): EvalRunRecord {
-  return {
-    id: String(r.id),
-    evalCaseId: String(r.eval_case_id),
-    repoId: String(r.repo_id),
-    status: String(r.status) as EvalRunRecord["status"],
-    engines: r.engines_json ? (JSON.parse(String(r.engines_json)) as WorkerEngineId[]) : [],
-    results: r.results_json ? (JSON.parse(String(r.results_json)) as EvalCandidateRun[]) : [],
-    maxBudgetUsd: Number(r.max_budget_usd ?? 2),
-    totalCostUsd: Number(r.total_cost_usd ?? 0),
-    startedAt: String(r.started_at),
-    completedAt: r.completed_at ? String(r.completed_at) : undefined,
-  };
 }

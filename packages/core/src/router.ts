@@ -596,6 +596,10 @@ export class EventIntakeRouter {
         effectiveInput.preferredEngine && effectiveInput.preferredEngine !== "auto"
           ? effectiveInput.preferredEngine
           : undefined,
+      campaignId: effectiveInput.campaignId,
+      campaignWave: effectiveInput.campaignWave,
+      targetBranch: effectiveInput.targetBranch,
+      barrierGroupId: effectiveInput.barrierGroupId,
       arenaMode: effectiveInput.arenaMode || undefined,
       arenaCompetitorEngine: effectiveInput.arenaCompetitorEngine,
       blueprintId: effectiveInput.blueprintId,
@@ -753,6 +757,13 @@ export class EventIntakeRouter {
 
     const ts = nowIso();
     const epicId = newId("epc");
+    const barrierGroupId =
+      input.barrierGroupId?.trim() ||
+      (isCrossRepoEpic && input.releaseBarrier !== false
+        ? epicId
+        : input.releaseBarrier
+          ? epicId
+          : undefined);
     const threadKey = `epic:${epicId}`;
     const trigger: Trigger = {
       id: newId("trg"),
@@ -801,6 +812,7 @@ export class EventIntakeRouter {
       dependsOn: [],
       isEpic: true,
       epicDeliveryMode: deliveryMode,
+      barrierGroupId,
       branchName: deliveryMode === "unified" ? `super-work/epic/${epicId}` : undefined,
       nativeSessions: {},
       preferredEngine: input.preferredEngine,
@@ -894,6 +906,7 @@ export class EventIntakeRouter {
         parentTicketId: epic.id,
         isEpic: false,
         subtaskKey: spec.key,
+        barrierGroupId,
         nativeSessions: {},
         preferredEngine: subPreferredEngine,
         activeEngine:
@@ -971,7 +984,13 @@ export class EventIntakeRouter {
           allDelivered = false;
           break;
         }
-        if (dep.status !== "delivered") {
+        const barrierReady = Boolean(
+          ticket.barrierGroupId &&
+            dep.barrierGroupId === ticket.barrierGroupId &&
+            dep.status === "outbox_pending" &&
+            dep.handoverDigest,
+        );
+        if (dep.status !== "delivered" && !barrierReady) {
           allDelivered = false;
         }
       }

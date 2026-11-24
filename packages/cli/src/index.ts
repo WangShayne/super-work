@@ -4,6 +4,8 @@ import { dirname, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import type {
+  CampaignDeliveryMode,
+  CampaignDirection,
   DagNodeMutationInput,
   EnginePreference,
   PipelineTemplateId,
@@ -11,6 +13,7 @@ import type {
   Ticket,
   WorkerEngineId,
 } from "@super-work/core";
+import { ServiceManager, assertSafeHostBinding } from "@super-work/drivers";
 import { DaemonNotReachableError, SuperWorkHttpClient, type ParsedSseEvent } from "./client.ts";
 
 export { SuperWorkHttpClient, DaemonNotReachableError } from "./client.ts";
@@ -67,6 +70,17 @@ function parseCliArgs(argv: string[]): ParsedArgs {
     "engines",
     "o",
     "out",
+    "host",
+    "metric",
+    "regex",
+    "unit",
+    "direction",
+    "target",
+    "max-iter",
+    "action",
+    "lines",
+    "reason",
+    "delivery-mode",
   ]);
   const optionalEngineFlags = new Set(["arena"]);
   const engineValues = new Set(["claude", "codex", "opencode", "mock"]);
@@ -146,7 +160,7 @@ async function waitForHealth(
 
 async function spawnDetachedDaemon(
   baseUrl: string,
-  options?: { port?: string; dataDir?: string; token?: string },
+  options?: { host?: string; port?: string; dataDir?: string; token?: string },
 ): Promise<number | undefined> {
   const parsedUrl = new URL(baseUrl);
   const port = options?.port ?? (parsedUrl.port || "4318");
@@ -154,6 +168,7 @@ async function spawnDetachedDaemon(
   const proc = Bun.spawn(["bun", "run", serverEntry], {
     env: {
       ...process.env,
+      HOST: options?.host ?? process.env.HOST ?? "127.0.0.1",
       PORT: String(port),
       ...(options?.dataDir ? { SUPER_WORK_DATA_DIR: options.dataDir } : {}),
       ...(options?.token ? { SUPER_WORK_TOKEN: options.token } : {}),
@@ -260,6 +275,16 @@ function formatEventLine(ev: ParsedSseEvent, watchedTicketId?: string): string {
     const p = data.preview as { id?: string; ticketId?: string; status?: string; url?: string } | undefined;
     return `[preview_updated] ${p?.id ?? "?"} (${p?.ticketId ?? "?"}) status=${p?.status ?? "?"} ${p?.url ?? ""}`.trim();
   }
+  if (ev.event === "campaign_updated") {
+    const cmp = data.campaign as { id?: string; status?: string; currentValue?: number } | undefined;
+    return cmp
+      ? `[campaign] ${cmp.id ?? "?"} status=${cmp.status ?? "?"} value=${cmp.currentValue ?? "?"}`
+      : `[campaign] deleted=${String(data.deletedId ?? "")}`;
+  }
+  if (ev.event === "merge_train_updated") {
+    const entries = (data.entries as Array<{ id: string; status: string }> | undefined) ?? [];
+    return `[merge_train] repo=${String(data.repoId ?? "?")} entries=${entries.length}`;
+  }
   if (ev.event === "checkpoint_created") {
     const cp = data.checkpoint as
       | { id?: string; ticketId?: string; stage?: string; commitSha?: string; label?: string }
@@ -357,10 +382,11 @@ async function waitForTicketCompletion(
 }
 
 function printHelp(stdout: (line: string) => void): void {
-  stdout(`super-work v1.1.0 CLI
+  stdout(`super-work v1.2.0 CLI
 
 Usage:
-  super-work up [-d|--detach] [--port 4318] [--data-dir path]
+  super-work up [-d|--detach] [--host 127.0.0.1] [--port 4318] [--data-dir path] [--token <token>]
+  super-work service [install [--no-start] | uninstall | start | stop | status | logs [--lines 80]] [--host <addr>] [--port <n>] [--data-dir <path>] [--token <token>] [--json]
   super-work mcp [--url http://localhost:4318] [--token <token>] [--no-auto-start]
   super-work status [--repo <id>] [--auto-start] [--json]
   super-work ask <question> [--repo <id>] [--auto-start] [--json]
@@ -371,6 +397,8 @@ Usage:
                       [--budget <usd>] [--wait] [--auto-start] [--json]
   super-work epic <title> [-d|--desc <text>] [--repo <id>] [--template fast|standard|strict] [--tdd]
                   [--engine auto|...] [--preview-only] [--per-subtask] [--wait] [--auto-start] [--json]
+  super-work campaign [list | get <id> | create <name> -d <prompt> --metric <cmd> --target <num> [--direction increase|decrease] [--unit <u>] [--regex <re>] [--delivery-mode staging_branch|per_wave_merge] [--max-iter 5] [--budget 5] [--paths <csv>] [--start] | start <id> [-m <note>] | pause <id> [-m <reason>] | deliver <id> [--action local_merge|push_and_create_pr] | delete <id>] [--repo <id>] [--auto-start] [--json]
+  super-work train [list | flush | eject <entryId> [-m <reason>]] [--repo <id>] [--auto-start] [--json]
   super-work blueprints [--repo <id>] [--auto-start] [--json]
   super-work doctor [--fix] [--auto-start] [--json]
   super-work backup [list | create | restore <backupId> [--force]] [--auto-start] [--json]
@@ -423,22 +451,27 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
 
   try {
     if (cmd === "up") {
+      const host = getStringFlag(flags, "host") ?? process.env.HOST ?? "127.0.0.1";
+      assertSafeHostBinding(host, token);
       const port = getStringFlag(flags, "port") ?? new URL(baseUrl).port ?? "4318";
-      const targetUrl = getStringFlag(flags, "port")
-        ? `http://localhost:${port}`
-        : baseUrl;
+      const probeHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
+      const targetUrl =
+        getStringFlag(flags, "port") || getStringFlag(flags, "host")
+          ? `http://${probeHost}:${port}`
+          : baseUrl;
       const dataDir = getStringFlag(flags, "data-dir");
       const detach = Boolean(flags.d || flags.detach);
 
       if (detach) {
-        const pid = await spawnDetachedDaemon(targetUrl, { port, dataDir, token });
-        stdout(`Daemon running at ${targetUrl} (pid=${pid ?? "detached"})`);
+        const pid = await spawnDetachedDaemon(targetUrl, { host, port, dataDir, token });
+        stdout(`Daemon running at ${targetUrl} (bound=${host}:${port}, pid=${pid ?? "detached"})`);
         return 0;
       }
 
       const proc = Bun.spawn(["bun", "run", resolveServerEntryPath()], {
         env: {
           ...process.env,
+          HOST: host,
           PORT: String(port),
           ...(dataDir ? { SUPER_WORK_DATA_DIR: dataDir } : {}),
           ...(token ? { SUPER_WORK_TOKEN: token } : {}),
@@ -449,6 +482,77 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
       });
       const exitCode = await proc.exited;
       return exitCode;
+    }
+
+    if (cmd === "service") {
+      const subCmd = positionals[1] ?? "status";
+      const host = getStringFlag(flags, "host") ?? process.env.HOST ?? "127.0.0.1";
+      const portRaw = getStringFlag(flags, "port") ?? process.env.PORT ?? "4318";
+      const dataDir = getStringFlag(flags, "data-dir");
+      const manager = new ServiceManager({
+        host,
+        port: Number(portRaw) || 4318,
+        dataDir,
+        authToken: token,
+        serverEntryPath: resolveServerEntryPath(),
+      });
+      if (subCmd === "install") {
+        const st = await manager.install({ startNow: !flags["no-start"] });
+        stdout(
+          asJson
+            ? JSON.stringify(st, null, 2)
+            : `[${st.manager}] installed=${st.installed} running=${st.running} file=${st.serviceFilePath ?? "-"} (${st.detail})`,
+        );
+        return 0;
+      }
+      if (subCmd === "uninstall") {
+        const st = await manager.uninstall();
+        stdout(asJson ? JSON.stringify(st, null, 2) : `Service uninstalled (${st.detail})`);
+        return 0;
+      }
+      if (subCmd === "start") {
+        const st = await manager.start();
+        stdout(
+          asJson
+            ? JSON.stringify(st, null, 2)
+            : `[${st.manager}] running=${st.running} (${st.detail})`,
+        );
+        return 0;
+      }
+      if (subCmd === "stop") {
+        const st = await manager.stop();
+        stdout(
+          asJson
+            ? JSON.stringify(st, null, 2)
+            : `[${st.manager}] running=${st.running} (${st.detail})`,
+        );
+        return 0;
+      }
+      if (subCmd === "logs") {
+        const linesRaw = Number(getStringFlag(flags, "lines") ?? 80);
+        const logs = manager.readLogs(Number.isFinite(linesRaw) && linesRaw > 0 ? linesRaw : 80);
+        if (asJson) {
+          stdout(JSON.stringify(logs, null, 2));
+        } else if (!logs.exists) {
+          stdout(`Daemon log not found yet: ${logs.logFilePath}`);
+        } else {
+          for (const line of logs.lines) {
+            stdout(line);
+          }
+        }
+        return 0;
+      }
+      if (subCmd === "status") {
+        const st = await manager.status();
+        stdout(
+          asJson
+            ? JSON.stringify(st, null, 2)
+            : `[${st.manager}] installed=${st.installed} running=${st.running} bind=${st.host}:${st.port} dataDir=${st.dataDir} webUiBuilt=${st.webUiBuilt} (${st.detail})`,
+        );
+        return 0;
+      }
+      stderr(`Unknown service subcommand: ${subCmd}`);
+      return 1;
     }
 
     if (cmd === "mcp") {
@@ -1880,6 +1984,240 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
         return 0;
       }
       stderr(`Unknown bundle subcommand: ${subCmd}`);
+      return 1;
+    }
+
+    if (cmd === "campaign") {
+      const subCmd = positionals[1] ?? "list";
+      if (subCmd === "list") {
+        const repoId = getStringFlag(flags, "repo");
+        const { campaigns } = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.listCampaigns(repoId),
+          stdout,
+        );
+        if (asJson) {
+          stdout(JSON.stringify({ campaigns }, null, 2));
+        } else if (campaigns.length === 0) {
+          stdout("No Goal Campaigns found.");
+        } else {
+          for (const c of campaigns) {
+            stdout(
+              `[${c.id}] (${c.status}) ${c.name} :: ${c.baselineValue ?? "?"} -> ${c.currentValue ?? "?"} / target ${c.targetValue}${c.metricUnit ? ` ${c.metricUnit}` : ""} waves=${c.completedWaves}/${c.maxIterations} cost=$${c.totalCostUsd.toFixed(2)}`,
+            );
+          }
+        }
+        return 0;
+      }
+      if (subCmd === "get") {
+        const id = positionals[2];
+        if (!id) {
+          stderr("Error: campaign id is required. Usage: super-work campaign get <id>");
+          return 1;
+        }
+        const detail = await withAutoStart(baseUrl, autoStart, () => client.getCampaign(id), stdout);
+        if (asJson) {
+          stdout(JSON.stringify(detail, null, 2));
+        } else {
+          const c = detail.campaign;
+          stdout(
+            `Campaign [${c.id}] ${c.name} status=${c.status} current=${c.currentValue ?? "?"} target=${c.targetValue} mode=${c.deliveryMode}`,
+          );
+          for (const w of detail.waves) {
+            stdout(
+              `  Wave ${w.waveNumber}: [${w.status}] ${w.beforeValue} -> ${w.measuredValue ?? "?"} ${w.rolledBack ? "(rolled back)" : ""} :: ${w.summary}`,
+            );
+          }
+        }
+        return 0;
+      }
+      if (subCmd === "create") {
+        const name = positionals[2];
+        const goalPrompt = getStringFlag(flags, "d", "desc", "description");
+        const metricCommand = getStringFlag(flags, "metric");
+        const targetRaw = getStringFlag(flags, "target");
+        if (!name || !goalPrompt || !metricCommand || !targetRaw) {
+          stderr(
+            "Error: name, -d <prompt>, --metric <cmd>, and --target <num> are required.",
+          );
+          return 1;
+        }
+        const targetValue = Number(targetRaw);
+        if (!Number.isFinite(targetValue)) {
+          stderr("Error: --target must be a finite number.");
+          return 1;
+        }
+        const repoId = await resolveTargetRepoId(client, getStringFlag(flags, "repo"));
+        const dirRaw = getStringFlag(flags, "direction");
+        const direction: CampaignDirection = dirRaw === "increase" ? "increase" : "decrease";
+        const deliveryMode = getStringFlag(flags, "delivery-mode") as
+          | CampaignDeliveryMode
+          | undefined;
+        const allowedPathsRaw = getStringFlag(flags, "paths");
+        const maxIterRaw = getStringFlag(flags, "max-iter");
+        const budgetRaw = getStringFlag(flags, "budget");
+        const { campaign } = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () =>
+            client.createCampaign({
+              repoId,
+              name,
+              goalPrompt,
+              metricCommand,
+              metricRegex: getStringFlag(flags, "regex"),
+              metricUnit: getStringFlag(flags, "unit"),
+              direction,
+              targetValue,
+              deliveryMode,
+              allowedPaths: allowedPathsRaw
+                ? allowedPathsRaw.split(",").map((s) => s.trim()).filter(Boolean)
+                : undefined,
+              template: getStringFlag(flags, "template") as PipelineTemplateId | undefined,
+              preferredEngine: getStringFlag(flags, "engine") as EnginePreference | undefined,
+              maxIterations: maxIterRaw ? Number(maxIterRaw) : undefined,
+              maxTotalBudgetUsd: budgetRaw ? Number(budgetRaw) : undefined,
+              autoStart: Boolean(flags.start),
+            }),
+          stdout,
+        );
+        stdout(
+          asJson
+            ? JSON.stringify({ campaign }, null, 2)
+            : `Created campaign ${campaign.id} (${campaign.status}) target=${campaign.targetValue}`,
+        );
+        return 0;
+      }
+      if (subCmd === "start") {
+        const id = positionals[2];
+        if (!id) {
+          stderr("Error: campaign id is required.");
+          return 1;
+        }
+        const { campaign } = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.startCampaign(id, getStringFlag(flags, "m", "note")),
+          stdout,
+        );
+        stdout(
+          asJson
+            ? JSON.stringify({ campaign }, null, 2)
+            : `Campaign ${campaign.id} status=${campaign.status} activeTicket=${campaign.activeTicketId ?? "-"}`,
+        );
+        return 0;
+      }
+      if (subCmd === "pause") {
+        const id = positionals[2];
+        if (!id) {
+          stderr("Error: campaign id is required.");
+          return 1;
+        }
+        const { campaign } = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.pauseCampaign(id, getStringFlag(flags, "m", "note", "reason")),
+          stdout,
+        );
+        stdout(asJson ? JSON.stringify({ campaign }, null, 2) : `Paused campaign ${campaign.id}`);
+        return 0;
+      }
+      if (subCmd === "deliver") {
+        const id = positionals[2];
+        if (!id) {
+          stderr("Error: campaign id is required.");
+          return 1;
+        }
+        const action =
+          getStringFlag(flags, "action") === "push_and_create_pr"
+            ? "push_and_create_pr"
+            : "local_merge";
+        const { campaign } = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.deliverCampaign(id, action),
+          stdout,
+        );
+        stdout(
+          asJson
+            ? JSON.stringify({ campaign }, null, 2)
+            : `Delivered campaign ${campaign.id} (${campaign.deliveredCommitSha ?? campaign.deliveredPrUrl ?? campaign.status})`,
+        );
+        return 0;
+      }
+      if (subCmd === "delete") {
+        const id = positionals[2];
+        if (!id) {
+          stderr("Error: campaign id is required.");
+          return 1;
+        }
+        const res = await withAutoStart(baseUrl, autoStart, () => client.deleteCampaign(id), stdout);
+        stdout(asJson ? JSON.stringify(res, null, 2) : `Deleted campaign ${res.id}`);
+        return 0;
+      }
+      stderr(`Unknown campaign subcommand: ${subCmd}`);
+      return 1;
+    }
+
+    if (cmd === "train") {
+      const subCmd = positionals[1] ?? "list";
+      if (subCmd === "list") {
+        const repoId = getStringFlag(flags, "repo");
+        const { entries } = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.listMergeTrain(repoId),
+          stdout,
+        );
+        if (asJson) {
+          stdout(JSON.stringify({ entries }, null, 2));
+        } else if (entries.length === 0) {
+          stdout("Merge train queue is empty.");
+        } else {
+          for (const e of entries) {
+            stdout(
+              `[${e.id}] #${e.position} (${e.status}) ticket=${e.ticketId} branch=${e.branchName} -> ${e.baseBranch}${e.barrierGroupId ? ` barrier=${e.barrierGroupId}` : ""}${e.bypassedSpeculation ? " [bypass]" : ""}`,
+            );
+          }
+        }
+        return 0;
+      }
+      if (subCmd === "flush") {
+        const repoId = getStringFlag(flags, "repo");
+        const res = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.flushMergeTrain(repoId),
+          stdout,
+        );
+        stdout(asJson ? JSON.stringify(res, null, 2) : `Flushed merge train: merged=${res.mergedCount}`);
+        return 0;
+      }
+      if (subCmd === "eject") {
+        const entryId = positionals[2];
+        if (!entryId) {
+          stderr("Error: merge train entry id is required. Usage: super-work train eject <entryId>");
+          return 1;
+        }
+        const res = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () =>
+            client.ejectMergeTrainEntry(
+              entryId,
+              getStringFlag(flags, "m", "note", "reason"),
+            ),
+          stdout,
+        );
+        stdout(
+          asJson
+            ? JSON.stringify(res, null, 2)
+            : `Ejected ${res.entry.id} (status=${res.entry.status})`,
+        );
+        return 0;
+      }
+      stderr(`Unknown train subcommand: ${subCmd}`);
       return 1;
     }
 

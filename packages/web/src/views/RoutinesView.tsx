@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   CheckCircle2,
   Clock,
+  Flame,
   Pause,
   Play,
   Plus,
@@ -12,6 +13,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { api } from "../api.ts";
+import { CampaignsPanel } from "../components/CampaignsPanel.tsx";
 import { formatTemplate, useI18n } from "../i18n.tsx";
 import type {
   PipelineTemplateId,
@@ -47,6 +49,7 @@ export function RoutinesView({
   onRefreshParent,
 }: RoutinesViewProps) {
   const { locale, t } = useI18n();
+  const [subView, setSubView] = useState<"patrols" | "campaigns">("patrols");
   const [routines, setRoutines] = useState<RoutineSpec[]>([]);
   const [presets, setPresets] = useState<RoutinePresetTemplate[]>([]);
   const [runs, setRuns] = useState<RoutineRun[]>([]);
@@ -177,6 +180,42 @@ export function RoutinesView({
 
   return (
     <div className="max-w-5xl mx-auto p-6 space-y-6">
+      <div className="inline-flex items-center rounded-xl border border-zinc-800 bg-zinc-900/70 p-1 gap-1">
+        <button
+          type="button"
+          onClick={() => setSubView("patrols")}
+          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+            subView === "patrols"
+              ? "bg-indigo-600 text-white"
+              : "text-zinc-400 hover:text-zinc-200"
+          }`}
+        >
+          <Clock className="w-3.5 h-3.5" />
+          {t("campaigns.tabPatrols")}
+        </button>
+        <button
+          type="button"
+          onClick={() => setSubView("campaigns")}
+          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+            subView === "campaigns"
+              ? "bg-indigo-600 text-white"
+              : "text-zinc-400 hover:text-zinc-200"
+          }`}
+        >
+          <Flame className="w-3.5 h-3.5" />
+          {t("campaigns.tabGoals")}
+        </button>
+      </div>
+
+      {subView === "campaigns" ? (
+        <CampaignsPanel
+          repo={repo}
+          availableEngines={availableEngines}
+          onInspectTicket={onInspectTicket}
+          onRefreshParent={onRefreshParent}
+        />
+      ) : (
+        <>
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h2 className="text-lg font-semibold text-zinc-100">{t("routines.title")}</h2>
@@ -544,6 +583,8 @@ export function RoutinesView({
           </div>
         )}
       </div>
+        </>
+      )}
     </div>
   );
 }

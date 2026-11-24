@@ -1,6 +1,14 @@
 import type { OutboxExecutor, StateStore } from "./ports.ts";
-import type { KernelEvent, OutboxEntry, RepoConfig, Ticket } from "./types.ts";
+import type { KernelEvent, OutboxAction, OutboxEntry, RepoConfig, Ticket } from "./types.ts";
 import { newId, nowIso } from "./utils.ts";
+
+export class OutboxFatalError extends Error {
+  readonly fatalImmediate = true;
+  constructor(message: string) {
+    super(message);
+    this.name = "OutboxFatalError";
+  }
+}
 
 export class OutboxProcessor {
   constructor(
@@ -13,6 +21,10 @@ export class OutboxProcessor {
       repo: RepoConfig,
       entry: OutboxEntry,
     ) => Promise<void>,
+    private readonly options?: {
+      skipActions?: Set<OutboxAction>;
+      onBeforeExecute?: (entry: OutboxEntry, repo: RepoConfig, ticket: Ticket) => Promise<void>;
+    },
   ) {}
 
   async processDueEntries(limit = 5): Promise<number> {
@@ -20,6 +32,15 @@ export class OutboxProcessor {
     let processed = 0;
 
     for (const entry of claimed) {
+      if (this.options?.skipActions?.has(entry.action)) {
+        // Leave local_merge to MergeTrainCoordinator by returning claimed row back to pending
+        await this.stateStore.updateOutboxEntry({
+          ...entry,
+          status: "pending",
+          updatedAt: nowIso(),
+        });
+        continue;
+      }
       processed += 1;
       await this.processSingle(entry);
     }
@@ -43,6 +64,9 @@ export class OutboxProcessor {
     }
 
     try {
+      if (this.options?.onBeforeExecute) {
+        await this.options.onBeforeExecute(entry, repo, ticket);
+      }
       const resultPayload = await this.executor.execute(entry, repo, ticket);
       const sent: OutboxEntry = {
         ...entry,
@@ -72,8 +96,9 @@ export class OutboxProcessor {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      const isFatal = err instanceof OutboxFatalError || Boolean((err as { fatalImmediate?: boolean })?.fatalImmediate);
       const nextAttempts = entry.attempts + 1;
-      const exhausted = nextAttempts >= this.maxAttempts;
+      const exhausted = isFatal || nextAttempts >= this.maxAttempts;
       const backoffMs = Math.min(60_000, 1_000 * 2 ** nextAttempts);
       const nextAttemptAt = new Date(Date.now() + backoffMs).toISOString();
 
@@ -92,7 +117,9 @@ export class OutboxProcessor {
         const updatedTicket = {
           ...ticket,
           status: "needs_human" as const,
-          errorMessage: `Outbox delivery failed after ${nextAttempts} attempts: ${message}`,
+          errorMessage: isFatal
+            ? message
+            : `Outbox delivery failed after ${nextAttempts} attempts: ${message}`,
           updatedAt: nowIso(),
         };
         await this.stateStore.saveTicket(updatedTicket);
@@ -104,8 +131,8 @@ export class OutboxProcessor {
           ticketId: ticket.id,
           kind: "watchdog_escalation" as const,
           status: "pending" as const,
-          title: `Outbox delivery failed: ${ticket.title}`,
-          summary: `Transactional Outbox failed (${entry.action}): ${message}`,
+          title: isFatal ? `Delivery Hook Blocked: ${ticket.title}` : `Outbox delivery failed: ${ticket.title}`,
+          summary: isFatal ? message : `Transactional Outbox failed (${entry.action}): ${message}`,
           contextPayload: { outboxId: entry.id, action: entry.action, lastError: message },
           createdAt: nowIso(),
         };

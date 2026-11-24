@@ -50,6 +50,11 @@ const CommandPaletteModal = lazy(() =>
     default: m.CommandPaletteModal,
   })),
 );
+const MergeTrainModal = lazy(() =>
+  import("./components/MergeTrainModal.tsx").then((m) => ({
+    default: m.MergeTrainModal,
+  })),
+);
 
 type MainTab = "inbox" | "board" | "routines" | "metrics";
 
@@ -75,6 +80,7 @@ export function App() {
     "runtime" | "contract" | "playbook" | "casebook"
   >("runtime");
   const [worktreesOpen, setWorktreesOpen] = useState(false);
+  const [mergeTrainOpen, setMergeTrainOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [setupStatus, setSetupStatus] = useState<PublicSetupStatus | null>(null);
   const [setupOpen, setSetupOpen] = useState(false);
@@ -184,6 +190,9 @@ export function App() {
       "verification_completed",
       "review_comment_updated",
       "eval_run_updated",
+      "campaign_updated",
+      "merge_train_updated",
+      "lifecycle_hook_executed",
     ];
 
     for (const name of eventNames) {
@@ -301,6 +310,7 @@ export function App() {
           setRepoSettingsOpen(true);
         }}
         onOpenRoutines={() => setActiveTab("routines")}
+        onOpenMergeTrain={() => setMergeTrainOpen(true)}
         onOpenWorktrees={() => setWorktreesOpen(true)}
         onOpenSetup={() => {
           setSetupInitialTab("config");
@@ -541,7 +551,17 @@ export function App() {
             setSetupInitialTab("doctor");
             setSetupOpen(true);
           }}
+          onOpenMergeTrain={() => setMergeTrainOpen(true)}
           onRefresh={() => void refreshAll(selectedRepoId || undefined)}
+        />
+
+        <MergeTrainModal
+          open={mergeTrainOpen}
+          repoId={activeRepo?.id}
+          repos={repos}
+          onClose={() => setMergeTrainOpen(false)}
+          onInspectTicket={(id) => setInspectedTicketId(id)}
+          onChanged={() => void refreshAll(selectedRepoId || undefined)}
         />
       </Suspense>
     </div>

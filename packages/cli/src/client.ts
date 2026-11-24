@@ -5,6 +5,7 @@ import type {
   BatchResolveInboxResult,
   CasebookEntry,
   ChiefAskResult,
+  CreateCampaignInput,
   DagNodeMutationInput,
   DeliveryGatePolicy,
   EnginePreference,
@@ -12,10 +13,13 @@ import type {
   EpicDeliveryMode,
   EvalCase,
   EvalRunRecord,
+  GoalCampaign,
+  GoalCampaignWave,
   HandoverDigest,
   ImportKnowledgeBundleResult,
   InboxItem,
   InboxItemStatus,
+  MergeTrainEntry,
   OutboxEntry,
   PipelineTemplateId,
   PlaybookEntry,
@@ -28,6 +32,7 @@ import type {
   RoutineRun,
   RoutineScheduleKind,
   RoutineSpec,
+  ServiceDaemonStatus,
   SpecClarificationResult,
   SpillArtifact,
   StageRun,
@@ -69,6 +74,8 @@ export interface DaemonHealth {
     reclaimableWorktrees?: number;
     activeRoutines?: number;
     activePreviews?: number;
+    activeCampaigns?: number;
+    queuedMergeTrain?: number;
   };
   timestamp: string;
 }
@@ -585,6 +592,93 @@ export class SuperWorkHttpClient {
         body: JSON.stringify({ bundle }),
       },
     );
+  }
+
+  listCampaigns(repoId?: string): Promise<{ campaigns: GoalCampaign[] }> {
+    const qs = repoId ? `?repoId=${encodeURIComponent(repoId)}` : "";
+    return this.request<{ campaigns: GoalCampaign[] }>(`/api/campaigns${qs}`);
+  }
+
+  getCampaign(id: string): Promise<{ campaign: GoalCampaign; waves: GoalCampaignWave[] }> {
+    return this.request<{ campaign: GoalCampaign; waves: GoalCampaignWave[] }>(
+      `/api/campaigns/${encodeURIComponent(id)}`,
+    );
+  }
+
+  createCampaign(payload: CreateCampaignInput): Promise<{ campaign: GoalCampaign }> {
+    return this.request<{ campaign: GoalCampaign }>("/api/campaigns", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  startCampaign(id: string, note?: string): Promise<{ campaign: GoalCampaign }> {
+    return this.request<{ campaign: GoalCampaign }>(
+      `/api/campaigns/${encodeURIComponent(id)}/start`,
+      {
+        method: "POST",
+        body: JSON.stringify(note ? { note } : {}),
+      },
+    );
+  }
+
+  pauseCampaign(id: string, reason?: string): Promise<{ campaign: GoalCampaign }> {
+    return this.request<{ campaign: GoalCampaign }>(
+      `/api/campaigns/${encodeURIComponent(id)}/pause`,
+      {
+        method: "POST",
+        body: JSON.stringify(reason ? { reason } : {}),
+      },
+    );
+  }
+
+  deliverCampaign(
+    id: string,
+    action: "local_merge" | "push_and_create_pr" = "local_merge",
+  ): Promise<{ campaign: GoalCampaign }> {
+    return this.request<{ campaign: GoalCampaign }>(
+      `/api/campaigns/${encodeURIComponent(id)}/deliver`,
+      {
+        method: "POST",
+        body: JSON.stringify({ action }),
+      },
+    );
+  }
+
+  deleteCampaign(id: string): Promise<{ ok: boolean; id: string }> {
+    return this.request<{ ok: boolean; id: string }>(
+      `/api/campaigns/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  listMergeTrain(repoId?: string): Promise<{ entries: MergeTrainEntry[] }> {
+    const qs = repoId ? `?repoId=${encodeURIComponent(repoId)}` : "";
+    return this.request<{ entries: MergeTrainEntry[] }>(`/api/merge-train${qs}`);
+  }
+
+  flushMergeTrain(repoId?: string): Promise<{ mergedCount: number }> {
+    return this.request<{ mergedCount: number }>("/api/merge-train/flush", {
+      method: "POST",
+      body: JSON.stringify(repoId ? { repoId } : {}),
+    });
+  }
+
+  ejectMergeTrainEntry(entryId: string, reason?: string): Promise<{ entry: MergeTrainEntry }> {
+    return this.request<{ entry: MergeTrainEntry }>(
+      `/api/merge-train/${encodeURIComponent(entryId)}/eject`,
+      {
+        method: "POST",
+        body: JSON.stringify(reason ? { reason } : {}),
+      },
+    );
+  }
+
+  getSystemService(lines = 40): Promise<{
+    status: ServiceDaemonStatus;
+    logs: { logFilePath: string; exists: boolean; lines: string[] };
+  }> {
+    return this.request(`/api/system/service?lines=${encodeURIComponent(String(lines))}`);
   }
 
   async streamEvents(

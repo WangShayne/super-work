@@ -38,6 +38,7 @@ interface HeaderBarProps {
   onOpenRepoSettings: () => void;
   onOpenContractSettings?: () => void;
   onOpenRoutines?: () => void;
+  onOpenMergeTrain?: () => void;
   onOpenWorktrees: () => void;
   onOpenSetup: () => void;
   onOpenCommandPalette?: () => void;
@@ -141,6 +142,7 @@ export function HeaderBar({
   onOpenRepoSettings,
   onOpenContractSettings,
   onOpenRoutines,
+  onOpenMergeTrain,
   onOpenWorktrees,
   onOpenSetup,
   onOpenCommandPalette,
@@ -195,7 +197,7 @@ export function HeaderBar({
               <div className="flex items-center gap-2">
                 <span className="font-semibold tracking-tight text-zinc-100 text-sm">super-work</span>
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
-                  v1.1
+                  v1.2
                 </span>
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700/60">
                   {t("brand.badge")}
@@ -422,6 +424,7 @@ export function HeaderBar({
           icon={<Activity className="w-3 h-3 text-sky-400" />}
           label={t("strip.outbox.label")}
           value={`${health?.counts.pendingOutbox ?? 0} ${t("strip.outbox.pendingSuffix")}`}
+          onClick={onOpenMergeTrain}
           align="right"
           tooltipTitle={t("strip.outbox.label")}
           tooltipBody={t("strip.outbox.desc")}

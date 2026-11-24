@@ -105,6 +105,10 @@ const KIND_STYLE: Record<InboxItem["kind"], { color: string; icon: typeof Eye }>
     color: "bg-violet-500/15 text-violet-300 border-violet-500/30",
     icon: HelpCircle,
   },
+  campaign_paused: {
+    color: "bg-amber-500/15 text-amber-300 border-amber-500/30",
+    icon: AlertTriangle,
+  },
 };
 
 export function InboxView({
@@ -845,7 +849,9 @@ export function InboxView({
                         ? t("inbox.clarificationConfirm")
                         : item.kind === "epic_replan"
                           ? t("inbox.epicReplanApprove")
-                          : t("inbox.approve")}
+                          : item.kind === "campaign_paused"
+                            ? t("campaigns.startBtn")
+                            : t("inbox.approve")}
                     </button>
                   )}
                 </div>

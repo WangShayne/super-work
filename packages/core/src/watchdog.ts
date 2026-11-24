@@ -36,7 +36,7 @@ export interface WatchdogTracker {
 }
 
 export class TwoTierWatchdog {
-  private readonly config: WatchdogConfig;
+  readonly config: WatchdogConfig;
 
   constructor(
     private readonly llm: ControlPlaneLLM,

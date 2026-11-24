@@ -204,6 +204,24 @@ export interface SharedPlaybookRuleSpec {
   pinned?: boolean;
 }
 
+export type LifecycleHookEvent = "pre_deliver" | "post_deliver" | "on_escalate";
+
+export interface LifecycleHooksConfig {
+  preDeliver?: string[];
+  postDeliver?: string[];
+  onEscalate?: string[];
+  timeoutSec?: number;
+}
+
+export interface HookExecutionRecord {
+  event: LifecycleHookEvent;
+  ok: boolean;
+  results: VerificationCommandOutput[];
+  failedCommand?: string;
+  summary: string;
+  executedAt: string;
+}
+
 export interface RepoContractFile {
   version?: 1;
   defaultTemplate?: PipelineTemplateId;
@@ -213,6 +231,7 @@ export interface RepoContractFile {
   sensitivePaths?: string[];
   verificationCommands?: string[];
   setupCommands?: string[];
+  hooks?: LifecycleHooksConfig;
   smokeCheck?: SmokeCheckConfig;
   previewCommand?: string;
   sandboxMode?: SandboxMode;
@@ -581,6 +600,7 @@ export interface RepoConfig {
   autoCleanupWorktree?: boolean;
   verificationCommands?: string[];
   setupCommands?: string[];
+  hooks?: LifecycleHooksConfig;
   smokeCheck?: SmokeCheckConfig;
   previewCommand?: string;
   sandboxMode?: SandboxMode;
@@ -710,6 +730,11 @@ export interface Ticket {
   clarificationCount?: number;
   steerCount?: number;
   routineId?: string;
+  campaignId?: string;
+  campaignWave?: number;
+  targetBranch?: string;
+  barrierGroupId?: string;
+  baseHeadAtRebase?: string;
   epicReplanCount?: number;
   epicReplanHistory?: EpicReplanProposal[];
   pendingEpicReplan?: EpicReplanProposal;
@@ -789,7 +814,8 @@ export type InboxItemKind =
   | "pr_followup"
   | "arena_tiebreak"
   | "epic_replan"
-  | "clarification_request";
+  | "clarification_request"
+  | "campaign_paused";
 
 export type InboxItemStatus = "pending" | "approved" | "rejected";
 
@@ -1029,6 +1055,27 @@ export type KernelEvent =
       type: "eval_run_updated";
       repoId: string;
       evalRun: EvalRunRecord;
+      timestamp: string;
+    }
+  | {
+      type: "campaign_updated";
+      repoId: string;
+      campaign?: GoalCampaign;
+      wave?: GoalCampaignWave;
+      deletedId?: string;
+      timestamp: string;
+    }
+  | {
+      type: "merge_train_updated";
+      repoId: string;
+      entries: MergeTrainEntry[];
+      timestamp: string;
+    }
+  | {
+      type: "lifecycle_hook_executed";
+      repoId: string;
+      ticketId: string;
+      record: HookExecutionRecord;
       timestamp: string;
     };
 
@@ -1361,4 +1408,133 @@ export interface RepoMetricsSummary {
   deliveryRate: number;
   byEngine: EngineMetricRow[];
   engineMatrix?: EngineCategoryMetricRow[];
+}
+
+export type CampaignDirection = "increase" | "decrease";
+
+export type CampaignDeliveryMode = "staging_branch" | "per_wave_merge";
+
+export type CampaignStatus =
+  | "idle"
+  | "running"
+  | "paused"
+  | "completed"
+  | "delivered"
+  | "failed";
+
+export type CampaignWaveStatus =
+  | "running"
+  | "improved"
+  | "unchanged"
+  | "regressed"
+  | "failed";
+
+export interface GoalCampaign {
+  id: string;
+  repoId: string;
+  name: string;
+  goalPrompt: string;
+  metricCommand: string;
+  metricRegex?: string;
+  metricUnit?: string;
+  direction: CampaignDirection;
+  baselineValue?: number;
+  currentValue?: number;
+  targetValue: number;
+  deliveryMode: CampaignDeliveryMode;
+  stagingBranch?: string;
+  lastGoodCommitSha?: string;
+  allowedPaths: string[];
+  template: PipelineTemplateId;
+  preferredEngine?: EnginePreference;
+  maxIterations: number;
+  completedWaves: number;
+  maxTotalBudgetUsd: number;
+  totalCostUsd: number;
+  consecutiveNoImproveCount: number;
+  activeTicketId?: string;
+  pauseReason?: string;
+  deliveredPrUrl?: string;
+  deliveredCommitSha?: string;
+  status: CampaignStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GoalCampaignWave {
+  id: string;
+  campaignId: string;
+  repoId: string;
+  waveNumber: number;
+  ticketId?: string;
+  status: CampaignWaveStatus;
+  beforeValue: number;
+  measuredValue?: number;
+  delta?: number;
+  commitSha?: string;
+  rolledBack?: boolean;
+  costUsd: number;
+  summary: string;
+  startedAt: string;
+  completedAt?: string;
+}
+
+export interface CreateCampaignInput {
+  repoId: string;
+  name: string;
+  goalPrompt: string;
+  metricCommand: string;
+  metricRegex?: string;
+  metricUnit?: string;
+  direction: CampaignDirection;
+  targetValue: number;
+  deliveryMode?: CampaignDeliveryMode;
+  allowedPaths?: string[];
+  template?: PipelineTemplateId;
+  preferredEngine?: EnginePreference;
+  maxIterations?: number;
+  maxTotalBudgetUsd?: number;
+  autoStart?: boolean;
+}
+
+export type MergeTrainEntryStatus =
+  | "queued"
+  | "barrier_waiting"
+  | "validating"
+  | "merged"
+  | "ejected"
+  | "barrier_blocked";
+
+export interface MergeTrainEntry {
+  id: string;
+  repoId: string;
+  ticketId: string;
+  outboxId: string;
+  branchName: string;
+  baseBranch: string;
+  barrierGroupId?: string;
+  position: number;
+  status: MergeTrainEntryStatus;
+  bypassedSpeculation?: boolean;
+  speculativeCommitSha?: string;
+  mergedCommitSha?: string;
+  errorSummary?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ServiceDaemonStatus {
+  platform: "darwin" | "linux" | "unsupported";
+  manager: "launchd" | "systemd" | "none";
+  installed: boolean;
+  running: boolean;
+  pid?: number;
+  serviceFilePath?: string;
+  dataDir: string;
+  host: string;
+  port: number;
+  logFilePath: string;
+  logByteSize?: number;
+  webUiBuilt: boolean;
+  detail: string;
 }

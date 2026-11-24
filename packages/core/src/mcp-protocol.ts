@@ -38,6 +38,8 @@ export interface McpToolHost {
   batchResolveInbox?(args: Record<string, unknown>): Promise<unknown>;
   askChief?(args: Record<string, unknown>): Promise<unknown>;
   manageEvals?(args: Record<string, unknown>): Promise<unknown>;
+  manageCampaigns?(args: Record<string, unknown>): Promise<unknown>;
+  manageMergeTrain?(args: Record<string, unknown>): Promise<unknown>;
 }
 
 export const MCP_PROTOCOL_VERSIONS = ["2025-03-26", "2024-11-05"] as const;
@@ -354,6 +356,58 @@ export const MCP_TOOL_DEFINITIONS = [
       required: ["action"],
     },
   },
+  {
+    name: "manage_campaigns",
+    description:
+      "Create, inspect, start, pause, deliver, or delete Metric-Driven Goal Campaigns (multi-wave autonomous optimization loops with monotonic rollback).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["list", "get", "create", "start", "pause", "deliver", "delete"],
+        },
+        repoId: { type: "string" },
+        campaignId: { type: "string" },
+        name: { type: "string" },
+        goalPrompt: { type: "string" },
+        metricCommand: { type: "string" },
+        metricRegex: { type: "string" },
+        metricUnit: { type: "string" },
+        direction: { type: "string", enum: ["increase", "decrease"] },
+        targetValue: { type: "number" },
+        deliveryMode: { type: "string", enum: ["staging_branch", "per_wave_merge"] },
+        allowedPaths: { type: "array", items: { type: "string" } },
+        template: { type: "string", enum: ["fast", "standard", "strict"] },
+        preferredEngine: { type: "string", enum: ["auto", "claude", "codex", "opencode"] },
+        maxIterations: { type: "number" },
+        maxTotalBudgetUsd: { type: "number" },
+        autoStart: { type: "boolean" },
+        note: { type: "string" },
+        reason: { type: "string" },
+        deliveryAction: { type: "string", enum: ["local_merge", "push_and_create_pr"] },
+      },
+      required: ["action"],
+    },
+  },
+  {
+    name: "manage_merge_train",
+    description:
+      "Inspect, flush, or eject entries from the Speculative Parallel Merge Train and Cross-Repo Release Barrier queue.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["list", "flush", "eject"],
+        },
+        repoId: { type: "string" },
+        entryId: { type: "string" },
+        reason: { type: "string" },
+      },
+      required: ["action"],
+    },
+  },
 ] as const;
 
 export const MCP_RESOURCES = [
@@ -438,7 +492,7 @@ async function handleSingleMcpRequest(
             },
             serverInfo: {
               name: "super-work",
-              version: "1.1.0",
+              version: "1.2.0",
             },
           },
         };
@@ -535,6 +589,18 @@ async function handleSingleMcpRequest(
                 throw new Error("manage_evals is not implemented on this MCP host");
               }
               result = await host.manageEvals(args);
+              break;
+            case "manage_campaigns":
+              if (!host.manageCampaigns) {
+                throw new Error("manage_campaigns is not implemented on this MCP host");
+              }
+              result = await host.manageCampaigns(args);
+              break;
+            case "manage_merge_train":
+              if (!host.manageMergeTrain) {
+                throw new Error("manage_merge_train is not implemented on this MCP host");
+              }
+              result = await host.manageMergeTrain(args);
               break;
             default:
               return jsonRpcError(id, -32601, `Unknown tool: ${name}`);

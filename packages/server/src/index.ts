@@ -17,7 +17,10 @@ import {
   OpenCodeDriver,
   SqliteStateStore,
   WorktreePreviewManager,
+  assertSafeHostBinding,
   buildControlPlaneLLMFromSetup,
+  resolveSmartDataDir,
+  rotateDaemonLogIfNeeded,
   runGit,
 } from "@super-work/drivers";
 import { createServerApp } from "./app.ts";
@@ -40,14 +43,27 @@ export interface StartedDaemon {
 }
 
 export async function startDaemon(options?: {
+  host?: string;
   port?: number;
   dataDir?: string;
   defaultRepoPath?: string;
   authToken?: string;
   enableMockFallback?: boolean;
 }): Promise<StartedDaemon> {
+  const host = (options?.host ?? process.env.HOST ?? "127.0.0.1").trim();
   const port = options?.port ?? Number(process.env.PORT ?? 4318);
-  const dataDir = resolve(options?.dataDir ?? process.env.SUPER_WORK_DATA_DIR ?? join(process.cwd(), ".super-work"));
+  const authToken = options?.authToken ?? (process.env.SUPER_WORK_TOKEN?.trim() || undefined);
+  assertSafeHostBinding(host, authToken);
+
+  const logFileEnv = process.env.SUPER_WORK_LOG_FILE?.trim();
+  if (logFileEnv) {
+    rotateDaemonLogIfNeeded(logFileEnv);
+  }
+
+  const dataDir = resolveSmartDataDir({
+    explicitDataDir: options?.dataDir ?? process.env.SUPER_WORK_DATA_DIR,
+    cwd: process.cwd(),
+  });
   await mkdir(dataDir, { recursive: true });
 
   const stateStore = new SqliteStateStore(join(dataDir, "super-work.db"));
@@ -90,10 +106,13 @@ export async function startDaemon(options?: {
     dataDir,
   });
 
+  const candidateRepoRoot = resolve(
+    options?.defaultRepoPath ?? process.env.SUPER_WORK_DEFAULT_REPO ?? process.cwd(),
+  );
   // Auto-register workspace repository if none registered yet
   const existingRepos = await stateStore.listRepos();
   if (existingRepos.length === 0) {
-    const candidateRoot = resolve(options?.defaultRepoPath ?? process.cwd());
+    const candidateRoot = candidateRepoRoot;
     if (existsSync(join(candidateRoot, ".git"))) {
       const branchRes = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], candidateRoot);
       const baseBranch =
@@ -127,7 +146,6 @@ export async function startDaemon(options?: {
   const webDistDir = resolve(here, "../../web/dist");
   const notificationDispatcher = new NotificationDispatcher(stateStore);
   const detachNotifications = notificationDispatcher.attachToKernel(kernel);
-  const authToken = options?.authToken ?? (process.env.SUPER_WORK_TOKEN?.trim() || undefined);
 
   const app = createServerApp({
     kernel,
@@ -151,6 +169,7 @@ export async function startDaemon(options?: {
   ghPoller.start();
 
   const server = Bun.serve({
+    hostname: host,
     port,
     fetch: app.fetch,
     idleTimeout: 120,

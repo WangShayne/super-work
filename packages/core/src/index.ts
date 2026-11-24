@@ -2,6 +2,8 @@ export * from "./types.ts";
 export * from "./utils.ts";
 export * from "./ports.ts";
 export * from "./mandate.ts";
+export * from "./campaign.ts";
+export * from "./merge-train.ts";
 export * from "./handover.ts";
 export * from "./routine.ts";
 export * from "./arena.ts";

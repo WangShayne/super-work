@@ -24,7 +24,7 @@ import type {
 } from "@super-work/core";
 import { runCdpBrowserCheck, type BrowserCheckExecutionResult } from "../browser/cdp-browser-check.ts";
 import { comparePngVisualDiff } from "../browser/png-visual-diff.ts";
-import { wrapCommandWithOsSandbox } from "../sandbox/os-sandbox.ts";
+import { wrapCommandWithOsSandbox, buildSanitizedWorkerEnv } from "../sandbox/os-sandbox.ts";
 import {
   executeReadOnlyProbeTool,
   runDeterministicRepoPreProbe,
@@ -1354,6 +1354,266 @@ export class GitWorktreeProvider implements WorkspaceProvider {
       if (m[2] !== "-") deletedLines += Number(m[2]);
     }
     return { addedLines, deletedLines, changedFiles };
+  }
+
+  async runLifecycleHooks(input: {
+    cwd: string;
+    commands: string[];
+    timeoutSec?: number;
+    hookEnv: Record<string, string>;
+  }): Promise<VerificationRunResult> {
+    const cleanCmds = input.commands.map((c) => c.trim()).filter(Boolean);
+    if (cleanCmds.length === 0) {
+      return { ok: true, results: [], summary: "No lifecycle hooks configured" };
+    }
+    const sanitizedEnv = buildSanitizedWorkerEnv({
+      engine: "verification",
+      baseEnv: process.env,
+      extraEnv: input.hookEnv,
+    });
+    const timeoutMs = Math.max(5, Math.min(120, input.timeoutSec ?? 30)) * 1_000;
+    const results: VerificationCommandOutput[] = [];
+
+    for (const command of cleanCmds) {
+      const started = Date.now();
+      const proc = Bun.spawn(["sh", "-lc", command], {
+        cwd: input.cwd,
+        env: sanitizedEnv,
+        stdout: "pipe",
+        stderr: "pipe",
+        stdin: "ignore",
+      });
+
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        try {
+          proc.kill();
+        } catch {
+          // ignore
+        }
+      }, timeoutMs);
+
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      clearTimeout(timer);
+
+      const durationMs = Date.now() - started;
+      const combined = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
+      const finalExit = timedOut ? 124 : exitCode;
+      results.push({
+        command,
+        exitCode: finalExit,
+        durationMs,
+        output: timedOut ? `${combined}\n[timed out after ${timeoutMs}ms]`.trim() : combined,
+      });
+
+      if (finalExit !== 0) {
+        return {
+          ok: false,
+          results,
+          failedCommand: command,
+          summary: `Lifecycle hook failed (${command}, exit ${finalExit}): ${combined.slice(-800)}`,
+        };
+      }
+    }
+
+    return {
+      ok: true,
+      results,
+      summary: `Executed ${results.length} lifecycle hook(s) cleanly`,
+    };
+  }
+
+  async measureMetricAtRef(input: {
+    rootRepoPath: string;
+    gitRef: string;
+    metricCommand: string;
+    timeoutSec?: number;
+    sandboxMode?: SandboxMode;
+    forbiddenPaths?: string[];
+  }): Promise<{ ok: boolean; rawOutput: string; exitCode: number; durationMs: number }> {
+    const metricRoot = join(dirname(this.worktreesDir), "metric-worktrees");
+    await mkdir(metricRoot, { recursive: true });
+    const wtPath = join(metricRoot, `metric-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`);
+    const addRes = await runGit(["worktree", "add", "--detach", wtPath, input.gitRef], input.rootRepoPath);
+    if (addRes.exitCode !== 0) {
+      throw new Error(
+        `Failed to checkout metric ref '${input.gitRef}': ${addRes.stderr.trim() || addRes.stdout.trim()}`,
+      );
+    }
+    try {
+      await this.linkRepoNodeModules(input.rootRepoPath, wtPath);
+      const res = await this.runVerificationCommands(
+        wtPath,
+        [input.metricCommand],
+        input.timeoutSec ?? 60,
+        {
+          sandboxMode: input.sandboxMode ?? "balanced",
+          forbiddenPaths: input.forbiddenPaths,
+          allowNetwork: false,
+          rootRepoPath: input.rootRepoPath,
+        },
+      );
+      const first = res.results[0];
+      return {
+        ok: res.ok,
+        rawOutput: first?.output ?? res.summary,
+        exitCode: first?.exitCode ?? (res.ok ? 0 : 1),
+        durationMs: first?.durationMs ?? 0,
+      };
+    } finally {
+      await this.cleanupWorkspace(wtPath, input.rootRepoPath).catch(() => {});
+    }
+  }
+
+  async resetBranchRef(
+    rootRepoPath: string,
+    branchName: string,
+    targetCommitSha: string,
+  ): Promise<void> {
+    const headRes = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], rootRepoPath);
+    if (headRes.stdout.trim() === branchName) {
+      const resetRes = await runGit(["reset", "--hard", targetCommitSha], rootRepoPath);
+      if (resetRes.exitCode !== 0) {
+        throw new Error(
+          `Failed to reset checked-out branch '${branchName}' to ${targetCommitSha}: ${resetRes.stderr.trim()}`,
+        );
+      }
+      return;
+    }
+    const updRes = await runGit(["branch", "-f", branchName, targetCommitSha], rootRepoPath);
+    if (updRes.exitCode !== 0) {
+      throw new Error(
+        `Failed to move branch '${branchName}' to ${targetCommitSha}: ${updRes.stderr.trim() || updRes.stdout.trim()}`,
+      );
+    }
+  }
+
+  async prepareSpeculativeMergeSlot(input: {
+    rootRepoPath: string;
+    baseCommitSha: string;
+    branchName: string;
+    commitMessage: string;
+    slotLabel: string;
+  }): Promise<{ ok: boolean; worktreePath: string; mergedCommitSha?: string; conflictSummary?: string }> {
+    const trainRoot = join(dirname(this.worktreesDir), "train-worktrees");
+    await mkdir(trainRoot, { recursive: true });
+    const safeLabel = input.slotLabel.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 48) || "slot";
+    const wtPath = join(
+      trainRoot,
+      `${safeLabel}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    );
+    const addRes = await runGit(["worktree", "add", "--detach", wtPath, input.baseCommitSha], input.rootRepoPath);
+    if (addRes.exitCode !== 0) {
+      return {
+        ok: false,
+        worktreePath: "",
+        conflictSummary: `Failed to prepare train slot at ${input.baseCommitSha}: ${addRes.stderr.trim() || addRes.stdout.trim()}`,
+      };
+    }
+
+    const userCheck = await runGit(["config", "user.name"], wtPath);
+    const mergeArgs = userCheck.stdout.trim()
+      ? ["merge", "--no-ff", "-m", input.commitMessage, input.branchName]
+      : [
+          "-c",
+          "user.name=super-work",
+          "-c",
+          "user.email=super-work@local",
+          "merge",
+          "--no-ff",
+          "-m",
+          input.commitMessage,
+          input.branchName,
+        ];
+    const mergeRes = await runGit(mergeArgs, wtPath);
+    if (mergeRes.exitCode !== 0) {
+      const conflictsRes = await runGit(["diff", "--name-only", "--diff-filter=U"], wtPath);
+      const conflictFiles = conflictsRes.stdout
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      await runGit(["merge", "--abort"], wtPath).catch(() => {});
+      await this.cleanupWorkspace(wtPath, input.rootRepoPath).catch(() => {});
+      return {
+        ok: false,
+        worktreePath: "",
+        conflictSummary:
+          conflictFiles.length > 0
+            ? `Speculative merge conflict in: ${conflictFiles.join(", ")}`
+            : mergeRes.stderr.trim() || mergeRes.stdout.trim() || "Speculative merge failed",
+      };
+    }
+
+    await this.linkRepoNodeModules(input.rootRepoPath, wtPath);
+    const headSha = await this.getHeadCommitSha(wtPath, "HEAD");
+    return { ok: true, worktreePath: wtPath, mergedCommitSha: headSha };
+  }
+
+  async fastForwardBranchToCommit(input: {
+    rootRepoPath: string;
+    baseBranch: string;
+    targetCommitSha: string;
+    cleanupWorktrees?: string[];
+    deleteBranches?: string[];
+  }): Promise<string> {
+    for (const wt of input.cleanupWorktrees ?? []) {
+      if (wt) {
+        await this.cleanupWorkspace(wt, input.rootRepoPath).catch(() => {});
+      }
+    }
+
+    // Ensure target is fast-forward descendant of baseBranch before advancing ref
+    const ancCheck = await runGit(
+      ["merge-base", "--is-ancestor", input.baseBranch, input.targetCommitSha],
+      input.rootRepoPath,
+    );
+    if (ancCheck.exitCode !== 0) {
+      throw new Error(
+        `Cannot fast-forward '${input.baseBranch}' to non-descendant commit ${input.targetCommitSha}`,
+      );
+    }
+
+    const headRes = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], input.rootRepoPath);
+    if (headRes.stdout.trim() === input.baseBranch) {
+      const dirty = await runGit(
+        ["status", "--porcelain", "--untracked-files=no"],
+        input.rootRepoPath,
+      );
+      if (dirty.stdout.trim()) {
+        throw new Error(
+          `Base repository (${input.baseBranch}) has uncommitted tracked changes; commit or stash before advancing merge train.`,
+        );
+      }
+      const ffRes = await runGit(["merge", "--ff-only", input.targetCommitSha], input.rootRepoPath);
+      if (ffRes.exitCode !== 0) {
+        throw new Error(
+          `git merge --ff-only ${input.targetCommitSha} failed: ${ffRes.stderr.trim() || ffRes.stdout.trim()}`,
+        );
+      }
+    } else {
+      const updRes = await runGit(
+        ["branch", "-f", input.baseBranch, input.targetCommitSha],
+        input.rootRepoPath,
+      );
+      if (updRes.exitCode !== 0) {
+        throw new Error(
+          `Failed to advance '${input.baseBranch}' to ${input.targetCommitSha}: ${updRes.stderr.trim() || updRes.stdout.trim()}`,
+        );
+      }
+    }
+
+    for (const br of input.deleteBranches ?? []) {
+      if (br) {
+        await runGit(["branch", "-D", br], input.rootRepoPath).catch(() => {});
+      }
+    }
+
+    return this.getHeadCommitSha(input.rootRepoPath, input.baseBranch);
   }
 
   async cleanupWorkspace(worktreePath: string, rootRepoPath?: string): Promise<void> {

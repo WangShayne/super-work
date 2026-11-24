@@ -1,6 +1,7 @@
 import { matchesPathScope } from "../mandate.ts";
 import type {
   InboxItem,
+  ReviewCommentStatus,
   ReviewFinding,
   SubmitReviewCommentsInput,
   Ticket,
@@ -212,4 +213,23 @@ export async function submitTicketReviewComments(
   }
 
   return { comments: allComments, ticket };
+}
+
+export async function updateReviewCommentStatusOp(
+  ctx: KernelCoordinatorContext,
+  commentId: string,
+  status: ReviewCommentStatus,
+): Promise<TicketReviewComment | null> {
+  const ts = nowIso();
+  const updated = await ctx.stateStore.updateReviewCommentStatus(commentId, status, ts);
+  if (updated) {
+    const comments = await ctx.stateStore.listReviewComments(updated.ticketId);
+    ctx.emitEvent({
+      type: "review_comment_updated",
+      ticketId: updated.ticketId,
+      comments,
+      timestamp: ts,
+    });
+  }
+  return updated;
 }

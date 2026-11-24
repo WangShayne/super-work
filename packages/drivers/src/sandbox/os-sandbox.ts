@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import type { SandboxMode, WorkerEngineId } from "@super-work/core";
+import { IMMUTABLE_REPO_PATHS, type SandboxMode, type WorkerEngineId } from "@super-work/core";
 
 export interface SanitizedEnvOptions {
   baseEnv?: NodeJS.ProcessEnv;
@@ -348,10 +348,13 @@ export function buildMacosSeatbeltProfile(input: SeatbeltProfileInput): string {
     );
   }
 
-  // 3b. Read-only protected paths (e.g. locked A.1 spec_test files): readable & runnable, never writable
+  // 3b. Read-only protected paths (e.g. locked A.1 spec_test files & immutable super-work.json): readable & runnable, never writable
   const roSubpaths: string[] = [];
   const roRegexes: string[] = [];
-  for (const rawPat of input.readOnlyPaths ?? []) {
+  const combinedReadOnly = Array.from(
+    new Set([...(input.readOnlyPaths ?? []), ...IMMUTABLE_REPO_PATHS]),
+  );
+  for (const rawPat of combinedReadOnly) {
     const pat = rawPat.trim();
     if (!pat) continue;
     if (pat.includes("*") || pat.includes("?")) {
@@ -496,7 +499,10 @@ export function wrapCommandWithOsSandbox(options: WrapSandboxOptions): WrappedSa
         args.push("--bind", gd, gd);
       }
     }
-    for (const roPat of options.readOnlyPaths ?? []) {
+    const bwrapReadOnly = Array.from(
+      new Set([...(options.readOnlyPaths ?? []), ...IMMUTABLE_REPO_PATHS]),
+    );
+    for (const roPat of bwrapReadOnly) {
       const clean = roPat.trim();
       if (!clean || clean.includes("*") || clean.includes("?")) continue;
       const absRo = resolve(wt, clean);

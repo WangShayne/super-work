@@ -11,28 +11,29 @@
     },
     "packages/cli": {
       "name": "@super-work/cli",
-      "version": "0.4.0",
+      "version": "1.2.0",
       "bin": {
         "super-work": "./src/index.ts",
       },
       "dependencies": {
         "@super-work/core": "workspace:*",
+        "@super-work/drivers": "workspace:*",
       },
     },
     "packages/core": {
       "name": "@super-work/core",
-      "version": "0.4.0",
+      "version": "1.2.0",
     },
     "packages/drivers": {
       "name": "@super-work/drivers",
-      "version": "0.4.0",
+      "version": "1.2.0",
       "dependencies": {
         "@super-work/core": "workspace:*",
       },
     },
     "packages/server": {
       "name": "@super-work/server",
-      "version": "0.4.0",
+      "version": "1.2.0",
       "dependencies": {
         "@super-work/core": "workspace:*",
         "@super-work/drivers": "workspace:*",
@@ -41,7 +42,7 @@
     },
     "packages/web": {
       "name": "@super-work/web",
-      "version": "0.4.0",
+      "version": "1.2.0",
       "dependencies": {
         "lucide-react": "^0.475.0",
         "react": "^19.0.0",

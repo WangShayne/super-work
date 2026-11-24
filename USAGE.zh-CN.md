@@ -56,11 +56,13 @@ bun run setup -- --auto
 - **状态指示灯与 `⌘K` 全局指令/幕僚面板**：顶栏首行提供 **`⌘K 指令/幕僚`** 快捷键（支持即时搜索工单/记忆，或输入 `?` 向幕僚只读提问态势）；第二行紧凑展示 `实时同步`（SSE）、`总控大脑`、`Agent 分工`、`工程契约`（开启风险门禁时自动显示 `风险门禁`）、`防卡死巡检`、`PR 交付队列`、`定时巡航` 与 **`工作树池`（支持查看/一键 GC 或快捷跳转至系统自检）**，以及 `环境与模型`（内含 **系统自检与热备份/原子恢复** 标签页）/ `中文 / EN` 切换。
 
 ### 2. 三层信息结构与 `@super-work/cli`
-1. **决策收件箱（Attention Inbox）**：聚合 `观察模式拟单`、`方案审批门禁`、`越界授权拦截`、`看门狗升级告警`、`合并冲突待解`（展示 **B.2 3-Way 双方改动与上游提交摘要**）、`PR 交付签发`（展示 **A.1 风险评分与因子拆解**）、`每日预算触顶`、`Arena 双引擎决胜`、`Epic 规划调整`、`Worker 设计歧义提问`（单选建议卡）与 `PR 评审/CI 返修`，并支持多选及「仅选低风险」批量审批。
-2. **态势看板（Mission Board）**：五列泳道实时展示风险分数标签（`风险:<score>`）、TDD/Auto-Arena 徽章、PR 关联与内嵌交互式 Epic DAG 拓扑画布。
-3. **效能与预算（Metrics & Budget）**：展示当日预算水位进度条、端到端交付成功率、累计花费、按引擎 × 任务类别的 Bandit 评分矩阵，以及 **Golden Eval 黄金基准回放评测台**。
-4. **下钻详情抽屉 & 命令行客户端（`bun run cli` / `super-work`）**：
-   - `super-work up [-d]`：前台或后台守护模式拉起本地服务。
+1. **决策收件箱（Attention Inbox）**：聚合 `观察模式拟单`、`方案审批门禁`、`越界授权拦截`（普通越界保留现场一键扩权，不可变 `super-work.json` 与敏感路径强制回滚）、`看门狗升级告警`、`合并冲突待解`、`目标战役熔断暂停`、`PR 交付签发`、`每日预算触顶`、`Arena 双引擎决胜`、`Epic 规划调整`、`Worker 设计歧义提问`与 `PR 评审/CI 返修`，并支持多选及「仅选低风险」批量审批。
+2. **态势看板 & 并行合并列车**：五列泳道实时展示风险分数标签、TDD/Auto-Arena 徽章与 Epic DAG 画布；点击顶部状态条 **「PR 交付队列」** 可随时查看、推进或驱逐 **并行投机合并列车与跨仓屏障** 槽位。
+3. **定时巡检 & 目标战役（Autonomous Routines）**：视图顶部分段切换 **定时巡检** 与 **目标战役（Goal Campaigns）**，支持设置指标测量命令、内联 SVG 指标趋势线（Sparkline）与回归单调回退保护。
+4. **效能与预算（Metrics & Budget）**：展示当日预算水位进度条、端到端交付成功率、累计花费、按引擎 × 任务类别的 Bandit 评分矩阵，以及 **Golden Eval 黄金基准回放评测台**。
+5. **下钻详情抽屉 & 命令行客户端（`bun run cli` / `super-work`）**：
+   - `super-work up [-d] [--host 127.0.0.1] [--port 4318]` / `super-work service [install|uninstall|start|stop|status|logs]`：前台/系统常驻守护进程（`launchd` / `systemd --user`）安装与启停管理。
+   - `super-work campaign ...` / `super-work train [list|flush|eject]`：终端创建/控制指标驱动目标战役与并行合并列车队列。
    - `super-work status`、`ask <问题>`、`steer <ticketId> <纠偏指令>`、`blueprints`、`dispatch <title> -d <desc> [--blueprint <id>] [--gate-policy <policy>] [--wait]`、`epic <title> [--preview-only|--wait]`、`inbox [list|approve|reject|batch]`、`eval [list|save|run|delete]`、`doctor [--fix]`、`backup [list|create|restore <id>]`、`bundle [export|import <file>]`、`logs <ticketId> [-f]`、`watch`、`revert <ticketId>`、`playbook [list|add|toggle|delete|sync --export]`。
 
 ### 3. 三种流水线模板对比

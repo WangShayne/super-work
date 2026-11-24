@@ -10,6 +10,15 @@ export const DEFAULT_FORBIDDEN_PATHS: readonly string[] = [
   "**/*.key",
 ];
 
+/**
+ * Repository contract files whose writes are unconditionally blocked and auto-reverted
+ * if a Worker tries to tamper with them, while remaining readable in sandboxes/probes.
+ */
+export const IMMUTABLE_REPO_PATHS: readonly string[] = [
+  "super-work.json",
+  "**/super-work.json",
+];
+
 const GLOB_META_RE = /[*?[{]/;
 
 export function createDefaultMandate(overrides?: Partial<Mandate>): Mandate {
@@ -72,7 +81,9 @@ export function validateChangedFilesAgainstMandate(
   changedFiles: string[],
   mandate: Mandate,
 ): MandateValidationResult {
-  const forbidden = Array.from(new Set([...DEFAULT_FORBIDDEN_PATHS, ...mandate.forbiddenPaths]));
+  const forbidden = Array.from(
+    new Set([...DEFAULT_FORBIDDEN_PATHS, ...IMMUTABLE_REPO_PATHS, ...mandate.forbiddenPaths]),
+  );
   const allowed = mandate.allowedPaths.length > 0 ? mandate.allowedPaths : ["**"];
   const violations: string[] = [];
   const forbiddenViolations: string[] = [];

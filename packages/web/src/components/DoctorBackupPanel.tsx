@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { useI18n } from "../i18n.tsx";
 import { api } from "../api.ts";
-import type { BackupArchiveInfo, SystemDoctorReport } from "../types.ts";
+import type { BackupArchiveInfo, ServiceStatusResponse, SystemDoctorReport } from "../types.ts";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -24,6 +24,7 @@ export function DoctorBackupPanel() {
   const { t } = useI18n();
   const [report, setReport] = useState<SystemDoctorReport | null>(null);
   const [backups, setBackups] = useState<BackupArchiveInfo[]>([]);
+  const [serviceInfo, setServiceInfo] = useState<ServiceStatusResponse | null>(null);
   const [loadingDoctor, setLoadingDoctor] = useState(false);
   const [fixingDoctor, setFixingDoctor] = useState(false);
   const [creatingBackup, setCreatingBackup] = useState(false);
@@ -36,9 +37,14 @@ export function DoctorBackupPanel() {
     setLoadingDoctor(true);
     setError(null);
     try {
-      const [doc, bk] = await Promise.all([api.runDoctor(false), api.listBackups()]);
+      const [doc, bk, svc] = await Promise.all([
+        api.runDoctor(false),
+        api.listBackups(),
+        api.getSystemService(20).catch(() => null),
+      ]);
       setReport(doc);
       setBackups(bk.backups);
+      if (svc) setServiceInfo(svc);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -272,6 +278,41 @@ export function DoctorBackupPanel() {
             ))}
           </div>
         )}
+      </section>
+
+      <section className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-3.5 space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-sky-400" />
+            <h4 className="text-xs font-semibold text-zinc-100">{t("service.title")}</h4>
+            {serviceInfo && (
+              <span
+                className={`px-2 py-0.5 rounded-full text-[10px] font-mono border ${
+                  serviceInfo.status.running
+                    ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                    : "bg-zinc-800 text-zinc-400 border-zinc-700"
+                }`}
+              >
+                {serviceInfo.status.manager} ·{" "}
+                {serviceInfo.status.running ? "running" : serviceInfo.status.installed ? "stopped" : "not installed"}
+              </span>
+            )}
+          </div>
+          {serviceInfo && (
+            <span className="font-mono text-[10px] text-zinc-400">
+              {serviceInfo.status.host}:{serviceInfo.status.port}
+            </span>
+          )}
+        </div>
+        {serviceInfo && (
+          <div className="text-[11px] font-mono text-zinc-400 space-y-0.5">
+            <div>{serviceInfo.status.detail}</div>
+            <div className="text-[10px] text-zinc-500 truncate">
+              dataDir: {serviceInfo.status.dataDir} · webUI: {serviceInfo.status.webUiBuilt ? "built" : "dev-only"}
+            </div>
+          </div>
+        )}
+        <p className="text-[10px] font-mono text-zinc-500">{t("service.installHint")}</p>
       </section>
     </div>
   );
