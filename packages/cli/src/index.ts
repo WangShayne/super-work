@@ -351,18 +351,21 @@ async function waitForTicketCompletion(
 }
 
 function printHelp(stdout: (line: string) => void): void {
-  stdout(`super-work v0.9.0 CLI
+  stdout(`super-work v1.0.0 CLI
 
 Usage:
   super-work up [-d|--detach] [--port 4318] [--data-dir path]
   super-work mcp [--url http://localhost:4318] [--token <token>] [--no-auto-start]
   super-work status [--repo <id>] [--auto-start] [--json]
-  super-work dispatch <title> [-d|--desc <text>] [--repo <id>] [--paths <csv>] [--depends-on <csv>]
+  super-work dispatch <title> [-d|--desc <text>] [--repo <id>] [--blueprint <id>] [--gate-policy <policy>] [--paths <csv>] [--depends-on <csv>]
                       [--template fast|standard|strict] [--engine auto|claude|codex|opencode|mock]
                       [--tdd] [--pause-before-run] [--arena [engine]] [--clarify] [--clarify-only]
                       [--budget <usd>] [--wait] [--auto-start] [--json]
   super-work epic <title> [-d|--desc <text>] [--repo <id>] [--template fast|standard|strict] [--tdd]
                   [--engine auto|...] [--preview-only] [--per-subtask] [--wait] [--auto-start] [--json]
+  super-work blueprints [--repo <id>] [--auto-start] [--json]
+  super-work doctor [--fix] [--auto-start] [--json]
+  super-work backup [list|create] [--auto-start] [--json]
   super-work impact [--repo <id>] [--paths <csv>] [--auto-start] [--json]
   super-work checkpoint [list <ticketId> | diff <ticketId> <cpId> [--base <cpId>] |
                          restore <ticketId> <cpId> [--mode in_place|fork] [-m <prompt>] [--stage <stage>] [--engine <eng>]]
@@ -567,6 +570,14 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
             .filter(Boolean)
         : undefined;
       const template = getStringFlag(flags, "template") as PipelineTemplateId | undefined;
+      const blueprintId = getStringFlag(flags, "blueprint");
+      const gatePolicyRaw = getStringFlag(flags, "gate-policy");
+      const deliveryGatePolicy =
+        gatePolicyRaw === "always_auto" ||
+        gatePolicyRaw === "risk_gated" ||
+        gatePolicyRaw === "always_signoff"
+          ? gatePolicyRaw
+          : undefined;
       const preferredEngine = getStringFlag(flags, "engine") as EnginePreference | undefined;
       const tddMode = flags.tdd !== undefined ? Boolean(flags.tdd) : undefined;
       const pauseBeforeRun = flags["pause-before-run"] ? true : undefined;
@@ -636,6 +647,8 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
             repoId,
             title,
             description: finalDescription,
+            blueprintId,
+            deliveryGatePolicy,
             template: finalTemplate,
             tddMode,
             pauseBeforeRun,
@@ -1536,6 +1549,85 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
           ? JSON.stringify({ ticket }, null, 2)
           : `Updated DAG node ${ticket.id}: status=${ticket.status} stage=${ticket.currentStage} deps=[${ticket.dependsOn.join(",")}]`,
       );
+      return 0;
+    }
+
+    if (cmd === "blueprints") {
+      const data = await withAutoStart(
+        baseUrl,
+        autoStart,
+        async () => {
+          const repoId = await resolveTargetRepoId(client, getStringFlag(flags, "repo"));
+          return client.listBlueprints(repoId);
+        },
+        stdout,
+      );
+      if (asJson) {
+        stdout(JSON.stringify(data, null, 2));
+      } else {
+        for (const bp of data.blueprints) {
+          stdout(
+            `${bp.id} (${bp.template}, gate=${bp.deliveryGatePolicy ?? "repo"}${bp.tddMode ? ", tdd" : ""}) - ${bp.name}: ${bp.description}`,
+          );
+        }
+      }
+      return 0;
+    }
+
+    if (cmd === "doctor") {
+      const fix = Boolean(flags.fix);
+      const report = await withAutoStart(
+        baseUrl,
+        autoStart,
+        () => client.runDoctor(fix),
+        stdout,
+      );
+      if (asJson) {
+        stdout(JSON.stringify(report, null, 2));
+      } else {
+        stdout(
+          `System Doctor: healthy=${report.healthy} fixesApplied=${report.fixesApplied} checkedAt=${report.checkedAt}`,
+        );
+        for (const item of report.items) {
+          stdout(`  [${item.status.toUpperCase()}] (${item.category}) ${item.title}: ${item.detail}`);
+        }
+      }
+      return 0;
+    }
+
+    if (cmd === "backup") {
+      const subCmd = positionals[1] ?? "list";
+      if (subCmd === "create") {
+        const res = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.createBackup(),
+          stdout,
+        );
+        if (asJson) {
+          stdout(JSON.stringify(res, null, 2));
+        } else {
+          stdout(
+            `Created backup ${res.backup.filename} (${res.backup.byteSize} bytes, integrity=${res.backup.dbIntegrityOk ?? true}) -> ${res.backup.filePath}`,
+          );
+        }
+        return 0;
+      }
+      const res = await withAutoStart(
+        baseUrl,
+        autoStart,
+        () => client.listBackups(),
+        stdout,
+      );
+      if (asJson) {
+        stdout(JSON.stringify(res, null, 2));
+      } else if (res.backups.length === 0) {
+        stdout("No SQLite hot backups created yet.");
+      } else {
+        for (const b of res.backups) {
+          stdout(`${b.filename} (${b.byteSize} bytes) createdAt=${b.createdAt}`);
+        }
+      }
       return 0;
     }
 

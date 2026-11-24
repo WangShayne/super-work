@@ -1,3 +1,4 @@
+import { applyBlueprintToTicketInput, resolveRepoBlueprints } from "./blueprints.ts";
 import { classifyTaskCategory } from "./engine-router.ts";
 import { heuristicDecomposeEpic, sanitizeEpicSubtasks } from "./epic.ts";
 import { createDefaultMandate, mandateScopesOverlap, matchesPathScope } from "./mandate.ts";
@@ -387,6 +388,8 @@ export class EventIntakeRouter {
       dependsOn,
       nativeSessions: {},
       tddMode: tddMode || undefined,
+      deliveryGatePolicy: repo.deliveryGatePolicy,
+      riskThreshold: repo.riskThreshold,
       taskCategory: classifyTaskCategory(ticketTitle, ticketDesc, mandate.allowedPaths),
       impactSummary: semantic.impactSummary,
       inlineMemory: {
@@ -456,16 +459,29 @@ export class EventIntakeRouter {
       throw new Error(`Repository not found: ${input.repoId}`);
     }
 
+    let effectiveInput = input;
+    if (input.blueprintId?.trim()) {
+      const bpId = input.blueprintId.trim();
+      const blueprint = resolveRepoBlueprints(repo).find((b) => b.id === bpId);
+      if (!blueprint) {
+        throw new Error(`Unknown Task Blueprint '${bpId}' for repository '${repo.name}'.`);
+      }
+      effectiveInput = applyBlueprintToTicketInput(input, blueprint);
+    }
+
     const ts = nowIso();
-    const threadKey = input.threadKey ?? `web:${newId("task")}`;
+    const threadKey = effectiveInput.threadKey ?? `web:${newId("task")}`;
     const trigger: Trigger = {
       id: newId("trg"),
       repoId: repo.id,
       source: "web",
       threadKey,
-      title: input.title,
-      payload: { direct: true },
-      rawText: input.description,
+      title: effectiveInput.title,
+      payload: {
+        direct: true,
+        ...(effectiveInput.blueprintId ? { blueprintId: effectiveInput.blueprintId } : {}),
+      },
+      rawText: effectiveInput.description,
       createdAt: ts,
     };
     await this.stateStore.saveTrigger(trigger);
@@ -477,7 +493,7 @@ export class EventIntakeRouter {
       threadKey,
       metadata: {
         source: "web",
-        ...(input.startPoint ? { forkStartPoint: input.startPoint } : {}),
+        ...(effectiveInput.startPoint ? { forkStartPoint: effectiveInput.startPoint } : {}),
       },
       createdAt: ts,
       updatedAt: ts,
@@ -485,15 +501,18 @@ export class EventIntakeRouter {
     await this.stateStore.upsertThread(thread);
 
     const mandate = createDefaultMandate({
-      allowedPaths: input.allowedPaths && input.allowedPaths.length > 0 ? input.allowedPaths : ["**"],
-      forbiddenPaths: [...(repo.forbiddenPaths ?? []), ...(input.forbiddenPaths ?? [])],
-      maxCostUsd: input.maxCostUsd ?? 2.0,
-      maxDurationSec: input.maxDurationSec ?? 600,
+      allowedPaths:
+        effectiveInput.allowedPaths && effectiveInput.allowedPaths.length > 0
+          ? effectiveInput.allowedPaths
+          : ["**"],
+      forbiddenPaths: [...(repo.forbiddenPaths ?? []), ...(effectiveInput.forbiddenPaths ?? [])],
+      maxCostUsd: effectiveInput.maxCostUsd ?? 2.0,
+      maxDurationSec: effectiveInput.maxDurationSec ?? 600,
     });
 
     const explicitDeps: string[] = [];
     let hasPendingDeps = false;
-    for (const rawDepId of input.dependsOn ?? []) {
+    for (const rawDepId of effectiveInput.dependsOn ?? []) {
       const depId = rawDepId.trim();
       if (!depId || explicitDeps.includes(depId)) continue;
       const depTicket = await this.stateStore.getTicket(depId);
@@ -515,16 +534,16 @@ export class EventIntakeRouter {
     const dependsOn = Array.from(
       new Set([...explicitDeps, ...overlapDeps, ...semantic.semanticDepIds]),
     );
-    const template = input.template ?? repo.defaultTemplate;
-    const tddMode = input.tddMode ?? repo.defaultTddMode ?? false;
+    const template = effectiveInput.template ?? repo.defaultTemplate;
+    const tddMode = effectiveInput.tddMode ?? repo.defaultTddMode ?? false;
 
     const ticket: Ticket = {
       id: newId("tkt"),
       repoId: repo.id,
       threadId: thread.id,
       sourceTriggerId: trigger.id,
-      title: input.title,
-      description: input.description,
+      title: effectiveInput.title,
+      description: effectiveInput.description,
       status: hasPendingDeps ? "waiting_deps" : "queued",
       template,
       currentStage: getFirstStage(template, tddMode),
@@ -532,22 +551,25 @@ export class EventIntakeRouter {
       mandate,
       dependsOn,
       nativeSessions: {},
-      preferredEngine: input.preferredEngine,
+      preferredEngine: effectiveInput.preferredEngine,
       activeEngine:
-        input.preferredEngine && input.preferredEngine !== "auto"
-          ? input.preferredEngine
+        effectiveInput.preferredEngine && effectiveInput.preferredEngine !== "auto"
+          ? effectiveInput.preferredEngine
           : undefined,
-      arenaMode: input.arenaMode || undefined,
-      arenaCompetitorEngine: input.arenaCompetitorEngine,
+      arenaMode: effectiveInput.arenaMode || undefined,
+      arenaCompetitorEngine: effectiveInput.arenaCompetitorEngine,
+      blueprintId: effectiveInput.blueprintId,
+      deliveryGatePolicy: effectiveInput.deliveryGatePolicy ?? repo.deliveryGatePolicy,
+      riskThreshold: effectiveInput.riskThreshold ?? repo.riskThreshold,
       tddMode: tddMode || undefined,
-      pauseBeforeRun: input.pauseBeforeRun || undefined,
-      taskCategory: classifyTaskCategory(input.title, input.description, mandate.allowedPaths),
+      pauseBeforeRun: effectiveInput.pauseBeforeRun || undefined,
+      taskCategory: classifyTaskCategory(effectiveInput.title, effectiveInput.description, mandate.allowedPaths),
       impactSummary: semantic.impactSummary,
-      modelOverride: input.modelOverride?.trim() || undefined,
-      effortOverride: input.effortOverride,
+      modelOverride: effectiveInput.modelOverride?.trim() || undefined,
+      effortOverride: effectiveInput.effortOverride,
       inlineMemory: {
-        goal: input.description,
-        acceptanceCriteria: input.acceptanceCriteria ?? [],
+        goal: effectiveInput.description,
+        acceptanceCriteria: effectiveInput.acceptanceCriteria ?? [],
         stageNotes: [],
         threadUpdates: semantic.transitiveWarnings.map((w) => ({
           triggerId: newId("imp"),

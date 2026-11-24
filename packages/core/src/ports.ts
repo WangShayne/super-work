@@ -3,7 +3,9 @@ import type {
   ArtifactKind,
   CasebookEntry,
   ChainOfRecall,
+  ConflictFileHunk,
   DagNodeMutationInput,
+  DeliveryGatePolicy,
   EnginePreference,
   EpicDecompositionPlan,
   EpicDeliveryMode,
@@ -25,6 +27,7 @@ import type {
   RepoMetricsSummary,
   RestoreCheckpointInput,
   RevertResult,
+  ReviewCommentStatus,
   RoutineRun,
   RoutineSpec,
   SandboxMode,
@@ -38,6 +41,7 @@ import type {
   Thread,
   Ticket,
   TicketCheckpoint,
+  TicketReviewComment,
   TicketStatus,
   TriageProposal,
   Trigger,
@@ -202,6 +206,18 @@ export interface WorkspaceProvider {
   }): Promise<void>;
   getCommitDiff?(repoOrWorktreePath: string, fromSha: string, toSha: string): Promise<string>;
   cleanupTicketCheckpoints?(rootRepoPath: string, ticketId: string): Promise<number>;
+  listCheckpointRefs?(rootRepoPath: string): Promise<Array<{ ref: string; ticketId: string }>>;
+  deleteGitRef?(rootRepoPath: string, ref: string): Promise<boolean>;
+  prepareThreeWayConflictWorkspace?(input: {
+    worktreePath: string;
+    rootRepoPath: string;
+    baseBranch: string;
+  }): Promise<{
+    mergeBaseSha: string;
+    upstreamCommitSummaries: string[];
+    conflictFiles: string[];
+    fileHunks: ConflictFileHunk[];
+  }>;
   revertPaths(worktreePath: string, paths: string[]): Promise<void>;
   deleteBranch?(rootRepoPath: string, branchName: string): Promise<void>;
   listWorktreeDirs(): Promise<string[]>;
@@ -295,6 +311,19 @@ export interface StateStore {
   listCheckpoints(ticketId: string): Promise<TicketCheckpoint[]>;
   markCheckpointsCleaned(ticketId: string, cleanedAt: string): Promise<void>;
 
+  // Line-Anchored Review Comments (v1.0.0 B.1)
+  listReviewComments(ticketId: string): Promise<TicketReviewComment[]>;
+  saveReviewComment(comment: TicketReviewComment): Promise<void>;
+  updateReviewCommentStatus(
+    id: string,
+    status: ReviewCommentStatus,
+    updatedAt: string,
+  ): Promise<TicketReviewComment | null>;
+
+  // System Maintenance (v1.0.0 C.1)
+  checkDatabaseIntegrity?(): Promise<{ ok: boolean; detail: string; walPages?: number }>;
+  vacuumIntoBackup?(destFilePath: string): Promise<void>;
+
   // System Settings
   getSystemSetting<T>(key: string): Promise<T | null>;
   setSystemSetting<T>(key: string, value: T): Promise<void>;
@@ -346,6 +375,9 @@ export interface DirectTicketInput {
   template?: RepoConfig["defaultTemplate"];
   tddMode?: boolean;
   pauseBeforeRun?: boolean;
+  blueprintId?: string;
+  deliveryGatePolicy?: DeliveryGatePolicy;
+  riskThreshold?: number;
   startPoint?: string;
   allowedPaths?: string[];
   forbiddenPaths?: string[];

@@ -47,6 +47,8 @@ import type {
   LiveEventLogEntry,
   MemorySearchHit,
   RepoConfig,
+  ReviewCommentStatus,
+  SubmitReviewCommentsInput,
   Ticket,
   TicketDetailResponse,
 } from "../types.ts";
@@ -336,6 +338,20 @@ export function DeepDiveDrawer({
     setDetail(d);
     setRecall(r.chain);
     onRefresh();
+  };
+
+  const handleSubmitReview = async (input: SubmitReviewCommentsInput) => {
+    await api.submitReviewComments(ticketId, input);
+    const [d, r] = await Promise.all([api.getTicketDetail(ticketId), api.getRecall(ticketId)]);
+    setDetail(d);
+    setRecall(r.chain);
+    onRefresh();
+  };
+
+  const handleToggleCommentStatus = async (commentId: string, status: ReviewCommentStatus) => {
+    await api.updateReviewCommentStatus(commentId, status);
+    const d = await api.getTicketDetail(ticketId);
+    setDetail(d);
   };
 
   const reposById = new Map(repos.map((r) => [r.id, r]));
@@ -831,6 +847,65 @@ export function DeepDiveDrawer({
                 </div>
               )}
 
+              {ticket?.riskAssessment && (
+                <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3 text-xs space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-zinc-200">{t("drawer.riskTitle")}</span>
+                    <span
+                      className={`px-2 py-0.5 rounded border font-mono text-[10px] ${
+                        ticket.riskAssessment.level === "high"
+                          ? "border-rose-500/40 bg-rose-500/15 text-rose-300"
+                          : ticket.riskAssessment.level === "medium"
+                            ? "border-amber-500/40 bg-amber-500/15 text-amber-200"
+                            : "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+                      }`}
+                    >
+                      {ticket.riskAssessment.score}/100 ({ticket.riskAssessment.level}) · {ticket.riskAssessment.policy}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {ticket.riskAssessment.factors.map((f) => (
+                      <span
+                        key={f.key}
+                        className={`px-1.5 py-0.5 rounded border font-mono text-[10px] ${
+                          f.delta > 0
+                            ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
+                            : "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                        }`}
+                      >
+                        {f.delta > 0 ? `+${f.delta}` : f.delta} {f.label}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {ticket?.conflictContext && (
+                <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 p-3 text-xs space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-sky-200">{t("drawer.conflictTitle")}</span>
+                    <span
+                      className={`px-1.5 py-0.5 rounded border font-mono text-[10px] ${
+                        ticket.conflictContext.resolvedAutomatically
+                          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                          : "border-amber-500/30 bg-amber-500/10 text-amber-200"
+                      }`}
+                    >
+                      {ticket.conflictContext.resolvedAutomatically
+                        ? t("drawer.conflictAutoResolved")
+                        : t("drawer.conflictEscalated")}
+                    </span>
+                  </div>
+                  <div className="font-mono text-[10px] text-zinc-400">
+                    {ticket.conflictContext.baseBranch} ({ticket.conflictContext.mergeBaseSha.slice(0, 8)}) ·{" "}
+                    {ticket.conflictContext.conflictFiles.join(", ")}
+                  </div>
+                  {ticket.conflictContext.resolutionSummary && (
+                    <p className="text-[11px] text-zinc-300">{ticket.conflictContext.resolutionSummary}</p>
+                  )}
+                </div>
+              )}
+
               <div className="space-y-2">
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
                   {t("drawer.stageRunsTitle")}
@@ -839,40 +914,87 @@ export function DeepDiveDrawer({
                   <p className="text-xs text-zinc-500">{t("drawer.noStageRuns")}</p>
                 ) : (
                   <div className="space-y-2">
-                    {detail?.stageRuns.map((run) => (
-                      <div
-                        key={run.id}
-                        className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3 text-xs space-y-1.5"
-                      >
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono font-semibold text-indigo-300">
-                              {formatStage(run.stage, locale)}
-                            </span>
-                            <span className="px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono text-[10px]">
-                              {run.engine}
-                            </span>
-                            <span
-                              className={`px-1.5 py-0.5 rounded font-mono text-[10px] ${
-                                run.status === "completed"
-                                  ? "bg-emerald-500/15 text-emerald-300"
-                                  : run.status === "running"
-                                    ? "bg-amber-500/15 text-amber-300"
-                                    : "bg-rose-500/15 text-rose-300"
-                              }`}
-                            >
-                              {run.status}
-                            </span>
+                    {detail?.stageRuns.map((run) => {
+                      const spans = run.spans ?? [];
+                      const totalSpanMs = Math.max(
+                        1,
+                        spans.reduce((acc, sp) => acc + Math.max(1, sp.durationMs), 0),
+                      );
+                      const spanBarColor = (kind: string, status: string) => {
+                        if (status === "failed") return "bg-rose-500";
+                        if (kind === "workspace_prep") return "bg-slate-400";
+                        if (kind === "worker_turn") return "bg-indigo-500";
+                        if (kind === "static_verify") return "bg-emerald-500";
+                        if (kind === "smoke_cdp") return "bg-cyan-500";
+                        if (kind === "visual_diff") return "bg-amber-500";
+                        return "bg-sky-400";
+                      };
+
+                      return (
+                        <div
+                          key={run.id}
+                          className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3 text-xs space-y-1.5"
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono font-semibold text-indigo-300">
+                                {formatStage(run.stage, locale)}
+                              </span>
+                              <span className="px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono text-[10px]">
+                                {run.engine}
+                              </span>
+                              <span
+                                className={`px-1.5 py-0.5 rounded font-mono text-[10px] ${
+                                  run.status === "completed"
+                                    ? "bg-emerald-500/15 text-emerald-300"
+                                    : run.status === "running"
+                                      ? "bg-amber-500/15 text-amber-300"
+                                      : "bg-rose-500/15 text-rose-300"
+                                }`}
+                              >
+                                {run.status}
+                              </span>
+                            </div>
+                            <span className="font-mono text-zinc-500">${run.costUsd.toFixed(3)}</span>
                           </div>
-                          <span className="font-mono text-zinc-500">${run.costUsd.toFixed(3)}</span>
+                          {spans.length > 0 && (
+                            <div className="space-y-1 pt-0.5">
+                              <div className="flex items-center justify-between text-[10px] font-mono text-zinc-500">
+                                <span>{t("drawer.spansTitle")}</span>
+                                <span>{(totalSpanMs / 1000).toFixed(2)}s</span>
+                              </div>
+                              <div className="w-full h-2 rounded-full bg-zinc-950 border border-zinc-800 overflow-hidden flex gap-px">
+                                {spans.map((sp, idx) => (
+                                  <div
+                                    key={`${sp.kind}_${idx}`}
+                                    title={`${sp.label}: ${sp.durationMs}ms (${sp.status})`}
+                                    style={{
+                                      width: `${Math.max(4, (Math.max(1, sp.durationMs) / totalSpanMs) * 100)}%`,
+                                    }}
+                                    className={`h-full ${spanBarColor(sp.kind, sp.status)}`}
+                                  />
+                                ))}
+                              </div>
+                              <div className="flex flex-wrap gap-1.5">
+                                {spans.map((sp, idx) => (
+                                  <span
+                                    key={`${sp.kind}_lbl_${idx}`}
+                                    className="px-1.5 py-0.2 rounded bg-zinc-950 border border-zinc-800 font-mono text-[10px] text-zinc-400"
+                                  >
+                                    {sp.kind}:{sp.durationMs}ms
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {run.summary && (
+                            <p className="text-zinc-300 whitespace-pre-wrap leading-relaxed">
+                              {run.summary}
+                            </p>
+                          )}
                         </div>
-                        {run.summary && (
-                          <p className="text-zinc-300 whitespace-pre-wrap leading-relaxed">
-                            {run.summary}
-                          </p>
-                        )}
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -998,7 +1120,10 @@ export function DeepDiveDrawer({
                     return detail?.diff ?? "";
                   })()}
                   stageNotes={ticket.inlineMemory.stageNotes}
+                  reviewComments={detail?.reviewComments}
                   onSendFileFeedback={handleSendFileFeedback}
+                  onSubmitReview={handleSubmitReview}
+                  onToggleCommentStatus={handleToggleCommentStatus}
                 />
               </div>
             </div>

@@ -25,10 +25,12 @@ import { api } from "../api.ts";
 import { formatInboxKind, formatInboxStatus, useI18n } from "../i18n.tsx";
 import type {
   ArenaCandidateResult,
+  ConflictSemanticContext,
   EpicReplanProposal,
   InboxItem,
   PreviewSession,
   Ticket,
+  TicketRiskAssessment,
 } from "../types.ts";
 
 interface InboxViewProps {
@@ -284,6 +286,105 @@ export function InboxView({
                 <p className="text-xs text-zinc-300 whitespace-pre-wrap leading-relaxed bg-zinc-950/60 border border-zinc-800/80 rounded-lg p-3">
                   {item.summary}
                 </p>
+
+                {item.kind === "outbox_signoff" &&
+                  (() => {
+                    const risk =
+                      (item.contextPayload.riskAssessment as TicketRiskAssessment | undefined) ??
+                      ticket?.riskAssessment;
+                    if (!risk) return null;
+                    const badgeCls =
+                      risk.level === "high"
+                        ? "border-rose-500/40 bg-rose-500/15 text-rose-300"
+                        : risk.level === "medium"
+                          ? "border-amber-500/40 bg-amber-500/15 text-amber-200"
+                          : "border-emerald-500/40 bg-emerald-500/15 text-emerald-300";
+                    return (
+                      <div className="rounded-lg border border-zinc-800 bg-zinc-950/70 p-3 space-y-2 text-xs">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-semibold text-zinc-200">
+                            {t("inbox.riskCardTitle")}
+                          </span>
+                          <div className="flex items-center gap-2 font-mono text-[11px]">
+                            <span className={`px-2 py-0.5 rounded border ${badgeCls}`}>
+                              {risk.score}/100 ({risk.level.toUpperCase()})
+                            </span>
+                            <span className="text-zinc-400">
+                              {t("inbox.riskThreshold")}: {risk.threshold} · {risk.policy}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {risk.factors.map((f) => (
+                            <span
+                              key={f.key}
+                              title={f.detail}
+                              className={`px-2 py-0.5 rounded border font-mono text-[10px] ${
+                                f.delta > 0
+                                  ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
+                                  : "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                              }`}
+                            >
+                              {f.delta > 0 ? `+${f.delta}` : f.delta} {f.label}
+                              {f.detail ? ` (${f.detail})` : ""}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                {item.kind === "merge_conflict" &&
+                  (() => {
+                    const ctx =
+                      (item.contextPayload.conflictContext as ConflictSemanticContext | undefined) ??
+                      ticket?.conflictContext;
+                    if (!ctx) return null;
+                    return (
+                      <div className="rounded-lg border border-rose-500/30 bg-rose-500/5 p-3 space-y-2 text-xs">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-semibold text-rose-200">
+                            {t("inbox.conflictCardTitle")} ({ctx.conflictFiles.length})
+                          </span>
+                          <span className="font-mono text-[10px] text-zinc-400">
+                            {ctx.baseBranch} @ {ctx.mergeBaseSha.slice(0, 8)}
+                          </span>
+                        </div>
+                        {ctx.upstreamCommitSummaries.length > 0 && (
+                          <div className="text-[11px] text-zinc-400 space-y-0.5">
+                            <div className="font-medium text-zinc-300">
+                              {t("inbox.conflictUpstreamCommits")}:
+                            </div>
+                            {ctx.upstreamCommitSummaries.slice(0, 3).map((c, idx) => (
+                              <div key={idx} className="font-mono text-[10px] truncate">
+                                • {c}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        <div className="space-y-1.5">
+                          {ctx.fileHunks.slice(0, 3).map((h) => (
+                            <div
+                              key={h.filePath}
+                              className="rounded border border-zinc-800 bg-zinc-950/80 p-2 space-y-1 font-mono text-[10px]"
+                            >
+                              <div className="text-zinc-200 font-semibold">{h.filePath}</div>
+                              {h.oursSummary && (
+                                <pre className="text-sky-300/90 whitespace-pre-wrap overflow-x-auto max-h-24">
+                                  ours ({ctx.baseBranch}): {h.oursSummary}
+                                </pre>
+                              )}
+                              {h.theirsSummary && (
+                                <pre className="text-amber-300/90 whitespace-pre-wrap overflow-x-auto max-h-24">
+                                  theirs (ticket): {h.theirsSummary}
+                                </pre>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                 {item.kind === "mandate_violation" && item.contextPayload.canExpandMandate === true && (
                   <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200 flex flex-wrap items-center gap-2">

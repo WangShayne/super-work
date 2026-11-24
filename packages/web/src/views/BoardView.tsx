@@ -380,6 +380,19 @@ export function BoardView({
                               {t("board.badgeImpact")} ({tkt.impactSummary.directDependents.length})
                             </span>
                           )}
+                          {tkt.riskAssessment && (
+                            <span
+                              className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-mono ${
+                                tkt.riskAssessment.level === "high"
+                                  ? "bg-rose-500/10 border-rose-500/30 text-rose-300"
+                                  : tkt.riskAssessment.level === "medium"
+                                    ? "bg-amber-500/10 border-amber-500/30 text-amber-300"
+                                    : "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
+                              }`}
+                            >
+                              {t("board.badgeRisk")}:{tkt.riskAssessment.score}
+                            </span>
+                          )}
                           {tkt.mandate.allowedPaths.slice(0, 2).map((p) => (
                             <span
                               key={p}

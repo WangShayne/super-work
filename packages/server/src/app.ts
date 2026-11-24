@@ -21,6 +21,7 @@ import type {
   CreateEpicInput,
   DagNodeMutationInput,
   DeliveryChannel,
+  DeliveryGatePolicy,
   EngineModelProfile,
   EnginePreference,
   EpicDeliveryMode,
@@ -37,14 +38,17 @@ import type {
   ReasoningEffort,
   RepoConfig,
   RestoreCheckpointInput,
+  ReviewCommentStatus,
   RoutineScheduleKind,
   RoutineSpec,
   SandboxMode,
   SmokeCheckConfig,
   StageKind,
   StateStore,
+  SubmitReviewCommentsInput,
   SuperWorkKernel,
   SystemSetupConfig,
+  TaskBlueprint,
   Ticket,
   TicketStatus,
   WorkerEngineId,
@@ -172,6 +176,7 @@ function resolveEventTarget(
     case "stage_completed":
     case "watchdog_decision":
     case "verification_completed":
+    case "review_comment_updated":
       return { repoId: ticketMeta.get(event.ticketId)?.repoId, ticketId: event.ticketId };
     case "watchdog_signal":
       return {
@@ -460,6 +465,24 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       githubRepo: body.githubRepo,
       defaultTemplate: body.defaultTemplate ?? "standard",
       defaultTddMode: Boolean(body.defaultTddMode),
+      deliveryGatePolicy:
+        body.deliveryGatePolicy === "always_auto" ||
+        body.deliveryGatePolicy === "risk_gated" ||
+        body.deliveryGatePolicy === "always_signoff"
+          ? body.deliveryGatePolicy
+          : undefined,
+      riskThreshold:
+        typeof body.riskThreshold === "number" && Number.isFinite(body.riskThreshold)
+          ? Math.max(0, Math.min(100, Math.round(body.riskThreshold)))
+          : undefined,
+      sensitivePaths: Array.isArray(body.sensitivePaths)
+        ? body.sensitivePaths.map((s) => String(s).trim()).filter(Boolean)
+        : undefined,
+      blueprints: Array.isArray(body.blueprints)
+        ? body.blueprints.filter(
+            (b): b is TaskBlueprint => Boolean(b && typeof b.id === "string" && b.id.trim()),
+          )
+        : undefined,
       preferredImplementEngine: body.preferredImplementEngine ?? "claude",
       preferredReviewEngine: body.preferredReviewEngine ?? "codex",
       fallbackEngines: Array.isArray(body.fallbackEngines)
@@ -514,6 +537,10 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       | "fallbackEngines"
       | "previewCommand"
       | "sandboxMode"
+      | "deliveryGatePolicy"
+      | "riskThreshold"
+      | "sensitivePaths"
+      | "blueprints"
     > & {
       maxConcurrentWorkers?: number | null;
       dailyBudgetUsd?: number | null;
@@ -522,6 +549,10 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       fallbackEngines?: WorkerEngineId[] | null;
       previewCommand?: string | null;
       sandboxMode?: SandboxMode | null;
+      deliveryGatePolicy?: DeliveryGatePolicy | null;
+      riskThreshold?: number | null;
+      sensitivePaths?: string[] | null;
+      blueprints?: TaskBlueprint[] | null;
     };
     const updated: RepoConfig = {
       ...existing,
@@ -543,6 +574,34 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         patch.defaultTddMode !== undefined
           ? Boolean(patch.defaultTddMode)
           : existing.defaultTddMode,
+      deliveryGatePolicy:
+        patch.deliveryGatePolicy !== undefined
+          ? patch.deliveryGatePolicy === "always_auto" ||
+            patch.deliveryGatePolicy === "risk_gated" ||
+            patch.deliveryGatePolicy === "always_signoff"
+            ? patch.deliveryGatePolicy
+            : undefined
+          : existing.deliveryGatePolicy,
+      riskThreshold:
+        patch.riskThreshold !== undefined
+          ? typeof patch.riskThreshold === "number" && Number.isFinite(patch.riskThreshold)
+            ? Math.max(0, Math.min(100, Math.round(patch.riskThreshold)))
+            : undefined
+          : existing.riskThreshold,
+      sensitivePaths:
+        patch.sensitivePaths !== undefined
+          ? patch.sensitivePaths === null
+            ? undefined
+            : patch.sensitivePaths.map((s) => String(s).trim()).filter(Boolean)
+          : existing.sensitivePaths,
+      blueprints:
+        patch.blueprints !== undefined
+          ? patch.blueprints === null
+            ? undefined
+            : patch.blueprints.filter(
+                (b): b is TaskBlueprint => Boolean(b && typeof b.id === "string" && b.id.trim()),
+              )
+          : existing.blueprints,
       verificationCommands:
         patch.verificationCommands !== undefined
           ? patch.verificationCommands.map((s) => String(s).trim()).filter(Boolean)
@@ -599,6 +658,17 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     };
     await stateStore.upsertRepo(updated);
     return c.json({ repo: updated });
+  });
+
+  app.get("/api/repos/:id/blueprints", async (c) => {
+    const id = c.req.param("id");
+    try {
+      const blueprints = await kernel.listRepoBlueprints(id);
+      return c.json({ blueprints });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("not found") ? 404 : 400);
+    }
   });
 
   // --- Repo Contract (super-work.json) & Playbook ---
@@ -937,6 +1007,9 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       repoId?: string;
       title?: string;
       description?: string;
+      blueprintId?: string;
+      deliveryGatePolicy?: DeliveryGatePolicy;
+      riskThreshold?: number;
       template?: RepoConfig["defaultTemplate"];
       tddMode?: boolean;
       pauseBeforeRun?: boolean;
@@ -961,6 +1034,9 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         repoId: body.repoId,
         title: body.title,
         description: body.description,
+        blueprintId: body.blueprintId,
+        deliveryGatePolicy: body.deliveryGatePolicy,
+        riskThreshold: body.riskThreshold,
         template: body.template,
         tddMode: body.tddMode,
         pauseBeforeRun: body.pauseBeforeRun,
@@ -991,17 +1067,27 @@ export function createServerApp(deps: ServerAppDeps): Hono {
     if (!ticket) {
       return null;
     }
-    const [repo, allRepos, stageRuns, artifacts, inboxItems, outboxEntries, allPreviews, checkpoints] =
-      await Promise.all([
-        stateStore.getRepo(ticket.repoId),
-        stateStore.listRepos(),
-        stateStore.listStageRuns(ticket.id),
-        stateStore.listArtifacts(ticket.id),
-        stateStore.listInboxItems({ ticketId: ticket.id }),
-        stateStore.listOutboxEntries({ ticketId: ticket.id }),
-        kernel.listPreviews(ticket.repoId),
-        kernel.listTicketCheckpoints(ticket.id),
-      ]);
+    const [
+      repo,
+      allRepos,
+      stageRuns,
+      artifacts,
+      inboxItems,
+      outboxEntries,
+      allPreviews,
+      checkpoints,
+      reviewComments,
+    ] = await Promise.all([
+      stateStore.getRepo(ticket.repoId),
+      stateStore.listRepos(),
+      stateStore.listStageRuns(ticket.id),
+      stateStore.listArtifacts(ticket.id),
+      stateStore.listInboxItems({ ticketId: ticket.id }),
+      stateStore.listOutboxEntries({ ticketId: ticket.id }),
+      kernel.listPreviews(ticket.repoId),
+      kernel.listTicketCheckpoints(ticket.id),
+      kernel.listTicketReviewComments(ticket.id),
+    ]);
 
     const reposById = new Map(allRepos.map((r) => [r.id, r]));
     const upstreamDependencies: Array<{
@@ -1097,6 +1183,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       diff,
       previews,
       checkpoints,
+      reviewComments,
       ...(subtasks ? { subtasks } : {}),
       ...(upstreamDependencies.length > 0 ? { upstreamDependencies } : {}),
       ...(arenaCandidateDiffs ? { arenaCandidateDiffs } : {}),
@@ -1159,6 +1246,50 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       const msg = err instanceof Error ? err.message : String(err);
       return c.json({ error: msg }, msg.includes("not found") ? 404 : 400);
     }
+  });
+
+  // --- v1.0.0 Line-Anchored Review Studio ---
+  app.get("/api/tickets/:id/review-comments", async (c) => {
+    const id = c.req.param("id");
+    const ticket = await stateStore.getTicket(id);
+    if (!ticket) {
+      return c.json({ error: "Ticket not found" }, 404);
+    }
+    const comments = await kernel.listTicketReviewComments(id);
+    return c.json({ comments });
+  });
+
+  app.post("/api/tickets/:id/review-comments", async (c) => {
+    const id = c.req.param("id");
+    const body = (await c.req.json().catch(() => ({}))) as Partial<SubmitReviewCommentsInput>;
+    try {
+      const result = await kernel.submitTicketReviewComments(id, {
+        mode: body.mode === "request_changes" ? "request_changes" : "comment_only",
+        summaryNote: typeof body.summaryNote === "string" ? body.summaryNote : undefined,
+        comments: Array.isArray(body.comments) ? body.comments : [],
+        statusUpdates: Array.isArray(body.statusUpdates) ? body.statusUpdates : undefined,
+      });
+      if (body.mode === "request_changes") {
+        void kernel.tick();
+      }
+      return c.json(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("not found") ? 404 : 400);
+    }
+  });
+
+  app.patch("/api/review-comments/:commentId", async (c) => {
+    const commentId = c.req.param("commentId");
+    const body = (await c.req.json().catch(() => ({}))) as { status?: ReviewCommentStatus };
+    if (body.status !== "open" && body.status !== "resolved" && body.status !== "dismissed") {
+      return c.json({ error: "status must be 'open', 'resolved', or 'dismissed'" }, 400);
+    }
+    const comment = await kernel.updateReviewCommentStatus(commentId, body.status);
+    if (!comment) {
+      return c.json({ error: "Review comment not found" }, 404);
+    }
+    return c.json({ comment });
   });
 
   app.post("/api/tickets/:id/message", async (c) => {
@@ -1497,6 +1628,15 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         repoId: String(args.repoId ?? ""),
         title: String(args.title ?? ""),
         description: String(args.description ?? ""),
+        blueprintId: args.blueprintId ? String(args.blueprintId) : undefined,
+        deliveryGatePolicy:
+          args.deliveryGatePolicy === "always_auto" ||
+          args.deliveryGatePolicy === "risk_gated" ||
+          args.deliveryGatePolicy === "always_signoff"
+            ? args.deliveryGatePolicy
+            : undefined,
+        riskThreshold:
+          typeof args.riskThreshold === "number" ? args.riskThreshold : undefined,
         template: args.template as PipelineTemplateId | undefined,
         tddMode: args.tddMode !== undefined ? Boolean(args.tddMode) : undefined,
         pauseBeforeRun: args.pauseBeforeRun !== undefined ? Boolean(args.pauseBeforeRun) : undefined,
@@ -1671,12 +1811,62 @@ export function createServerApp(deps: ServerAppDeps): Hono {
       void kernel.tick();
       return { ticket };
     },
+    submitReviewComments: async (args) => {
+      const mode = args.mode === "request_changes" ? "request_changes" : "comment_only";
+      const result = await kernel.submitTicketReviewComments(String(args.ticketId ?? ""), {
+        mode,
+        summaryNote: typeof args.summaryNote === "string" ? args.summaryNote : undefined,
+        comments: Array.isArray(args.comments)
+          ? (args.comments as Array<Record<string, unknown>>).map((cm) => ({
+              filePath: String(cm.filePath ?? ""),
+              line: typeof cm.line === "number" ? cm.line : 1,
+              side: cm.side === "old" ? ("old" as const) : ("new" as const),
+              codeSnippet: typeof cm.codeSnippet === "string" ? cm.codeSnippet : undefined,
+              severity:
+                cm.severity === "blocker" || cm.severity === "major" || cm.severity === "nit"
+                  ? cm.severity
+                  : undefined,
+              body: String(cm.body ?? ""),
+            }))
+          : [],
+      });
+      if (mode === "request_changes") {
+        void kernel.tick();
+      }
+      return result;
+    },
+    systemDoctor: async (args) => kernel.runSystemDoctor({ fix: Boolean(args.fix) }),
+  });
+
+  // --- v1.0.0 System Doctor & SQLite Hot Backups ---
+  app.get("/api/system/doctor", async (c) => {
+    const report = await kernel.runSystemDoctor({ fix: false });
+    return c.json(report);
+  });
+
+  app.post("/api/system/doctor/fix", async (c) => {
+    const report = await kernel.runSystemDoctor({ fix: true });
+    return c.json(report);
+  });
+
+  app.get("/api/system/backups", async (c) => {
+    const backups = await kernel.listSystemBackups();
+    return c.json({ backups });
+  });
+
+  app.post("/api/system/backups", async (c) => {
+    try {
+      const backup = await kernel.createSystemBackup();
+      return c.json({ backup }, 201);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
   });
 
   app.get("/api/mcp", (c) => {
     return c.json({
       name: "super-work",
-      version: "0.9.0",
+      version: "1.0.0",
       transport: "streamable-http",
       endpoint: "/api/mcp",
     });

@@ -276,6 +276,8 @@ describe("v0.8.0 Core Modules (D.1 Spec Studio + A.2 Webhooks + A.1 MCP Protocol
       analyzeImpact: async () => ({ targetFiles: [], directDependents: [], transitiveDependents: [], neighborSignatures: [], contextPackMarkdown: "" }),
       manageCheckpoints: async () => ({ checkpoints: [] }),
       mutateDagNode: async () => ({ ticket: { id: "tkt_1" } }),
+      submitReviewComments: async () => ({ comments: [] }),
+      systemDoctor: async () => ({ healthy: true, checkedAt: "2026-01-01T00:00:00Z", fixesApplied: 0, items: [] }),
     };
 
     const initRes = (await handleMcpJsonRpcMessage(
@@ -288,7 +290,7 @@ describe("v0.8.0 Core Modules (D.1 Spec Studio + A.2 Webhooks + A.1 MCP Protocol
       host,
     )) as { result: { protocolVersion: string; serverInfo: { name: string; version: string } } };
     expect(initRes.result.protocolVersion).toBe("2024-11-05");
-    expect(initRes.result.serverInfo.version).toBe("0.9.0");
+    expect(initRes.result.serverInfo.version).toBe("1.0.0");
 
     const notifRes = await handleMcpJsonRpcMessage(
       { jsonrpc: "2.0", method: "notifications/initialized" },

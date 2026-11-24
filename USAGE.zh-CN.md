@@ -53,15 +53,15 @@ bun run setup -- --auto
   - `关闭 (off)`：仅记录事件触发器，不生成任务。
   - `观察 (observe)`（推荐初上手）：收到外部事件后仅**拟单**放入「决策收件箱」等你点头确认，绝不私自改代码。
   - `自动 (auto)`：收到高信噪比事件后直接入队执行，仅在触发审批门禁或异常升级时通知你。
-- **状态指示灯**：实时展示 `实时同步`（SSE）、`总控大脑`、`Agent 分工`、`防卡死巡检`、`PR 交付队列` 与 **`工作树池`（点击可查看在跑/可回收目录并一键 GC 清理）**，以及 `环境与模型` / `中文 / EN` 切换。
+- **状态指示灯**：实时展示 `实时同步`（SSE）、`总控大脑`、`Agent 分工`、`工程契约`（开启风险门禁时自动显示 `风险门禁`）、`防卡死巡检`、`PR 交付队列`、`定时巡航` 与 **`工作树池`（支持查看/一键 GC 或快捷跳转至系统自检）**，以及 `环境与模型`（内含 **系统自检与热备份** 标签页）/ `中文 / EN` 切换。
 
 ### 2. 三层信息结构与 `@super-work/cli`
-1. **决策收件箱（Attention Inbox）**：聚合 `观察模式拟单`、`方案审批门禁`、`越界授权拦截`（普通越界保留改动支持 **「一键扩权并继续」**）、`看门狗升级告警`、`合并冲突待解`、`PR 交付签发`、`每日预算触顶` 与 `PR 评审/CI 返修` 八类高信噪比决策。
-2. **态势看板（Mission Board）**：五列泳道实时展示所有任务状态、PR 关联徽章与 Epic 集成进度。
-3. **效能与预算（Metrics & Budget）**：展示当日预算水位进度条、端到端交付成功率、累计花费及按引擎统计的平均阶段耗时。
+1. **决策收件箱（Attention Inbox）**：聚合 `观察模式拟单`、`方案审批门禁`、`越界授权拦截`、`看门狗升级告警`、`合并冲突待解`（展示 **B.2 3-Way 双方改动与上游提交摘要**）、`PR 交付签发`（展示 **A.1 风险评分与因子拆解**）、`每日预算触顶`、`Arena 双引擎决胜`、`Epic 规划调整` 与 `PR 评审/CI 返修`。
+2. **态势看板（Mission Board）**：五列泳道实时展示风险分数标签（`风险:<score>`）、TDD/Auto-Arena 徽章、PR 关联与内嵌交互式 Epic DAG 拓扑画布。
+3. **效能与预算（Metrics & Budget）**：展示当日预算水位进度条、端到端交付成功率、累计花费及按引擎 × 任务类别的 Bandit 评分矩阵。
 4. **下钻详情抽屉 & 命令行客户端（`bun run cli` / `super-work`）**：
    - `super-work up [-d]`：前台或后台守护模式拉起本地服务。
-   - `super-work status`、`dispatch <title> -d <desc> [--wait]`、`epic <title> [--preview-only|--wait]`、`inbox list|approve <id> [--expand-mandate]`、`logs <ticketId> [-f]`、`watch [--repo <id>|--ticket <id>]`、`revert <ticketId>`、`playbook [list|add|toggle|delete|sync --export]`：在终端直接派单、管理经验库、追踪含 Epic 子任务的实时 SSE、回放历史日志或安全回滚合入（支持 `--token` / `SUPER_WORK_TOKEN` 与 `--auto-start`）。
+   - `super-work status`、`blueprints`、`dispatch <title> -d <desc> [--blueprint <id>] [--gate-policy <policy>] [--wait]`、`epic <title> [--preview-only|--wait]`、`doctor [--fix]`、`backup [list|create]`、`inbox list|approve <id> [--expand-mandate]`、`logs <ticketId> [-f]`、`watch`、`revert <ticketId>`、`playbook [list|add|toggle|delete|sync --export]`。
 
 ### 3. 三种流水线模板对比
 
@@ -86,16 +86,16 @@ bun run setup -- --auto
 3. 提交后，事件会先经过 `MasterAssessor` 评估，随后在 **决策收件箱** 出现一条「观察模式拟单」。
 4. 你可在输入框补充额外提示，点击 **「批准并继续」**，任务立即转入独立 `git worktree` 开始执行。
 
-### 3. 文件树 Diff 审查台、定向文件返修与链式召回
+### 3. 文件树 Diff 审查台、行级批注篮与链式召回
 1. 在态势看板点击任一任务，打开 **下钻详情抽屉**：
-   - **执行轨迹**：查看各阶段耗时、花费与实时 SSE 事件流。
-   - **Diff 与授权边界**：通过 **文件树 Diff 审查台** 查看分文件 `+`/`-` 统计与折叠代码块，浏览内联 **结构化对抗审查清单（`blocker`/`major`/`nit`）**，还可点击任意文件右上角 **「针对此文件返修」** 直接注入精准修复指令。
+   - **执行轨迹**：查看各阶段状态、花费、**阶段分片耗时瀑布流 (`StageSpan`)**、**风险评分卡片**、3-Way 冲突解析摘要与实时 SSE 事件流。
+   - **Diff 与授权边界**：通过 **文件树 Diff 审查台** 查看分文件 `+`/`-` 统计与折叠代码块，浏览内联 AI `review_comments` 与结构化审查清单，点击任意代码行左侧 **`+`** 锚定行级批注加入 **Review Basket**（支持「仅保存批注」或一键 **「打回修改 (Request Changes)」**，返修触及对应文件并过门禁后自动标为已解决），也可点击文件右上角 **「针对此文件返修」**。
    - **链式召回**：沿 `Trigger → Thread → Inline 摘要 → Spill 溢出产物`（含结构化 JSON `review_report` 与 `test_log`）溯源，或用 FTS5 搜索历史经验。
 2. **Thread 订阅追问**：在抽屉底部输入框发送补充要求，消息直接注入活跃 `Thread`。
 
-### 4. 工程契约 (`super-work.json`)、自进化经验库、主动通知与一键安全回滚
-- 在 **仓库偏好设置** 的三个标签页中，除设置并发/每日预算上限（触顶后推送 `每日预算触顶` 审批卡）外，还可在 **工程契约** 页配置 `setupCommands` Worktree 预热命令、附加 `forbiddenPaths`、仓库 `conventions` 并双向 **同步/导出 `super-work.json`**；在 **Playbook 经验库** 页查看、置顶、启停自动提炼或人类批注沉淀的避坑规则。
-- 在 **环境与模型设置** 底部配置 **主动注意力触达**（勾选 macOS 原生系统通知与飞书/Slack/Discord/通用 JSON Webhook，仅在 Inbox 阻塞待办、最终交付与任务失败时发送）并一键 **「发送测试通知」**。
+### 4. 任务蓝图、风险门禁、系统自检热备与安全回滚
+- **派发任务（Task Blueprints）与交付风险门禁（A.1 Risk Gate）**：派发弹窗支持一键选用 `tdd-bugfix`、`ui-visual-polish`、`safe-refactor`、`backend-feature`、`docs-chore` 或 `super-work.json` 自定义蓝图快速填充模板/TDD/路径与门禁策略；可在 **仓库偏好设置 → 运行时与策略** 配置 `deliveryGatePolicy`（`always_auto` / `risk_gated` / `always_signoff`）、风险阈值 `riskThreshold` 与高敏感路径 `sensitivePaths`。
+- 在 **环境与模型设置 → 系统自检与热备份** 标签页（或 CLI `super-work doctor --fix` / `super-work backup create`）运行 SQLite 完整性检测、孤儿 worktree/Preview/隐藏 Git Ref 一键自愈与零锁 `VACUUM INTO` 热备份。
 - 通过 `local_merge`（统一 `--no-ff` 生成单点 Merge Commit）本地合入主干后，抽屉顶部提供 **「一键安全回滚」** 按钮（或运行 `super-work revert <ticketId>`），执行非破坏性 `git revert -m 1` 生成反向提交。
 
 ---

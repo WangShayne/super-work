@@ -1,6 +1,8 @@
 import type {
+  BackupArchiveInfo,
   CasebookEntry,
   DagNodeMutationInput,
+  DeliveryGatePolicy,
   EnginePreference,
   EpicDecompositionPlan,
   EpicDeliveryMode,
@@ -22,8 +24,11 @@ import type {
   SpillArtifact,
   StageRun,
   SymbolImpactReport,
+  SystemDoctorReport,
+  TaskBlueprint,
   Ticket,
   TicketCheckpoint,
+  TicketReviewComment,
   WorkerEngineId,
 } from "@super-work/core";
 
@@ -124,6 +129,7 @@ export class SuperWorkHttpClient {
     outboxEntries: OutboxEntry[];
     diff: string;
     checkpoints?: TicketCheckpoint[];
+    reviewComments?: TicketReviewComment[];
     subtasks?: Ticket[];
     arenaCandidateDiffs?: Record<string, string>;
     upstreamDependencies?: Array<{
@@ -198,6 +204,9 @@ export class SuperWorkHttpClient {
     repoId: string;
     title: string;
     description: string;
+    blueprintId?: string;
+    deliveryGatePolicy?: DeliveryGatePolicy;
+    riskThreshold?: number;
     template?: PipelineTemplateId;
     tddMode?: boolean;
     pauseBeforeRun?: boolean;
@@ -213,6 +222,24 @@ export class SuperWorkHttpClient {
       method: "POST",
       body: JSON.stringify(payload),
     });
+  }
+
+  listBlueprints(repoId: string): Promise<{ blueprints: TaskBlueprint[] }> {
+    return this.request(`/api/repos/${encodeURIComponent(repoId)}/blueprints`);
+  }
+
+  runDoctor(fix = false): Promise<SystemDoctorReport> {
+    return this.request(fix ? "/api/system/doctor/fix" : "/api/system/doctor", {
+      method: fix ? "POST" : "GET",
+    });
+  }
+
+  listBackups(): Promise<{ backups: BackupArchiveInfo[] }> {
+    return this.request("/api/system/backups");
+  }
+
+  createBackup(): Promise<{ backup: BackupArchiveInfo }> {
+    return this.request("/api/system/backups", { method: "POST" });
   }
 
   analyzeRepoImpact(repoId: string, paths: string[]): Promise<{ report: SymbolImpactReport }> {

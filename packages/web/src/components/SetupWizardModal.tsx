@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { api } from "../api.ts";
 import { useI18n } from "../i18n.tsx";
+import { DoctorBackupPanel } from "./DoctorBackupPanel.tsx";
 import type {
   CliScanReport,
   DetectedCliTool,
@@ -31,6 +32,7 @@ interface SetupWizardModalProps {
   open: boolean;
   setupStatus: PublicSetupStatus | null;
   availableEngines: WorkerEngineId[];
+  initialTab?: "config" | "doctor";
   onClose: () => void;
   onSaved: (next: PublicSetupStatus) => Promise<void>;
 }
@@ -48,10 +50,12 @@ export function SetupWizardModal({
   open,
   setupStatus,
   availableEngines,
+  initialTab = "config",
   onClose,
   onSaved,
 }: SetupWizardModalProps) {
   const { t } = useI18n();
+  const [activeTab, setActiveTab] = useState<"config" | "doctor">(initialTab);
   const [scanReport, setScanReport] = useState<CliScanReport | null>(null);
   const [preset, setPreset] = useState<LlmProviderPreset>("deepseek");
   const [baseUrl, setBaseUrl] = useState("https://api.deepseek.com/v1");
@@ -88,6 +92,7 @@ export function SetupWizardModal({
 
   useEffect(() => {
     if (!open || !setupStatus) return;
+    setActiveTab(initialTab);
     const cfg = setupStatus.config;
     setScanReport(setupStatus.scanReport);
     setPreset(cfg.llmPreset);
@@ -326,7 +331,37 @@ export function SetupWizardModal({
           </button>
         </div>
 
+        {/* Tab Bar */}
+        <div className="px-6 pt-2.5 border-b border-zinc-800/80 bg-zinc-900/20 flex items-center gap-2 text-xs">
+          <button
+            type="button"
+            onClick={() => setActiveTab("config")}
+            className={`px-3 py-1.5 rounded-t-lg border-b-2 font-medium transition ${
+              activeTab === "config"
+                ? "border-indigo-500 text-indigo-300 bg-zinc-900/60"
+                : "border-transparent text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            {t("setup.tabConfig")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("doctor")}
+            className={`px-3 py-1.5 rounded-t-lg border-b-2 font-medium transition ${
+              activeTab === "doctor"
+                ? "border-emerald-500 text-emerald-300 bg-zinc-900/60"
+                : "border-transparent text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            {t("setup.tabDoctorBackup")}
+          </button>
+        </div>
+
         <div className="p-6 space-y-6 max-h-[80vh] overflow-y-auto text-xs">
+          {activeTab === "doctor" ? (
+            <DoctorBackupPanel />
+          ) : (
+            <>
           {isFirstRun && (
             <div className="p-3.5 rounded-xl border border-indigo-500/30 bg-indigo-500/10 text-indigo-200 flex items-start gap-2.5">
               <Sparkles className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5" />
@@ -869,36 +904,52 @@ export function SetupWizardModal({
               </div>
             </div>
           </section>
+            </>
+          )}
         </div>
 
         {/* Footer */}
         <div className="px-6 py-4 border-t border-zinc-800 bg-zinc-900/40 flex flex-wrap items-center justify-between gap-3">
-          <button
-            type="button"
-            onClick={handleTest}
-            disabled={testing}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 text-xs font-medium disabled:opacity-50"
-          >
-            {testing ? t("setup.testing") : t("setup.testConnection")}
-          </button>
+          {activeTab === "doctor" ? (
+            <div className="ml-auto">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2 rounded-lg border border-zinc-800 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 text-xs"
+              >
+                {t("modal.worktrees.close")}
+              </button>
+            </div>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={handleTest}
+                disabled={testing}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 text-xs font-medium disabled:opacity-50"
+              >
+                {testing ? t("setup.testing") : t("setup.testConnection")}
+              </button>
 
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-3.5 py-2 rounded-lg border border-zinc-800 text-zinc-400 hover:text-zinc-200 text-xs"
-            >
-              {t("setup.later")}
-            </button>
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={saving}
-              className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium disabled:opacity-50"
-            >
-              {saving ? t("setup.saving") : t("setup.saveActivate")}
-            </button>
-          </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="px-3.5 py-2 rounded-lg border border-zinc-800 text-zinc-400 hover:text-zinc-200 text-xs"
+                >
+                  {t("setup.later")}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSave}
+                  disabled={saving}
+                  className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium disabled:opacity-50"
+                >
+                  {saving ? t("setup.saving") : t("setup.saveActivate")}
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>

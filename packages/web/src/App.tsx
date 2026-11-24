@@ -1,16 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BarChart3, Clock, Inbox, Kanban } from "lucide-react";
 import { api, getAuthToken } from "./api.ts";
-import { DeepDiveDrawer } from "./components/DeepDiveDrawer.tsx";
 import { HeaderBar } from "./components/HeaderBar.tsx";
-import {
-  AddRepoModal,
-  DispatchTaskModal,
-  RepoSettingsModal,
-  SimulateEventModal,
-  WorktreeManagerModal,
-} from "./components/Modals.tsx";
-import { SetupWizardModal } from "./components/SetupWizardModal.tsx";
 import { useI18n } from "./i18n.tsx";
 import type {
   HealthResponse,
@@ -22,10 +13,38 @@ import type {
   RepoMetricsSummary,
   Ticket,
 } from "./types.ts";
-import { BoardView } from "./views/BoardView.tsx";
 import { InboxView } from "./views/InboxView.tsx";
-import { MetricsView } from "./views/MetricsView.tsx";
-import { RoutinesView } from "./views/RoutinesView.tsx";
+
+const BoardView = lazy(() =>
+  import("./views/BoardView.tsx").then((m) => ({ default: m.BoardView })),
+);
+const RoutinesView = lazy(() =>
+  import("./views/RoutinesView.tsx").then((m) => ({ default: m.RoutinesView })),
+);
+const MetricsView = lazy(() =>
+  import("./views/MetricsView.tsx").then((m) => ({ default: m.MetricsView })),
+);
+const DeepDiveDrawer = lazy(() =>
+  import("./components/DeepDiveDrawer.tsx").then((m) => ({ default: m.DeepDiveDrawer })),
+);
+const DispatchTaskModal = lazy(() =>
+  import("./components/DispatchTaskModal.tsx").then((m) => ({ default: m.DispatchTaskModal })),
+);
+const RepoSettingsModal = lazy(() =>
+  import("./components/RepoSettingsModal.tsx").then((m) => ({ default: m.RepoSettingsModal })),
+);
+const SetupWizardModal = lazy(() =>
+  import("./components/SetupWizardModal.tsx").then((m) => ({ default: m.SetupWizardModal })),
+);
+const SimulateEventModal = lazy(() =>
+  import("./components/Modals.tsx").then((m) => ({ default: m.SimulateEventModal })),
+);
+const AddRepoModal = lazy(() =>
+  import("./components/Modals.tsx").then((m) => ({ default: m.AddRepoModal })),
+);
+const WorktreeManagerModal = lazy(() =>
+  import("./components/Modals.tsx").then((m) => ({ default: m.WorktreeManagerModal })),
+);
 
 type MainTab = "inbox" | "board" | "routines" | "metrics";
 
@@ -53,6 +72,7 @@ export function App() {
   const [worktreesOpen, setWorktreesOpen] = useState(false);
   const [setupStatus, setSetupStatus] = useState<PublicSetupStatus | null>(null);
   const [setupOpen, setSetupOpen] = useState(false);
+  const [setupInitialTab, setSetupInitialTab] = useState<"config" | "doctor">("config");
   const setupAutoCheckedRef = useRef(false);
 
   const refreshAll = useCallback(async (repoFilter?: string) => {
@@ -145,6 +165,7 @@ export function App() {
       "outbox_failed",
       "worktrees_gc",
       "verification_completed",
+      "review_comment_updated",
     ];
 
     for (const name of eventNames) {
@@ -258,7 +279,10 @@ export function App() {
         }}
         onOpenRoutines={() => setActiveTab("routines")}
         onOpenWorktrees={() => setWorktreesOpen(true)}
-        onOpenSetup={() => setSetupOpen(true)}
+        onOpenSetup={() => {
+          setSetupInitialTab("config");
+          setSetupOpen(true);
+        }}
       />
 
       {/* Primary View Switcher */}
@@ -349,113 +373,126 @@ export function App() {
             }
           />
         ) : activeTab === "board" ? (
-          <BoardView
-            tickets={tickets}
-            allTickets={allTickets}
-            repos={repos}
-            selectedRepoId={selectedRepoId}
-            availableEngines={health?.availableEngines ?? ["mock"]}
-            onSelectTicket={(id) => setInspectedTicketId(id)}
-            onRefresh={() => void refreshAll(selectedRepoId || undefined)}
-          />
+          <Suspense fallback={null}>
+            <BoardView
+              tickets={tickets}
+              allTickets={allTickets}
+              repos={repos}
+              selectedRepoId={selectedRepoId}
+              availableEngines={health?.availableEngines ?? ["mock"]}
+              onSelectTicket={(id) => setInspectedTicketId(id)}
+              onRefresh={() => void refreshAll(selectedRepoId || undefined)}
+            />
+          </Suspense>
         ) : activeTab === "routines" ? (
-          <RoutinesView
-            repo={activeRepo}
-            availableEngines={health?.availableEngines ?? ["mock"]}
-            onInspectTicket={(id) => setInspectedTicketId(id)}
-            onRefreshParent={() => void refreshAll(selectedRepoId || undefined)}
-          />
+          <Suspense fallback={null}>
+            <RoutinesView
+              repo={activeRepo}
+              availableEngines={health?.availableEngines ?? ["mock"]}
+              onInspectTicket={(id) => setInspectedTicketId(id)}
+              onRefreshParent={() => void refreshAll(selectedRepoId || undefined)}
+            />
+          </Suspense>
         ) : (
-          <MetricsView metrics={metrics} repo={activeRepo} />
+          <Suspense fallback={null}>
+            <MetricsView metrics={metrics} repo={activeRepo} />
+          </Suspense>
         )}
       </main>
 
-      <DeepDiveDrawer
-        ticketId={inspectedTicketId}
-        allTickets={allTickets}
-        repos={repos}
-        repo={activeRepo}
-        liveEvents={liveEvents}
-        onClose={() => setInspectedTicketId(null)}
-        onSelectTicket={(id) => setInspectedTicketId(id)}
-        onRefresh={() => void refreshAll(selectedRepoId || undefined)}
-      />
+      <Suspense fallback={null}>
+        <DeepDiveDrawer
+          ticketId={inspectedTicketId}
+          allTickets={allTickets}
+          repos={repos}
+          repo={activeRepo}
+          liveEvents={liveEvents}
+          onClose={() => setInspectedTicketId(null)}
+          onSelectTicket={(id) => setInspectedTicketId(id)}
+          onRefresh={() => void refreshAll(selectedRepoId || undefined)}
+        />
 
-      {activeRepo && (
-        <>
-          <DispatchTaskModal
-            open={dispatchOpen}
-            repoId={activeRepo.id}
-            repos={repos}
-            allTickets={allTickets}
-            availableEngines={health?.availableEngines ?? ["mock"]}
-            defaultTemplate={activeRepo.defaultTemplate}
-            defaultTddMode={activeRepo.defaultTddMode}
-            defaultEngine={activeRepo.preferredImplementEngine}
-            onClose={() => setDispatchOpen(false)}
-            onSubmit={async (data) => {
-              await api.createTicket({ repoId: activeRepo.id, ...data });
-              await refreshAll(activeRepo.id);
-              setActiveTab("board");
-            }}
-            onCreateEpic={async (epicPayload) => {
-              await api.createEpic(epicPayload);
-              await refreshAll(activeRepo.id);
-              setActiveTab("board");
-            }}
-          />
+        {activeRepo && (
+          <>
+            <DispatchTaskModal
+              open={dispatchOpen}
+              repoId={activeRepo.id}
+              repos={repos}
+              allTickets={allTickets}
+              availableEngines={health?.availableEngines ?? ["mock"]}
+              defaultTemplate={activeRepo.defaultTemplate}
+              defaultTddMode={activeRepo.defaultTddMode}
+              defaultEngine={activeRepo.preferredImplementEngine}
+              onClose={() => setDispatchOpen(false)}
+              onSubmit={async (data) => {
+                await api.createTicket({ repoId: activeRepo.id, ...data });
+                await refreshAll(activeRepo.id);
+                setActiveTab("board");
+              }}
+              onCreateEpic={async (epicPayload) => {
+                await api.createEpic(epicPayload);
+                await refreshAll(activeRepo.id);
+                setActiveTab("board");
+              }}
+            />
 
-          <SimulateEventModal
-            open={simulateOpen}
-            onClose={() => setSimulateOpen(false)}
-            onSubmit={async (data) => {
-              await api.simulateTrigger({ repoId: activeRepo.id, ...data });
-              await refreshAll(activeRepo.id);
-            }}
-          />
-        </>
-      )}
+            <SimulateEventModal
+              open={simulateOpen}
+              onClose={() => setSimulateOpen(false)}
+              onSubmit={async (data) => {
+                await api.simulateTrigger({ repoId: activeRepo.id, ...data });
+                await refreshAll(activeRepo.id);
+              }}
+            />
+          </>
+        )}
 
-      <AddRepoModal
-        open={addRepoOpen}
-        onClose={() => setAddRepoOpen(false)}
-        onSubmit={async (data) => {
-          const res = await api.createRepo(data);
-          setSelectedRepoId(res.repo.id);
-          await refreshAll(res.repo.id);
-        }}
-      />
+        <AddRepoModal
+          open={addRepoOpen}
+          onClose={() => setAddRepoOpen(false)}
+          onSubmit={async (data) => {
+            const res = await api.createRepo(data);
+            setSelectedRepoId(res.repo.id);
+            await refreshAll(res.repo.id);
+          }}
+        />
 
-      <RepoSettingsModal
-        open={repoSettingsOpen}
-        repo={activeRepo ?? null}
-        initialTab={repoSettingsInitialTab}
-        availableEngines={health?.availableEngines ?? ["mock"]}
-        onClose={() => setRepoSettingsOpen(false)}
-        onRefresh={() => void refreshAll(selectedRepoId || undefined)}
-        onSubmit={async (repoId, patch) => {
-          await api.patchRepo(repoId, patch);
-          await refreshAll(repoId);
-        }}
-      />
+        <RepoSettingsModal
+          open={repoSettingsOpen}
+          repo={activeRepo ?? null}
+          initialTab={repoSettingsInitialTab}
+          availableEngines={health?.availableEngines ?? ["mock"]}
+          onClose={() => setRepoSettingsOpen(false)}
+          onRefresh={() => void refreshAll(selectedRepoId || undefined)}
+          onSubmit={async (repoId, patch) => {
+            await api.patchRepo(repoId, patch);
+            await refreshAll(repoId);
+          }}
+        />
 
-      <WorktreeManagerModal
-        open={worktreesOpen}
-        repoId={activeRepo?.id}
-        onClose={() => setWorktreesOpen(false)}
-        onChanged={() => void refreshAll(selectedRepoId || undefined)}
-      />
+        <WorktreeManagerModal
+          open={worktreesOpen}
+          repoId={activeRepo?.id}
+          onClose={() => setWorktreesOpen(false)}
+          onChanged={() => void refreshAll(selectedRepoId || undefined)}
+          onOpenDoctor={() => {
+            setSetupInitialTab("doctor");
+            setSetupOpen(true);
+          }}
+        />
 
-      <SetupWizardModal
-        open={setupOpen}
-        setupStatus={setupStatus}
-        availableEngines={health?.availableEngines ?? ["mock"]}
-        onClose={() => setSetupOpen(false)}
-        onSaved={async (next) => {
-          setSetupStatus(next);
-          await refreshAll(selectedRepoId || undefined);
-        }}
-      />
+        <SetupWizardModal
+          open={setupOpen}
+          setupStatus={setupStatus}
+          availableEngines={health?.availableEngines ?? ["mock"]}
+          initialTab={setupInitialTab}
+          onClose={() => setSetupOpen(false)}
+          onSaved={async (next) => {
+            setSetupStatus(next);
+            await refreshAll(selectedRepoId || undefined);
+          }}
+        />
+      </Suspense>
     </div>
   );
 }

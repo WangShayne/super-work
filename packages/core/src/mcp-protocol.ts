@@ -32,6 +32,8 @@ export interface McpToolHost {
   analyzeImpact(args: Record<string, unknown>): Promise<unknown>;
   manageCheckpoints(args: Record<string, unknown>): Promise<unknown>;
   mutateDagNode(args: Record<string, unknown>): Promise<unknown>;
+  submitReviewComments(args: Record<string, unknown>): Promise<unknown>;
+  systemDoctor(args: Record<string, unknown>): Promise<unknown>;
 }
 
 export const MCP_PROTOCOL_VERSIONS = ["2025-03-26", "2024-11-05"] as const;
@@ -74,6 +76,8 @@ export const MCP_TOOL_DEFINITIONS = [
         arenaMode: { type: "boolean" },
         arenaCompetitorEngine: { type: "string", enum: ["claude", "codex", "opencode", "mock"] },
         tddMode: { type: "boolean" },
+        blueprintId: { type: "string" },
+        deliveryGatePolicy: { type: "string", enum: ["always_auto", "risk_gated", "always_signoff"] },
         acceptanceCriteria: { type: "array", items: { type: "string" } },
       },
       required: ["repoId", "title", "description"],
@@ -241,6 +245,46 @@ export const MCP_TOOL_DEFINITIONS = [
       required: ["ticketId"],
     },
   },
+  {
+    name: "submit_review_comments",
+    description:
+      "Attach line-anchored review comments to a Ticket diff and optionally trigger precision rework (mode='request_changes').",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticketId: { type: "string" },
+        mode: { type: "string", enum: ["comment_only", "request_changes"] },
+        summaryNote: { type: "string" },
+        comments: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              filePath: { type: "string" },
+              line: { type: "number" },
+              side: { type: "string", enum: ["new", "old"] },
+              codeSnippet: { type: "string" },
+              severity: { type: "string", enum: ["blocker", "major", "nit"] },
+              body: { type: "string" },
+            },
+            required: ["filePath", "line", "body"],
+          },
+        },
+      },
+      required: ["ticketId", "mode"],
+    },
+  },
+  {
+    name: "system_doctor",
+    description:
+      "Run daemon diagnostics across SQLite integrity, worktrees, stale previews, and hidden checkpoint refs (pass fix=true to auto-clean).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fix: { type: "boolean", description: "Automatically clean detected orphan resources" },
+      },
+    },
+  },
 ] as const;
 
 export const MCP_RESOURCES = [
@@ -325,7 +369,7 @@ async function handleSingleMcpRequest(
             },
             serverInfo: {
               name: "super-work",
-              version: "0.9.0",
+              version: "1.0.0",
             },
           },
         };
@@ -392,6 +436,12 @@ async function handleSingleMcpRequest(
               break;
             case "mutate_dag_node":
               result = await host.mutateDagNode(args);
+              break;
+            case "submit_review_comments":
+              result = await host.submitReviewComments(args);
+              break;
+            case "system_doctor":
+              result = await host.systemDoctor(args);
               break;
             default:
               return jsonRpcError(id, -32601, `Unknown tool: ${name}`);

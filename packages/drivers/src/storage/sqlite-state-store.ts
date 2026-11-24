@@ -3,6 +3,9 @@ import type {
   ArenaCandidateResult,
   CasebookEntry,
   ChainOfRecall,
+  ConflictFileHunk,
+  ConflictSemanticContext,
+  DeliveryGatePolicy,
   EngineMetricRow,
   EpicReplanProposal,
   HandoverDigest,
@@ -14,18 +17,25 @@ import type {
   PlaybookEntry,
   RepoConfig,
   RepoMetricsSummary,
+  ReviewCommentAuthor,
+  ReviewCommentStatus,
+  ReviewSeverity,
   RoutineRun,
   RoutineSpec,
   SmokeCheckConfig,
   SpillArtifact,
   StageKind,
   StageRun,
+  StageSpan,
   StateStore,
+  TaskBlueprint,
   TaskCategory,
   Thread,
   Ticket,
   TicketCheckpoint,
   TicketImpactSummary,
+  TicketReviewComment,
+  TicketRiskAssessment,
   TicketStatus,
   Trigger,
   WorkerEngineId,
@@ -326,6 +336,24 @@ export class SqliteStateStore implements StateStore {
       );
       CREATE INDEX IF NOT EXISTS idx_checkpoints_ticket
         ON ticket_checkpoints(ticket_id, created_at ASC);
+
+      CREATE TABLE IF NOT EXISTS ticket_review_comments (
+        id TEXT PRIMARY KEY,
+        ticket_id TEXT NOT NULL,
+        repo_id TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        line INTEGER NOT NULL,
+        side TEXT,
+        code_snippet TEXT,
+        author TEXT NOT NULL,
+        severity TEXT,
+        body TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_review_comments_ticket
+        ON ticket_review_comments(ticket_id, created_at ASC);
     `);
 
     const repoCols = this.db
@@ -498,6 +526,45 @@ export class SqliteStateStore implements StateStore {
     if (!existingCols.has("pause_before_run")) {
       this.db.run("ALTER TABLE tickets ADD COLUMN pause_before_run INTEGER NOT NULL DEFAULT 0;");
     }
+    if (!existingCols.has("blueprint_id")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN blueprint_id TEXT;");
+    }
+    if (!existingCols.has("delivery_gate_policy")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN delivery_gate_policy TEXT;");
+    }
+    if (!existingCols.has("risk_threshold")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN risk_threshold INTEGER;");
+    }
+    if (!existingCols.has("risk_assessment_json")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN risk_assessment_json TEXT;");
+    }
+    if (!existingCols.has("conflict_resolution_count")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN conflict_resolution_count INTEGER NOT NULL DEFAULT 0;");
+    }
+    if (!existingCols.has("conflict_context_json")) {
+      this.db.run("ALTER TABLE tickets ADD COLUMN conflict_context_json TEXT;");
+    }
+
+    if (!existingRepoCols.has("delivery_gate_policy")) {
+      this.db.run("ALTER TABLE repos ADD COLUMN delivery_gate_policy TEXT;");
+    }
+    if (!existingRepoCols.has("risk_threshold")) {
+      this.db.run("ALTER TABLE repos ADD COLUMN risk_threshold INTEGER;");
+    }
+    if (!existingRepoCols.has("sensitive_paths_json")) {
+      this.db.run("ALTER TABLE repos ADD COLUMN sensitive_paths_json TEXT;");
+    }
+    if (!existingRepoCols.has("blueprints_json")) {
+      this.db.run("ALTER TABLE repos ADD COLUMN blueprints_json TEXT;");
+    }
+
+    const stageRunCols = this.db
+      .query("PRAGMA table_info(stage_runs)")
+      .all() as Array<{ name: string }>;
+    const existingStageRunCols = new Set(stageRunCols.map((c) => c.name));
+    if (!existingStageRunCols.has("spans_json")) {
+      this.db.run("ALTER TABLE stage_runs ADD COLUMN spans_json TEXT;");
+    }
 
     const playbookCols = this.db
       .query("PRAGMA table_info(playbook_entries)")
@@ -525,8 +592,9 @@ export class SqliteStateStore implements StateStore {
           conventions, contract_synced_hash, contract_synced_at,
           default_delivery_channel,
           max_concurrent_workers, daily_budget_usd, daily_budget_override_usd, daily_budget_override_date,
+          delivery_gate_policy, risk_threshold, sensitive_paths_json, blueprints_json,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           root_path = excluded.root_path,
@@ -553,6 +621,10 @@ export class SqliteStateStore implements StateStore {
           daily_budget_usd = excluded.daily_budget_usd,
           daily_budget_override_usd = excluded.daily_budget_override_usd,
           daily_budget_override_date = excluded.daily_budget_override_date,
+          delivery_gate_policy = excluded.delivery_gate_policy,
+          risk_threshold = excluded.risk_threshold,
+          sensitive_paths_json = excluded.sensitive_paths_json,
+          blueprints_json = excluded.blueprints_json,
           updated_at = excluded.updated_at`,
       )
       .run(
@@ -582,6 +654,10 @@ export class SqliteStateStore implements StateStore {
         repo.dailyBudgetUsd ?? null,
         repo.dailyBudgetOverrideUsd ?? null,
         repo.dailyBudgetOverrideDate ?? null,
+        repo.deliveryGatePolicy ?? null,
+        repo.riskThreshold ?? null,
+        repo.sensitivePaths ? JSON.stringify(repo.sensitivePaths) : null,
+        repo.blueprints ? JSON.stringify(repo.blueprints) : null,
         repo.createdAt,
         repo.updatedAt,
       );
@@ -688,10 +764,11 @@ export class SqliteStateStore implements StateStore {
           arena_mode, arena_competitor_engine, arena_candidates_json, arena_winner_id,
           tdd_mode, locked_test_paths_json, spec_test_commit_sha, spec_test_challenge_count,
           task_category, routing_rationale, auto_arena_escalated, impact_summary_json, pause_before_run,
+          blueprint_id, delivery_gate_policy, risk_threshold, risk_assessment_json, conflict_resolution_count, conflict_context_json,
           routine_id, epic_replan_count, epic_replan_history_json, pending_epic_replan_json,
           model_override, effort_override,
           inline_memory_json, handover_digest_json, cost_usd, priority, error_message, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           title = excluded.title,
           description = excluded.description,
@@ -732,6 +809,12 @@ export class SqliteStateStore implements StateStore {
           auto_arena_escalated = excluded.auto_arena_escalated,
           impact_summary_json = excluded.impact_summary_json,
           pause_before_run = excluded.pause_before_run,
+          blueprint_id = excluded.blueprint_id,
+          delivery_gate_policy = excluded.delivery_gate_policy,
+          risk_threshold = excluded.risk_threshold,
+          risk_assessment_json = excluded.risk_assessment_json,
+          conflict_resolution_count = excluded.conflict_resolution_count,
+          conflict_context_json = excluded.conflict_context_json,
           routine_id = excluded.routine_id,
           epic_replan_count = excluded.epic_replan_count,
           epic_replan_history_json = excluded.epic_replan_history_json,
@@ -789,6 +872,12 @@ export class SqliteStateStore implements StateStore {
         ticket.autoArenaEscalated ? 1 : 0,
         ticket.impactSummary ? JSON.stringify(ticket.impactSummary) : null,
         ticket.pauseBeforeRun ? 1 : 0,
+        ticket.blueprintId ?? null,
+        ticket.deliveryGatePolicy ?? null,
+        ticket.riskThreshold ?? null,
+        ticket.riskAssessment ? JSON.stringify(ticket.riskAssessment) : null,
+        ticket.conflictResolutionCount ?? 0,
+        ticket.conflictContext ? JSON.stringify(ticket.conflictContext) : null,
         ticket.routineId ?? null,
         ticket.epicReplanCount ?? 0,
         ticket.epicReplanHistory ? JSON.stringify(ticket.epicReplanHistory) : null,
@@ -845,15 +934,16 @@ export class SqliteStateStore implements StateStore {
       .query(
         `INSERT INTO stage_runs (
           id, ticket_id, stage, engine, status, native_session_id, cost_usd,
-          started_at, completed_at, summary, spill_transcript_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          started_at, completed_at, summary, spill_transcript_id, spans_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           status = excluded.status,
           native_session_id = excluded.native_session_id,
           cost_usd = excluded.cost_usd,
           completed_at = excluded.completed_at,
           summary = excluded.summary,
-          spill_transcript_id = excluded.spill_transcript_id`,
+          spill_transcript_id = excluded.spill_transcript_id,
+          spans_json = excluded.spans_json`,
       )
       .run(
         stageRun.id,
@@ -867,6 +957,7 @@ export class SqliteStateStore implements StateStore {
         stageRun.completedAt ?? null,
         stageRun.summary ?? null,
         stageRun.spillTranscriptId ?? null,
+        stageRun.spans ? JSON.stringify(stageRun.spans) : null,
       );
   }
 
@@ -1722,6 +1813,81 @@ export class SqliteStateStore implements StateStore {
       .run(cleanedAt, ticketId);
   }
 
+  // --- Line-Anchored Review Comments (v1.0.0 B.1) ---
+  async listReviewComments(ticketId: string): Promise<TicketReviewComment[]> {
+    const rows = this.db
+      .query("SELECT * FROM ticket_review_comments WHERE ticket_id = ? ORDER BY created_at ASC")
+      .all(ticketId) as Record<string, unknown>[];
+    return rows.map(mapReviewCommentRow);
+  }
+
+  async saveReviewComment(comment: TicketReviewComment): Promise<void> {
+    this.db
+      .query(
+        `INSERT INTO ticket_review_comments (
+          id, ticket_id, repo_id, file_path, line, side, code_snippet, author, severity, body, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          file_path = excluded.file_path,
+          line = excluded.line,
+          side = excluded.side,
+          code_snippet = excluded.code_snippet,
+          author = excluded.author,
+          severity = excluded.severity,
+          body = excluded.body,
+          status = excluded.status,
+          updated_at = excluded.updated_at`,
+      )
+      .run(
+        comment.id,
+        comment.ticketId,
+        comment.repoId,
+        comment.filePath,
+        comment.line,
+        comment.side ?? null,
+        comment.codeSnippet ?? null,
+        comment.author,
+        comment.severity ?? null,
+        comment.body,
+        comment.status,
+        comment.createdAt,
+        comment.updatedAt,
+      );
+  }
+
+  async updateReviewCommentStatus(
+    id: string,
+    status: ReviewCommentStatus,
+    updatedAt: string,
+  ): Promise<TicketReviewComment | null> {
+    this.db
+      .query("UPDATE ticket_review_comments SET status = ?, updated_at = ? WHERE id = ?")
+      .run(status, updatedAt, id);
+    const row = this.db
+      .query("SELECT * FROM ticket_review_comments WHERE id = ?")
+      .get(id) as Record<string, unknown> | null;
+    return row ? mapReviewCommentRow(row) : null;
+  }
+
+  // --- System Maintenance (v1.0.0 C.1) ---
+  async checkDatabaseIntegrity(): Promise<{ ok: boolean; detail: string; walPages?: number }> {
+    const row = this.db.query("PRAGMA quick_check;").get() as { quick_check?: string } | null;
+    const status = String(row?.quick_check ?? "ok");
+    const walRow = this.db.query("PRAGMA wal_checkpoint(PASSIVE);").get() as
+      | { busy?: number; log?: number; checkpointed?: number }
+      | null;
+    return {
+      ok: status === "ok",
+      detail: status === "ok" ? "SQLite integrity quick_check passed" : `quick_check: ${status}`,
+      walPages: walRow?.log !== undefined ? Number(walRow.log) : undefined,
+    };
+  }
+
+  async vacuumIntoBackup(destFilePath: string): Promise<void> {
+    const escaped = destFilePath.replace(/'/g, "''");
+    this.db.run(`VACUUM INTO '${escaped}';`);
+  }
+
   // --- System Settings ---
   async getSystemSetting<T>(key: string): Promise<T | null> {
     const row = this.db
@@ -1801,6 +1967,19 @@ function mapRepoRow(r: Record<string, unknown>): RepoConfig {
         : undefined,
     dailyBudgetOverrideDate: r.daily_budget_override_date
       ? String(r.daily_budget_override_date)
+      : undefined,
+    deliveryGatePolicy: r.delivery_gate_policy
+      ? (String(r.delivery_gate_policy) as DeliveryGatePolicy)
+      : undefined,
+    riskThreshold:
+      r.risk_threshold !== null && r.risk_threshold !== undefined
+        ? Number(r.risk_threshold)
+        : undefined,
+    sensitivePaths: r.sensitive_paths_json
+      ? (JSON.parse(String(r.sensitive_paths_json)) as string[])
+      : undefined,
+    blueprints: r.blueprints_json
+      ? (JSON.parse(String(r.blueprints_json)) as TaskBlueprint[])
       : undefined,
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
@@ -1901,6 +2080,24 @@ function mapTicketRow(r: Record<string, unknown>): Ticket {
       ? (JSON.parse(String(r.impact_summary_json)) as TicketImpactSummary)
       : undefined,
     pauseBeforeRun: Boolean(r.pause_before_run),
+    blueprintId: r.blueprint_id ? String(r.blueprint_id) : undefined,
+    deliveryGatePolicy: r.delivery_gate_policy
+      ? (String(r.delivery_gate_policy) as DeliveryGatePolicy)
+      : undefined,
+    riskThreshold:
+      r.risk_threshold !== null && r.risk_threshold !== undefined
+        ? Number(r.risk_threshold)
+        : undefined,
+    riskAssessment: r.risk_assessment_json
+      ? (JSON.parse(String(r.risk_assessment_json)) as TicketRiskAssessment)
+      : undefined,
+    conflictResolutionCount:
+      r.conflict_resolution_count !== null && r.conflict_resolution_count !== undefined
+        ? Number(r.conflict_resolution_count)
+        : undefined,
+    conflictContext: r.conflict_context_json
+      ? (JSON.parse(String(r.conflict_context_json)) as ConflictSemanticContext)
+      : undefined,
     routineId: r.routine_id ? String(r.routine_id) : undefined,
     epicReplanCount:
       r.epic_replan_count !== null && r.epic_replan_count !== undefined
@@ -1941,6 +2138,7 @@ function mapStageRunRow(r: Record<string, unknown>): StageRun {
     completedAt: r.completed_at ? String(r.completed_at) : undefined,
     summary: r.summary ? String(r.summary) : undefined,
     spillTranscriptId: r.spill_transcript_id ? String(r.spill_transcript_id) : undefined,
+    spans: r.spans_json ? (JSON.parse(String(r.spans_json)) as StageSpan[]) : undefined,
   };
 }
 
@@ -2107,5 +2305,23 @@ function mapCheckpointRow(r: Record<string, unknown>): TicketCheckpoint {
         : Boolean(r.verification_passed),
     createdAt: String(r.created_at),
     cleanedAt: r.cleaned_at ? String(r.cleaned_at) : undefined,
+  };
+}
+
+function mapReviewCommentRow(r: Record<string, unknown>): TicketReviewComment {
+  return {
+    id: String(r.id),
+    ticketId: String(r.ticket_id),
+    repoId: String(r.repo_id),
+    filePath: String(r.file_path),
+    line: Number(r.line),
+    side: r.side ? (String(r.side) as "new" | "old") : undefined,
+    codeSnippet: r.code_snippet ? String(r.code_snippet) : undefined,
+    author: String(r.author) as ReviewCommentAuthor,
+    severity: r.severity ? (String(r.severity) as ReviewSeverity) : undefined,
+    body: String(r.body),
+    status: String(r.status) as ReviewCommentStatus,
+    createdAt: String(r.created_at),
+    updatedAt: String(r.updated_at),
   };
 }

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type {
   BrowserCheckConfig,
+  ConflictFileHunk,
   RepoConfig,
   RepoContractFile,
   RevertResult,
@@ -806,6 +807,74 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     };
   }
 
+  async prepareThreeWayConflictWorkspace(input: {
+    worktreePath: string;
+    rootRepoPath: string;
+    baseBranch: string;
+  }): Promise<{
+    mergeBaseSha: string;
+    upstreamCommitSummaries: string[];
+    conflictFiles: string[];
+    fileHunks: ConflictFileHunk[];
+  }> {
+    const { worktreePath, baseBranch } = input;
+    const theirsHead = await this.getHeadCommitSha(worktreePath, "HEAD");
+    const mbRes = await runGit(["merge-base", theirsHead, baseBranch], worktreePath);
+    const mergeBaseSha = mbRes.stdout.trim() || theirsHead;
+
+    const logRes = await runGit(
+      ["log", "--oneline", "-n", "8", `${mergeBaseSha}..${baseBranch}`],
+      worktreePath,
+    );
+    const upstreamCommitSummaries = logRes.stdout
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    // Move worktree HEAD onto updated baseBranch so worker sees latest upstream code
+    await runGit(["reset", "--hard", baseBranch], worktreePath);
+    await runGit(["update-ref", this.worktreeBaseRef(worktreePath), "HEAD"], worktreePath);
+
+    // Perform 3-way merge without committing to populate conflict markers + auto-merge clean files
+    await runGit(["merge", "--no-commit", "--no-ff", theirsHead], worktreePath);
+    const conflictListRes = await runGit(
+      ["diff", "--name-only", "--diff-filter=U"],
+      worktreePath,
+    );
+    const conflictFiles = conflictListRes.stdout
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    // Clear MERGE_HEAD & unmerged index stages while preserving working tree files & conflict markers
+    await runGit(["merge", "--quit"], worktreePath);
+    await runGit(["reset", "HEAD"], worktreePath);
+
+    const fileHunks: ConflictFileHunk[] = [];
+    for (const filePath of conflictFiles.slice(0, 8)) {
+      const oursRes = await runGit(
+        ["diff", mergeBaseSha, baseBranch, "--", filePath],
+        worktreePath,
+      );
+      const theirsRes = await runGit(
+        ["diff", mergeBaseSha, theirsHead, "--", filePath],
+        worktreePath,
+      );
+      fileHunks.push({
+        filePath,
+        oursSummary: oursRes.stdout.trim().slice(0, 1200),
+        theirsSummary: theirsRes.stdout.trim().slice(0, 1200),
+      });
+    }
+
+    return {
+      mergeBaseSha,
+      upstreamCommitSummaries,
+      conflictFiles,
+      fileHunks,
+    };
+  }
+
   async mergeBranchToBase(input: {
     rootRepoPath: string;
     baseBranch: string;
@@ -1198,6 +1267,30 @@ export class GitWorktreeProvider implements WorkspaceProvider {
       if (del.exitCode === 0) count += 1;
     }
     return count;
+  }
+
+  async listCheckpointRefs(rootRepoPath: string): Promise<Array<{ ref: string; ticketId: string }>> {
+    const prefix = "refs/super-work/checkpoints/";
+    const listRes = await runGit(["for-each-ref", "--format=%(refname)", prefix], rootRepoPath);
+    if (listRes.exitCode !== 0 || !listRes.stdout.trim()) {
+      return [];
+    }
+    const items: Array<{ ref: string; ticketId: string }> = [];
+    for (const raw of listRes.stdout.split("\n")) {
+      const ref = raw.trim();
+      if (!ref || !ref.startsWith(prefix)) continue;
+      const rest = ref.slice(prefix.length);
+      const ticketId = rest.split("/")[0]?.trim() ?? "";
+      if (ticketId) {
+        items.push({ ref, ticketId });
+      }
+    }
+    return items;
+  }
+
+  async deleteGitRef(rootRepoPath: string, ref: string): Promise<boolean> {
+    const res = await runGit(["update-ref", "-d", ref], rootRepoPath);
+    return res.exitCode === 0;
   }
 
   async cleanupWorkspace(worktreePath: string, rootRepoPath?: string): Promise<void> {

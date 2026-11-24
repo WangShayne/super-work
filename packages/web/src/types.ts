@@ -111,6 +111,9 @@ export interface RepoContractFile {
   version?: 1;
   defaultTemplate?: PipelineTemplateId;
   defaultTddMode?: boolean;
+  deliveryGatePolicy?: DeliveryGatePolicy;
+  riskThreshold?: number;
+  sensitivePaths?: string[];
   verificationCommands?: string[];
   setupCommands?: string[];
   smokeCheck?: SmokeCheckConfig;
@@ -119,6 +122,7 @@ export interface RepoContractFile {
   forbiddenPaths?: string[];
   conventions?: string;
   playbook?: SharedPlaybookRuleSpec[];
+  blueprints?: TaskBlueprint[];
 }
 
 export type RoutineScheduleKind = "interval" | "cron";
@@ -304,6 +308,10 @@ export interface RepoConfig {
   githubRepo?: string;
   defaultTemplate: PipelineTemplateId;
   defaultTddMode?: boolean;
+  deliveryGatePolicy?: DeliveryGatePolicy;
+  riskThreshold?: number;
+  sensitivePaths?: string[];
+  blueprints?: TaskBlueprint[];
   preferredImplementEngine: EnginePreference;
   preferredReviewEngine: WorkerEngineId;
   fallbackEngines?: WorkerEngineId[];
@@ -406,6 +414,12 @@ export interface Ticket {
   epicReplanCount?: number;
   epicReplanHistory?: EpicReplanProposal[];
   pendingEpicReplan?: EpicReplanProposal;
+  blueprintId?: string;
+  deliveryGatePolicy?: DeliveryGatePolicy;
+  riskThreshold?: number;
+  riskAssessment?: TicketRiskAssessment;
+  conflictContext?: ConflictSemanticContext;
+  conflictResolutionCount?: number;
   inlineMemory: InlineMemory;
   handoverDigest?: HandoverDigest;
   costUsd: number;
@@ -427,6 +441,7 @@ export interface StageRun {
   completedAt?: string;
   summary?: string;
   spillTranscriptId?: string;
+  spans?: StageSpan[];
 }
 
 export interface SpillArtifact {
@@ -648,6 +663,7 @@ export interface TicketDetailResponse {
   diff: string;
   previews?: PreviewSession[];
   checkpoints?: TicketCheckpoint[];
+  reviewComments?: TicketReviewComment[];
   subtasks?: Ticket[];
   arenaCandidateDiffs?: Record<string, string>;
   upstreamDependencies?: Array<{
@@ -801,4 +817,133 @@ export interface RepoMetricsSummary {
   deliveryRate: number;
   byEngine: EngineMetricRow[];
   engineMatrix?: EngineCategoryMetricRow[];
+}
+
+export type DeliveryGatePolicy = "always_auto" | "risk_gated" | "always_signoff";
+
+export interface RiskFactor {
+  key: string;
+  label: string;
+  delta: number;
+  detail?: string;
+}
+
+export interface TicketRiskAssessment {
+  score: number;
+  level: "low" | "medium" | "high";
+  requiresSignoff: boolean;
+  threshold: number;
+  policy: DeliveryGatePolicy;
+  factors: RiskFactor[];
+  evaluatedAt: string;
+}
+
+export type ReviewCommentAuthor = "human" | "ai";
+export type ReviewCommentStatus = "open" | "resolved" | "dismissed";
+
+export interface TicketReviewComment {
+  id: string;
+  ticketId: string;
+  repoId: string;
+  filePath: string;
+  line: number;
+  side: "new" | "old";
+  codeSnippet?: string;
+  author: ReviewCommentAuthor;
+  severity?: ReviewSeverity;
+  body: string;
+  status: ReviewCommentStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SubmitReviewCommentsInput {
+  mode: "comment_only" | "request_changes";
+  summaryNote?: string;
+  comments: Array<{
+    filePath: string;
+    line: number;
+    side?: "new" | "old";
+    codeSnippet?: string;
+    severity?: ReviewSeverity;
+    body: string;
+  }>;
+  statusUpdates?: Array<{ id: string; status: ReviewCommentStatus }>;
+}
+
+export type StageSpanKind =
+  | "workspace_prep"
+  | "worker_turn"
+  | "static_verify"
+  | "smoke_cdp"
+  | "visual_diff"
+  | "git_ops";
+
+export interface StageSpan {
+  kind: StageSpanKind;
+  label: string;
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  status: "ok" | "failed" | "skipped";
+  detail?: string;
+}
+
+export interface TaskBlueprint {
+  id: string;
+  name: string;
+  description: string;
+  template: PipelineTemplateId;
+  preferredEngine?: EnginePreference;
+  tddMode?: boolean;
+  visualDiffMode?: VisualDiffMode;
+  deliveryGatePolicy?: DeliveryGatePolicy;
+  riskThreshold?: number;
+  allowedPaths?: string[];
+  promptPrefix?: string;
+  acceptanceCriteria?: string[];
+  builtin?: boolean;
+}
+
+export interface ConflictFileHunk {
+  filePath: string;
+  oursSummary: string;
+  theirsSummary: string;
+}
+
+export interface ConflictSemanticContext {
+  baseBranch: string;
+  mergeBaseSha: string;
+  upstreamCommitSummaries: string[];
+  conflictFiles: string[];
+  fileHunks: ConflictFileHunk[];
+  resolvedAutomatically?: boolean;
+  resolutionSummary?: string;
+}
+
+export interface DoctorCheckItem {
+  id: string;
+  category: "sqlite" | "worktree" | "preview" | "git_ref";
+  status: "ok" | "warn" | "error";
+  title: string;
+  detail: string;
+  fixable: boolean;
+  fixed?: boolean;
+  count?: number;
+}
+
+export interface SystemDoctorReport {
+  healthy: boolean;
+  checkedAt: string;
+  fixesApplied: number;
+  items: DoctorCheckItem[];
+}
+
+export interface BackupArchiveInfo {
+  id: string;
+  filename: string;
+  filePath: string;
+  byteSize: number;
+  createdAt: string;
+  dbIntegrityOk?: boolean;
 }

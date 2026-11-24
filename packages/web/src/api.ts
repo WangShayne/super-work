@@ -1,9 +1,11 @@
 import type {
+  BackupArchiveInfo,
   CasebookEntry,
   ChainOfRecall,
   CliScanReport,
   DagNodeMutationInput,
   DeliveryChannel,
+  DeliveryGatePolicy,
   EngineModelProfile,
   EnginePreference,
   EpicDecompositionPlan,
@@ -27,6 +29,7 @@ import type {
   RepoContractFile,
   RepoMetricsSummary,
   RestoreCheckpointInput,
+  ReviewCommentStatus,
   RoutinePresetTemplate,
   RoutineRun,
   RoutineScheduleKind,
@@ -35,10 +38,14 @@ import type {
   SmokeCheckConfig,
   SpecClarificationResult,
   SpillArtifact,
+  SubmitReviewCommentsInput,
   SymbolImpactReport,
+  SystemDoctorReport,
+  TaskBlueprint,
   Ticket,
   TicketCheckpoint,
   TicketDetailResponse,
+  TicketReviewComment,
   WorkerEngineId,
   WorktreeGcResult,
 } from "./types.ts";
@@ -88,6 +95,9 @@ export const api = {
     githubRepo?: string;
     defaultTemplate?: PipelineTemplateId;
     defaultTddMode?: boolean;
+    deliveryGatePolicy?: DeliveryGatePolicy;
+    riskThreshold?: number;
+    sensitivePaths?: string[];
     preferredImplementEngine?: EnginePreference;
     preferredReviewEngine?: WorkerEngineId;
     verificationCommands?: string[];
@@ -105,6 +115,10 @@ export const api = {
       | "fallbackEngines"
       | "previewCommand"
       | "sandboxMode"
+      | "deliveryGatePolicy"
+      | "riskThreshold"
+      | "sensitivePaths"
+      | "blueprints"
     > & {
       maxConcurrentWorkers?: number | null;
       dailyBudgetUsd?: number | null;
@@ -113,6 +127,10 @@ export const api = {
       fallbackEngines?: WorkerEngineId[] | null;
       previewCommand?: string | null;
       sandboxMode?: SandboxMode | null;
+      deliveryGatePolicy?: DeliveryGatePolicy | null;
+      riskThreshold?: number | null;
+      sensitivePaths?: string[] | null;
+      blueprints?: TaskBlueprint[] | null;
     },
   ) =>
     request<{ repo: RepoConfig }>(`/api/repos/${id}`, {
@@ -245,6 +263,9 @@ export const api = {
     repoId: string;
     title: string;
     description: string;
+    blueprintId?: string;
+    deliveryGatePolicy?: DeliveryGatePolicy;
+    riskThreshold?: number;
     template?: PipelineTemplateId;
     tddMode?: boolean;
     pauseBeforeRun?: boolean;
@@ -258,6 +279,44 @@ export const api = {
     effortOverride?: ReasoningEffort;
     acceptanceCriteria?: string[];
   }) => request<{ ticket: Ticket }>("/api/tickets", { method: "POST", body: JSON.stringify(payload) }),
+
+  listBlueprints: (repoId: string) =>
+    request<{ blueprints: TaskBlueprint[] }>(`/api/repos/${encodeURIComponent(repoId)}/blueprints`),
+
+  listReviewComments: (ticketId: string) =>
+    request<{ comments: TicketReviewComment[] }>(
+      `/api/tickets/${encodeURIComponent(ticketId)}/review-comments`,
+    ),
+
+  submitReviewComments: (ticketId: string, payload: SubmitReviewCommentsInput) =>
+    request<{ comments: TicketReviewComment[]; ticket: Ticket }>(
+      `/api/tickets/${encodeURIComponent(ticketId)}/review-comments`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+    ),
+
+  updateReviewCommentStatus: (commentId: string, status: ReviewCommentStatus) =>
+    request<{ comment: TicketReviewComment }>(
+      `/api/review-comments/${encodeURIComponent(commentId)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      },
+    ),
+
+  runDoctor: (fix = false) =>
+    request<SystemDoctorReport>(fix ? "/api/system/doctor/fix" : "/api/system/doctor", {
+      method: fix ? "POST" : "GET",
+    }),
+
+  listBackups: () => request<{ backups: BackupArchiveInfo[] }>("/api/system/backups"),
+
+  createBackup: () =>
+    request<{ backup: BackupArchiveInfo }>("/api/system/backups", {
+      method: "POST",
+    }),
 
   analyzeRepoImpact: (repoId: string, paths: string[]) =>
     request<{ report: SymbolImpactReport }>(`/api/repos/${encodeURIComponent(repoId)}/impact`, {

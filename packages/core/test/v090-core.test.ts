@@ -285,12 +285,14 @@ describe("v0.9.0 Core Modules (A.1 TDD Guard + B.2 Bandit Router + D.1 DAG Cycle
     expect(detectTicketDependencyCycle(deps, "C", ["A"])).toBe(false);
   });
 
-  it("MCP v0.9.0: exposes 13 tools and advertises version 0.9.0 on initialize", async () => {
-    expect(MCP_TOOL_DEFINITIONS.length).toBe(13);
+  it("MCP v1.0.0: exposes 15 tools and advertises version 1.0.0 on initialize", async () => {
+    expect(MCP_TOOL_DEFINITIONS.length).toBe(15);
     const toolNames = MCP_TOOL_DEFINITIONS.map((t) => t.name);
     expect(toolNames).toContain("analyze_impact");
     expect(toolNames).toContain("manage_checkpoints");
     expect(toolNames).toContain("mutate_dag_node");
+    expect(toolNames).toContain("submit_review_comments");
+    expect(toolNames).toContain("system_doctor");
 
     const host: McpToolHost = {
       clarifySpec: async () => ({}),
@@ -306,6 +308,8 @@ describe("v0.9.0 Core Modules (A.1 TDD Guard + B.2 Bandit Router + D.1 DAG Cycle
       analyzeImpact: async (args) => ({ ok: true, args }),
       manageCheckpoints: async () => ({}),
       mutateDagNode: async () => ({}),
+      submitReviewComments: async () => ({}),
+      systemDoctor: async () => ({}),
       getHealth: async () => ({}),
       listRepos: async () => [],
     };
@@ -314,12 +318,12 @@ describe("v0.9.0 Core Modules (A.1 TDD Guard + B.2 Bandit Router + D.1 DAG Cycle
       { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
       host,
     )) as { result?: { serverInfo?: { version?: string } } };
-    expect(initResp.result?.serverInfo?.version).toBe("0.9.0");
+    expect(initResp.result?.serverInfo?.version).toBe("1.0.0");
 
     const listResp = (await handleMcpJsonRpcMessage(
       { jsonrpc: "2.0", id: 2, method: "tools/list" },
       host,
     )) as { result?: { tools?: Array<{ name: string }> } };
-    expect(listResp.result?.tools?.length).toBe(13);
+    expect(listResp.result?.tools?.length).toBe(15);
   });
 });

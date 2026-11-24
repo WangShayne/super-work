@@ -170,9 +170,13 @@ export function HeaderBar({
   );
   const vdiffMode = activeRepo?.smokeCheck?.browserCheck?.visualDiffMode ?? "auto";
   const vdiffActive = smokeEnabled && Boolean(activeRepo?.smokeCheck?.browserCheck?.enabled) && vdiffMode !== "off";
+  const riskGateActive =
+    activeRepo?.deliveryGatePolicy === "risk_gated" ||
+    activeRepo?.deliveryGatePolicy === "always_signoff";
   const contractExtras = [
     activeRepo?.defaultTddMode ? t("header.tddOn") : "",
     vdiffActive ? t("header.vdiffOn") : "",
+    riskGateActive ? t("header.riskGateTag") : "",
   ].filter(Boolean);
 
   return (
@@ -188,7 +192,7 @@ export function HeaderBar({
               <div className="flex items-center gap-2">
                 <span className="font-semibold tracking-tight text-zinc-100 text-sm">super-work</span>
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
-                  v0.9
+                  v1.0
                 </span>
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700/60">
                   {t("brand.badge")}
