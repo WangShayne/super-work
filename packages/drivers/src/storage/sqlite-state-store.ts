@@ -6,8 +6,10 @@ import type {
   EngineMetricRow,
   EvalCase,
   EvalRunRecord,
+  FlightEvent,
   GoalCampaign,
   GoalCampaignWave,
+  Milestone,
   InboxItem,
   InboxItemStatus,
   MemorySearchHit,
@@ -40,10 +42,12 @@ import {
   mapCheckpointRow,
   mapEvalCaseRow,
   mapEvalRunRow,
+  mapFlightEventRow,
   mapGoalCampaignRow,
   mapGoalCampaignWaveRow,
   mapInboxRow,
   mapMergeTrainEntryRow,
+  mapMilestoneRow,
   mapOutboxRow,
   mapPlaybookRow,
   mapRepoRow,
@@ -98,8 +102,9 @@ export class SqliteStateStore implements StateStore {
           default_delivery_channel,
           max_concurrent_workers, daily_budget_usd, daily_budget_override_usd, daily_budget_override_date,
           delivery_gate_policy, risk_threshold, sensitive_paths_json, blueprints_json,
+          verification_strategy,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           root_path = excluded.root_path,
@@ -131,6 +136,7 @@ export class SqliteStateStore implements StateStore {
           risk_threshold = excluded.risk_threshold,
           sensitive_paths_json = excluded.sensitive_paths_json,
           blueprints_json = excluded.blueprints_json,
+          verification_strategy = excluded.verification_strategy,
           updated_at = excluded.updated_at`,
       )
       .run(
@@ -165,6 +171,7 @@ export class SqliteStateStore implements StateStore {
         repo.riskThreshold ?? null,
         repo.sensitivePaths ? JSON.stringify(repo.sensitivePaths) : null,
         repo.blueprints ? JSON.stringify(repo.blueprints) : null,
+        repo.verificationStrategy ?? null,
         repo.createdAt,
         repo.updatedAt,
       );
@@ -273,11 +280,11 @@ export class SqliteStateStore implements StateStore {
           task_category, routing_rationale, auto_arena_escalated, impact_summary_json, pause_before_run,
           blueprint_id, delivery_gate_policy, risk_threshold, risk_assessment_json, conflict_resolution_count, conflict_context_json,
           clarification_count, steer_count,
-          routine_id, campaign_id, campaign_wave, target_branch, barrier_group_id, base_head_at_rebase,
+          routine_id, campaign_id, milestone_id, campaign_wave, target_branch, barrier_group_id, base_head_at_rebase,
           epic_replan_count, epic_replan_history_json, pending_epic_replan_json,
           model_override, effort_override,
           inline_memory_json, handover_digest_json, cost_usd, priority, error_message, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?,?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           title = excluded.title,
           description = excluded.description,
@@ -328,6 +335,7 @@ export class SqliteStateStore implements StateStore {
           steer_count = excluded.steer_count,
           routine_id = excluded.routine_id,
           campaign_id = excluded.campaign_id,
+          milestone_id = excluded.milestone_id,
           campaign_wave = excluded.campaign_wave,
           target_branch = excluded.target_branch,
           barrier_group_id = excluded.barrier_group_id,
@@ -398,6 +406,7 @@ export class SqliteStateStore implements StateStore {
         ticket.steerCount ?? 0,
         ticket.routineId ?? null,
         ticket.campaignId ?? null,
+        ticket.milestoneId ?? null,
         ticket.campaignWave ?? null,
         ticket.targetBranch ?? null,
         ticket.barrierGroupId ?? null,
@@ -1303,6 +1312,105 @@ export class SqliteStateStore implements StateStore {
       }
     });
     tx();
+  }
+
+  // --- Flight Recorder (Direction D) ---
+  async recordFlightEvent(event: FlightEvent): Promise<void> {
+    this.db
+      .query(
+        `INSERT OR REPLACE INTO flight_events (
+          id, repo_id, ticket_id, kind, engine, summary, saved_ms, metadata_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        event.id,
+        event.repoId ?? null,
+        event.ticketId ?? null,
+        event.kind,
+        event.engine ?? null,
+        event.summary,
+        event.savedMs != null ? Math.round(event.savedMs) : null,
+        event.metadata ? JSON.stringify(event.metadata) : null,
+        event.createdAt,
+      );
+  }
+
+  async listFlightEvents(filter?: {
+    repoId?: string;
+    limit?: number;
+    sinceIso?: string;
+  }): Promise<FlightEvent[]> {
+    const clauses: string[] = [];
+    const params: (string | number)[] = [];
+    if (filter?.repoId) {
+      clauses.push("repo_id = ?");
+      params.push(filter.repoId);
+    }
+    if (filter?.sinceIso) {
+      clauses.push("created_at >= ?");
+      params.push(filter.sinceIso);
+    }
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+    const limit = Math.min(Math.max(Math.floor(filter?.limit ?? 50), 1), 1000);
+    const rows = this.db
+      .query(`SELECT * FROM flight_events ${where} ORDER BY created_at DESC LIMIT ?`)
+      .all(...params, limit) as Record<string, unknown>[];
+    return rows.map(mapFlightEventRow);
+  }
+
+  // --- Milestones (v1.4.0 Direction B) ---
+  async saveMilestone(m: Milestone): Promise<void> {
+    this.db
+      .query(
+        `INSERT INTO milestones (
+          id, repo_id, name, target_version, status, items_json, release_notes_zh,
+          release_notes_en, digest_summary, released_commit_sha, released_tag, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          target_version = excluded.target_version,
+          status = excluded.status,
+          items_json = excluded.items_json,
+          release_notes_zh = excluded.release_notes_zh,
+          release_notes_en = excluded.release_notes_en,
+          digest_summary = excluded.digest_summary,
+          released_commit_sha = excluded.released_commit_sha,
+          released_tag = excluded.released_tag,
+          updated_at = excluded.updated_at`,
+      )
+      .run(
+        m.id,
+        m.repoId,
+        m.name,
+        m.targetVersion ?? null,
+        m.status,
+        JSON.stringify(m.items),
+        m.releaseNotesZh ?? null,
+        m.releaseNotesEn ?? null,
+        m.digestSummary ?? null,
+        m.releasedCommitSha ?? null,
+        m.releasedTag ?? null,
+        m.createdAt,
+        m.updatedAt,
+      );
+  }
+
+  async getMilestone(id: string): Promise<Milestone | null> {
+    const row = this.db.query("SELECT * FROM milestones WHERE id = ?").get(id) as
+      | Record<string, unknown>
+      | null;
+    return row ? mapMilestoneRow(row) : null;
+  }
+
+  async listMilestones(repoId?: string): Promise<Milestone[]> {
+    const rows = (
+      repoId
+        ? this.db
+            .query("SELECT * FROM milestones WHERE repo_id = ? ORDER BY created_at DESC")
+            .all(repoId)
+        : this.db.query("SELECT * FROM milestones ORDER BY created_at DESC").all()
+    ) as Record<string, unknown>[];
+    return rows.map(mapMilestoneRow);
   }
 
   // --- Worktree Checkpoints (D.2) ---

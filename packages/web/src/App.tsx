@@ -191,6 +191,7 @@ export function App() {
       "review_comment_updated",
       "eval_run_updated",
       "campaign_updated",
+      "milestone_updated",
       "merge_train_updated",
       "lifecycle_hook_executed",
       "self_reload_updated",

@@ -3,6 +3,7 @@ import { basename, join, resolve } from "node:path";
 import type {
   BackupArchiveInfo,
   BackupRestoreResult,
+  CodeHotspotItem,
   DoctorCheckItem,
   SystemDoctorReport,
 } from "../types.ts";
@@ -168,11 +169,34 @@ export async function runSystemDoctor(
     });
   }
 
+  // 5. Codebase hotspot radar (informational; never marks the report unhealthy)
+  const hotspots: CodeHotspotItem[] = [];
+  if (ctx.workspace.scanCodeHotspots) {
+    for (const repo of repos) {
+      const found = await ctx.workspace.scanCodeHotspots(repo.rootPath, 1500).catch(() => []);
+      for (const h of found) hotspots.push({ ...h, repoId: h.repoId ?? repo.id });
+    }
+    hotspots.sort((a, b) => b.lineCount - a.lineCount);
+    hotspots.length = Math.min(hotspots.length, 20);
+    if (hotspots.length > 0) {
+      items.push({
+        id: "code_hotspots",
+        category: "code",
+        status: "warn",
+        title: "Codebase Hotspot Radar",
+        detail: `${hotspots.length} source file(s) exceed 1500 lines (largest: ${hotspots[0]!.filePath}, ${hotspots[0]!.lineCount} lines)`,
+        fixable: false,
+        count: hotspots.length,
+      });
+    }
+  }
+
   return {
-    healthy: items.every((i) => i.status === "ok"),
+    healthy: items.every((i) => i.status === "ok" || i.id === "code_hotspots"),
     checkedAt: nowIso(),
     fixesApplied,
     items,
+    ...(ctx.workspace.scanCodeHotspots ? { hotspots } : {}),
   };
 }
 

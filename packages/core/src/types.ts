@@ -45,6 +45,8 @@ export type SmokeTriggerMode = "every_gate" | "delivery_only";
 
 export type SandboxMode = "off" | "balanced" | "strict";
 
+export type VerificationStrategy = "always_full" | "impact_scoped";
+
 export type VisualDiffMode = "off" | "auto" | "enforce" | "informational";
 
 export interface BrowserInteractionStep {
@@ -124,12 +126,21 @@ export interface VerificationCommandOutput {
   output: string;
 }
 
+export interface ScopedVerificationInfo {
+  usedScoped: boolean;
+  commandsRun: string[];
+  skippedFullCommands?: string[];
+  estimatedSavedMs?: number;
+  reason: string;
+}
+
 export interface VerificationRunResult {
   ok: boolean;
   results: VerificationCommandOutput[];
   failedCommand?: string;
   summary: string;
   smokeResult?: SmokeCheckResult;
+  scopedVerification?: ScopedVerificationInfo;
 }
 
 export interface HandoverDigest {
@@ -232,6 +243,7 @@ export interface RepoContractFile {
   riskThreshold?: number;
   sensitivePaths?: string[];
   verificationCommands?: string[];
+  verificationStrategy?: VerificationStrategy;
   setupCommands?: string[];
   hooks?: LifecycleHooksConfig;
   smokeCheck?: SmokeCheckConfig;
@@ -525,7 +537,7 @@ export interface ConflictSemanticContext {
 
 export interface DoctorCheckItem {
   id: string;
-  category: "sqlite" | "worktree" | "preview" | "git_ref";
+  category: "sqlite" | "worktree" | "preview" | "git_ref" | "code";
   status: "ok" | "warn" | "error";
   title: string;
   detail: string;
@@ -534,11 +546,21 @@ export interface DoctorCheckItem {
   count?: number;
 }
 
+export interface CodeHotspotItem {
+  filePath: string;
+  lineCount: number;
+  exportedSymbolCount: number;
+  dependentCount: number;
+  packageDir: string;
+  repoId?: string;
+}
+
 export interface SystemDoctorReport {
   healthy: boolean;
   checkedAt: string;
   fixesApplied: number;
   items: DoctorCheckItem[];
+  hotspots?: CodeHotspotItem[];
 }
 
 export interface BackupArchiveInfo {
@@ -601,6 +623,7 @@ export interface RepoConfig {
   fallbackEngines?: WorkerEngineId[];
   autoCleanupWorktree?: boolean;
   verificationCommands?: string[];
+  verificationStrategy?: VerificationStrategy;
   setupCommands?: string[];
   hooks?: LifecycleHooksConfig;
   smokeCheck?: SmokeCheckConfig;
@@ -733,6 +756,7 @@ export interface Ticket {
   steerCount?: number;
   routineId?: string;
   campaignId?: string;
+  milestoneId?: string;
   campaignWave?: number;
   targetBranch?: string;
   barrierGroupId?: string;
@@ -817,7 +841,8 @@ export type InboxItemKind =
   | "arena_tiebreak"
   | "epic_replan"
   | "clarification_request"
-  | "campaign_paused";
+  | "campaign_paused"
+  | "milestone_ready";
 
 export type InboxItemStatus = "pending" | "approved" | "rejected";
 
@@ -1064,6 +1089,13 @@ export type KernelEvent =
       repoId: string;
       campaign?: GoalCampaign;
       wave?: GoalCampaignWave;
+      deletedId?: string;
+      timestamp: string;
+    }
+  | {
+      type: "milestone_updated";
+      repoId: string;
+      milestone?: Milestone;
       deletedId?: string;
       timestamp: string;
     }
@@ -1636,5 +1668,99 @@ export interface SelfReloadState {
   activeRunsRemaining?: number;
   summary?: string;
   error?: string;
+  updatedAt: string;
+}
+
+// --- Flight Recorder & Run Digest (Direction D) ---
+
+export type FlightEventKind =
+  | "canary_passed"
+  | "reload_completed"
+  | "canary_rolled_back"
+  | "scoped_gate_run"
+  | "watchdog_switch"
+  | "milestone_ready"
+  | "milestone_released";
+
+export interface FlightEvent {
+  id: string;
+  repoId?: string;
+  ticketId?: string;
+  kind: FlightEventKind;
+  engine?: WorkerEngineId;
+  summary: string;
+  savedMs?: number;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface RunDigestEngineBreakdown {
+  engine: WorkerEngineId;
+  tickets: number;
+  delivered: number;
+  failedOrReverted: number;
+  passRate: number;
+  totalCostUsd: number;
+  avgDurationMs: number;
+}
+
+export interface RunDigestReport {
+  generatedAt: string;
+  repoId?: string;
+  windowHours: number;
+  ticketSummary: {
+    total: number;
+    delivered: number;
+    reverted: number;
+    escalated: number;
+    active: number;
+    totalCostUsd: number;
+  };
+  gateSavings: { scopedRuns: number; totalSavedMs: number };
+  selfHost: {
+    canaryPassed: number;
+    reloadsCompleted: number;
+    canaryRolledBack: number;
+    watchdogSwitches: number;
+  };
+  engines: RunDigestEngineBreakdown[];
+  events: FlightEvent[];
+  markdownZh: string;
+  markdownEn: string;
+}
+
+// --- Milestone Backlog Waves & Controlled Release (v1.4.0 Direction B) ---
+
+export type MilestoneStatus = "active" | "ready_to_release" | "released" | "cancelled";
+
+export interface MilestoneItem {
+  id: string;
+  index: number;
+  requirement: string;
+  title: string;
+  route: RequirementRouteKind;
+  ticketId?: string;
+  epicId?: string;
+  campaignId?: string;
+  waveIndex: number;
+  allowedPaths: string[];
+  dependsOnIndices: number[];
+  status: "pending" | "running" | "delivered" | "failed" | "needs_human";
+  summary?: string;
+}
+
+export interface Milestone {
+  id: string;
+  repoId: string;
+  name: string;
+  targetVersion?: string;
+  status: MilestoneStatus;
+  items: MilestoneItem[];
+  releaseNotesZh?: string;
+  releaseNotesEn?: string;
+  digestSummary?: string;
+  releasedCommitSha?: string;
+  releasedTag?: string;
+  createdAt: string;
   updatedAt: string;
 }

@@ -230,7 +230,7 @@ describe("v1.3.0 Core Modules (Smart Intake, Non-Starving Outbox, Gemini Routing
   });
 
   it("MCP 1.3.0: exposes 23 tools including dispatch_requirement & manage_self_host and negotiates 1.3.0", async () => {
-    expect(MCP_TOOL_DEFINITIONS).toHaveLength(23);
+    expect(MCP_TOOL_DEFINITIONS).toHaveLength(25);
     const dispatchTool = MCP_TOOL_DEFINITIONS.find((t) => t.name === "dispatch_requirement");
     const selfHostTool = MCP_TOOL_DEFINITIONS.find((t) => t.name === "manage_self_host");
     expect(dispatchTool).toBeDefined();
@@ -269,7 +269,7 @@ describe("v1.3.0 Core Modules (Smart Intake, Non-Starving Outbox, Gemini Routing
       { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
       stubHost,
     )) as McpJsonRpcResponse;
-    expect((initRes.result as { serverInfo: { version: string } }).serverInfo.version).toBe("1.3.0");
+    expect((initRes.result as { serverInfo: { version: string } }).serverInfo.version).toBe("1.4.0");
 
     const r1 = (await handleMcpJsonRpcMessage(
       {

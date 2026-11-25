@@ -256,6 +256,38 @@ export function initializeSqliteSchema(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_casebook_repo
       ON casebook_entries(repo_id, reverted, updated_at DESC);
 
+    CREATE TABLE IF NOT EXISTS flight_events (
+      id TEXT PRIMARY KEY,
+      repo_id TEXT,
+      ticket_id TEXT,
+      kind TEXT NOT NULL,
+      engine TEXT,
+      summary TEXT NOT NULL,
+      saved_ms INTEGER,
+      metadata_json TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_flight_events_created
+      ON flight_events(created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS milestones (
+      id TEXT PRIMARY KEY,
+      repo_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      target_version TEXT,
+      status TEXT NOT NULL,
+      items_json TEXT NOT NULL,
+      release_notes_zh TEXT,
+      release_notes_en TEXT,
+      digest_summary TEXT,
+      released_commit_sha TEXT,
+      released_tag TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_milestones_repo
+      ON milestones(repo_id, updated_at DESC);
+
     CREATE TABLE IF NOT EXISTS system_settings (
       key TEXT PRIMARY KEY,
       value_json TEXT NOT NULL,
@@ -434,6 +466,7 @@ export function initializeSqliteSchema(db: Database): void {
   ensureColumn(db, existingRepoCols, "repos", "delivery_gate_policy", "TEXT");
   ensureColumn(db, existingRepoCols, "repos", "risk_threshold", "INTEGER");
   ensureColumn(db, existingRepoCols, "repos", "sensitive_paths_json", "TEXT");
+  ensureColumn(db, existingRepoCols, "repos", "verification_strategy", "TEXT");
   ensureColumn(db, existingRepoCols, "repos", "blueprints_json", "TEXT");
   ensureColumn(db, existingRepoCols, "repos", "hooks_json", "TEXT");
 
@@ -482,6 +515,7 @@ export function initializeSqliteSchema(db: Database): void {
   ensureColumn(db, existingCols, "tickets", "clarification_count", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, existingCols, "tickets", "steer_count", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, existingCols, "tickets", "campaign_id", "TEXT");
+  ensureColumn(db, existingCols, "tickets", "milestone_id", "TEXT");
   ensureColumn(db, existingCols, "tickets", "campaign_wave", "INTEGER");
   ensureColumn(db, existingCols, "tickets", "target_branch", "TEXT");
   ensureColumn(db, existingCols, "tickets", "barrier_group_id", "TEXT");

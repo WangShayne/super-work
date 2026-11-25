@@ -33,9 +33,20 @@ const SOURCE_EXTENSIONS = new Set([
   ".rs",
 ]);
 
+export interface SymbolSpan {
+  name: string;
+  kind: string;
+  /** 1-based inclusive start line */
+  startLine: number;
+  /** 1-based inclusive end line */
+  endLine: number;
+}
+
 interface CachedParsedFile {
   mtimeMs: number;
   size: number;
+  lineCount: number;
+  spans: SymbolSpan[];
   rawImports: string[];
   exportedSymbols: string[];
   reExports: string[];
@@ -47,7 +58,122 @@ export function clearSymbolGraphCache(): void {
   fileParseCache.clear();
 }
 
-function parseSourceFileContent(filePath: string, content: string): Omit<CachedParsedFile, "mtimeMs" | "size"> {
+function splitLines(content: string): string[] {
+  const lines = content.split("\n");
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
+/** Brace/paren balanced end-line (0-based) for a top-level declaration starting at `start`. */
+function findBalancedEnd(lines: string[], start: number, quotes: string, lineComment: string): number {
+  let depth = 0;
+  let inBlockComment = false;
+  let quote: string | null = null;
+  for (let j = start; j < lines.length; j++) {
+    const line = lines[j]!;
+    for (let c = 0; c < line.length; c++) {
+      const ch = line[c]!;
+      if (inBlockComment) {
+        if (ch === "*" && line[c + 1] === "/") {
+          inBlockComment = false;
+          c++;
+        }
+        continue;
+      }
+      if (quote) {
+        if (ch === "\\" && quote !== "`") {
+          c++;
+        } else if (ch === "\\") {
+          c++;
+        } else if (ch === quote) {
+          quote = null;
+        }
+        continue;
+      }
+      if (line.startsWith(lineComment, c)) break;
+      if (lineComment === "//" && ch === "/" && line[c + 1] === "*") {
+        inBlockComment = true;
+        c++;
+        continue;
+      }
+      if (quotes.includes(ch)) {
+        quote = ch;
+        continue;
+      }
+      if (ch === "{" || ch === "(" || ch === "[") depth++;
+      else if (ch === "}" || ch === ")" || ch === "]") depth--;
+    }
+    // Plain quotes never span lines (only template literals do)
+    if (quote && quote !== "`") quote = null;
+    if (depth <= 0 && !inBlockComment && !quote) {
+      let k = j + 1;
+      while (k < lines.length && lines[k]!.trim() === "") k++;
+      if (k >= lines.length) return j;
+      const next = lines[k]!;
+      if (!/^\s/.test(next) && !next.startsWith("{")) return j;
+      // Continuation (e.g. multi-line union type or brace on next line): keep scanning
+      if (depth < 0) return j;
+    }
+  }
+  return lines.length - 1;
+}
+
+function trimTrailingBlank(lines: string[], from: number, to: number): number {
+  let e = to;
+  while (e > from && lines[e]!.trim() === "") e--;
+  return e;
+}
+
+export function extractSymbolSpans(filePath: string, content: string): SymbolSpan[] {
+  const ext = extname(filePath).toLowerCase();
+  const lines = splitLines(content);
+  const starts: Array<{ idx: number; name: string; kind: string }> = [];
+
+  if (ext === ".py") {
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i]!.match(/^(?:async\s+)?(def|class)\s+([A-Za-z_][A-Za-z0-9_]*)/);
+      if (m?.[2] && !m[2].startsWith("_")) starts.push({ idx: i, name: m[2], kind: m[1]! });
+    }
+    return starts.map((st) => {
+      let k = st.idx + 1;
+      while (k < lines.length && (lines[k]!.trim() === "" || /^\s/.test(lines[k]!))) k++;
+      const end = trimTrailingBlank(lines, st.idx, k - 1);
+      return { name: st.name, kind: st.kind, startLine: st.idx + 1, endLine: end + 1 };
+    });
+  }
+
+  let quotes = "\"'`";
+  let lineComment = "//";
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (ext === ".go") {
+      const f = line.match(/^func\s+(?:\([^)]*\)\s*)?([A-Z][A-Za-z0-9_]*)/);
+      if (f?.[1]) starts.push({ idx: i, name: f[1], kind: "func" });
+      const t = line.match(/^type\s+([A-Z][A-Za-z0-9_]*)\s+/);
+      if (t?.[1]) starts.push({ idx: i, name: t[1], kind: "type" });
+    } else if (ext === ".rs") {
+      const m = line.match(/^pub(?:\([^)]+\))?\s+(?:async\s+)?(fn|struct|enum|trait|type)\s+([A-Za-z0-9_]+)/);
+      if (m?.[2]) starts.push({ idx: i, name: m[2], kind: m[1]! });
+    } else {
+      const m = line.match(
+        /^export\s+(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(function\*?|class|interface|type|enum|const)\s+([A-Za-z0-9_$]+)/,
+      );
+      if (m?.[2]) starts.push({ idx: i, name: m[2], kind: m[1]!.replace("*", "") });
+    }
+  }
+  if (ext === ".rs") quotes = '"';
+  if (ext === ".go") quotes = "\"`'";
+
+  return starts.map((st, n) => {
+    let end = findBalancedEnd(lines, st.idx, quotes, lineComment);
+    const nextStart = starts[n + 1]?.idx;
+    if (nextStart !== undefined && end >= nextStart) end = nextStart - 1;
+    end = trimTrailingBlank(lines, st.idx, Math.max(st.idx, end));
+    return { name: st.name, kind: st.kind, startLine: st.idx + 1, endLine: end + 1 };
+  });
+}
+
+function parseSourceFileContent(filePath: string, content: string): Omit<CachedParsedFile, "mtimeMs" | "size" | "lineCount" | "spans"> {
   const ext = extname(filePath).toLowerCase();
   const rawImports: string[] = [];
   const exportedSymbols: string[] = [];
@@ -217,6 +343,8 @@ export async function scanRepoSymbolGraph(rootRepoPath: string): Promise<{
   importersByFile: Map<string, string[]>;
   importsByFile: Map<string, string[]>;
   signaturesByFile: Map<string, string[]>;
+  spansByFile: Map<string, SymbolSpan[]>;
+  lineCountByFile: Map<string, number>;
 }> {
   const absRoot = resolve(rootRepoPath);
   if (!existsSync(absRoot)) {
@@ -225,6 +353,8 @@ export async function scanRepoSymbolGraph(rootRepoPath: string): Promise<{
       importersByFile: new Map(),
       importsByFile: new Map(),
       signaturesByFile: new Map(),
+      spansByFile: new Map(),
+      lineCountByFile: new Map(),
     };
   }
 
@@ -267,6 +397,8 @@ export async function scanRepoSymbolGraph(rootRepoPath: string): Promise<{
       const entry: CachedParsedFile = {
         mtimeMs: st.mtimeMs,
         size: st.size,
+        lineCount: splitLines(text).length,
+        spans: extractSymbolSpans(rel, text),
         ...parsed,
       };
       fileParseCache.set(cacheKey, entry);
@@ -331,7 +463,15 @@ export async function scanRepoSymbolGraph(rootRepoPath: string): Promise<{
     exportedSymbols: signaturesByFile.get(rel) ?? [],
   }));
 
-  return { files, importersByFile, importsByFile, signaturesByFile };
+  const spansByFile = new Map<string, SymbolSpan[]>();
+  const lineCountByFile = new Map<string, number>();
+  for (const rel of allFiles) {
+    const parsed = parsedByFile.get(rel);
+    spansByFile.set(rel, parsed?.spans ?? []);
+    lineCountByFile.set(rel, parsed?.lineCount ?? 0);
+  }
+
+  return { files, importersByFile, importsByFile, signaturesByFile, spansByFile, lineCountByFile };
 }
 
 export async function analyzeRepoSymbolImpact(

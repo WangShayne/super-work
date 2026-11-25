@@ -3,6 +3,7 @@ import type {
   BrowserInteractionStep,
   SmokeCheckConfig,
   TicketStatus,
+  VerificationStrategy,
   VisualDiffMode,
 } from "./types.ts";
 
@@ -46,6 +47,11 @@ export function normalizeErrorSignature(raw: string): string {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 160);
+}
+
+/** Single validator for the repo verification strategy (REST, contract sync, SQLite mapper). */
+export function normalizeVerificationStrategy(raw: unknown): VerificationStrategy | undefined {
+  return raw === "always_full" || raw === "impact_scoped" ? raw : undefined;
 }
 
 export function normalizeSmokeCheckConfig(raw: unknown): SmokeCheckConfig | undefined {

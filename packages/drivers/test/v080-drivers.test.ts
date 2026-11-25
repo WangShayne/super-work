@@ -97,7 +97,8 @@ describe("v0.8.0 Drivers (C.1 OS Sandbox & Env Scrubbing + B.1 CDP Browser Gate)
     expect(skipWrapped.env.SUPER_WORK_TOKEN).toBeUndefined();
     expect(skipWrapped.env.OPENAI_API_KEY).toBe("oai-ok");
 
-    if (process.platform !== "darwin") {
+    // Already inside an outer Seatbelt sandbox: nested sandbox-exec is intentionally skipped (exit 71 otherwise).
+    if (process.platform !== "darwin" || process.env.SUPER_WORK_IN_OS_SANDBOX === "1") {
       return;
     }
 

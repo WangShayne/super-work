@@ -12,9 +12,14 @@ import type {
   EvalCandidateRun,
   EvalCase,
   EvalRunRecord,
+  FlightEvent,
+  FlightEventKind,
   GoalCampaign,
   GoalCampaignWave,
   HandoverDigest,
+  Milestone,
+  MilestoneItem,
+  MilestoneStatus,
   InboxItem,
   LifecycleHooksConfig,
   MergeTrainEntry,
@@ -45,6 +50,7 @@ import type {
   Trigger,
   WorkerEngineId,
 } from "@super-work/core";
+import { normalizeVerificationStrategy } from "@super-work/core";
 
 export function mapRepoRow(r: Record<string, unknown>): RepoConfig {
   return {
@@ -114,6 +120,7 @@ export function mapRepoRow(r: Record<string, unknown>): RepoConfig {
     blueprints: r.blueprints_json
       ? (JSON.parse(String(r.blueprints_json)) as TaskBlueprint[])
       : undefined,
+    verificationStrategy: normalizeVerificationStrategy(r.verification_strategy),
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
   };
@@ -239,6 +246,7 @@ export function mapTicketRow(r: Record<string, unknown>): Ticket {
       r.steer_count !== null && r.steer_count !== undefined ? Number(r.steer_count) : undefined,
     routineId: r.routine_id ? String(r.routine_id) : undefined,
     campaignId: r.campaign_id ? String(r.campaign_id) : undefined,
+    milestoneId: r.milestone_id ? String(r.milestone_id) : undefined,
     campaignWave:
       r.campaign_wave !== null && r.campaign_wave !== undefined
         ? Number(r.campaign_wave)
@@ -407,6 +415,56 @@ export function mapRoutineRunRow(r: Record<string, unknown>): RoutineRun {
     costUsd: Number(r.cost_usd ?? 0),
     startedAt: String(r.started_at),
     completedAt: r.completed_at ? String(r.completed_at) : undefined,
+  };
+}
+
+export function mapMilestoneRow(r: Record<string, unknown>): Milestone {
+  let items: MilestoneItem[] = [];
+  try {
+    const parsed = JSON.parse(String(r.items_json ?? "[]")) as unknown;
+    if (Array.isArray(parsed)) items = parsed as MilestoneItem[];
+  } catch {
+    items = [];
+  }
+  return {
+    id: String(r.id),
+    repoId: String(r.repo_id),
+    name: String(r.name),
+    targetVersion: r.target_version ? String(r.target_version) : undefined,
+    status: String(r.status) as MilestoneStatus,
+    items,
+    releaseNotesZh: r.release_notes_zh ? String(r.release_notes_zh) : undefined,
+    releaseNotesEn: r.release_notes_en ? String(r.release_notes_en) : undefined,
+    digestSummary: r.digest_summary ? String(r.digest_summary) : undefined,
+    releasedCommitSha: r.released_commit_sha ? String(r.released_commit_sha) : undefined,
+    releasedTag: r.released_tag ? String(r.released_tag) : undefined,
+    createdAt: String(r.created_at),
+    updatedAt: String(r.updated_at),
+  };
+}
+
+export function mapFlightEventRow(r: Record<string, unknown>): FlightEvent {
+  let metadata: Record<string, unknown> | undefined;
+  if (typeof r.metadata_json === "string" && r.metadata_json) {
+    try {
+      const parsed = JSON.parse(r.metadata_json) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        metadata = parsed as Record<string, unknown>;
+      }
+    } catch {
+      metadata = undefined;
+    }
+  }
+  return {
+    id: String(r.id),
+    ...(r.repo_id != null ? { repoId: String(r.repo_id) } : {}),
+    ...(r.ticket_id != null ? { ticketId: String(r.ticket_id) } : {}),
+    kind: String(r.kind) as FlightEventKind,
+    ...(r.engine != null ? { engine: String(r.engine) as WorkerEngineId } : {}),
+    summary: String(r.summary),
+    ...(r.saved_ms != null ? { savedMs: Number(r.saved_ms) } : {}),
+    ...(metadata ? { metadata } : {}),
+    createdAt: String(r.created_at),
   };
 }
 

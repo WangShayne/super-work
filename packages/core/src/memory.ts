@@ -22,6 +22,7 @@ export interface WorkerPromptOptions {
   playbookContext?: string;
   casebookContext?: string;
   upstreamHandovers?: HandoverDigest[];
+  surgicalContextPack?: string;
 }
 
 export class MemoryManager {
@@ -76,6 +77,12 @@ export class MemoryManager {
 
     if (opts.repoConventions?.trim()) {
       sections.push(`\n## Repository Engineering Conventions\n${opts.repoConventions.trim()}`);
+    }
+
+    if (opts.surgicalContextPack?.trim()) {
+      sections.push(
+        `\n## Surgical Symbol & Line Map\n${opts.surgicalContextPack.trim().slice(0, 2400)}`,
+      );
     }
 
     if (opts.playbookContext?.trim()) {

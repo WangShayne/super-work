@@ -4,6 +4,7 @@ import { countDiffLines } from "./arena.ts";
 import { resolveRepoBlueprints } from "./blueprints.ts";
 import { runChiefOfStaffQuery } from "./chief.ts";
 import { selectRelevantCasesForContext } from "./casebook.ts";
+import { buildRunDigestReport } from "./digest.ts";
 import { buildHandoverDigest } from "./handover.ts";
 import {
   createCampaignOp,
@@ -41,6 +42,13 @@ import {
   runEvalCase as runEvalCaseOp,
 } from "./kernel/eval-coordinator.ts";
 import { batchResolveInboxOp, resolveInboxItemOp } from "./kernel/inbox-resolution-coordinator.ts";
+import {
+  type CreateMilestoneInput,
+  type ReleaseMilestoneOptions,
+  createMilestoneOp,
+  releaseMilestoneOp,
+  syncMilestonesOp,
+} from "./kernel/milestone-coordinator.ts";
 import {
   exportRepoKnowledgeBundle as exportRepoKnowledgeBundleOp,
   importRepoKnowledgeBundle as importRepoKnowledgeBundleOp,
@@ -96,6 +104,7 @@ import type {
   EpicDecompositionPlan,
   EvalCase,
   EvalRunRecord,
+  FlightEvent,
   GoalCampaign,
   GoalCampaignWave,
   HandoverDigest,
@@ -104,7 +113,9 @@ import type {
   KernelEvent,
   ManagedWorktreeItem,
   MergeTrainEntry,
+  Milestone,
   OutboxAction,
+  RunDigestReport,
   OutboxEntry,
   PipelineTemplateId,
   PlaybookEntry,
@@ -382,6 +393,53 @@ export class SuperWorkKernel {
     }
   }
 
+  /** Best-effort persistent Flight Recorder write; never throws into the kernel loop. */
+  async recordFlightEvent(event: Omit<FlightEvent, "id" | "createdAt">): Promise<void> {
+    if (!this.stateStore.recordFlightEvent) return;
+    try {
+      await this.stateStore.recordFlightEvent({ ...event, id: newId("fev"), createdAt: nowIso() });
+    } catch {
+      // Flight recorder failures must never block delivery, reload or rollback paths
+    }
+  }
+
+  async listFlightEvents(filter?: {
+    repoId?: string;
+    limit?: number;
+    sinceIso?: string;
+  }): Promise<FlightEvent[]> {
+    return (await this.stateStore.listFlightEvents?.(filter)) ?? [];
+  }
+
+  async getRunDigest(options?: { repoId?: string; hours?: number }): Promise<RunDigestReport> {
+    const windowHours = options?.hours ?? 24;
+    const sinceIso =
+      windowHours > 0 ? new Date(Date.now() - windowHours * 3_600_000).toISOString() : undefined;
+    // Prefilter by the same window predicate the digest applies (ticket.updatedAt) so we only
+    // fetch stage runs for in-window tickets instead of the entire history.
+    const allTickets = await this.stateStore.listTickets(
+      options?.repoId ? { repoId: options.repoId } : undefined,
+    );
+    const tickets = sinceIso
+      ? allTickets.filter((t) => (t.updatedAt ?? t.createdAt) >= sinceIso)
+      : allTickets;
+    const stageRuns = (
+      await Promise.all(tickets.map((t) => this.stateStore.listStageRuns(t.id)))
+    ).flat();
+    const flightEvents = await this.listFlightEvents({
+      repoId: options?.repoId,
+      sinceIso,
+      limit: 500,
+    });
+    return buildRunDigestReport({
+      repoId: options?.repoId,
+      windowHours,
+      tickets,
+      stageRuns,
+      flightEvents,
+    });
+  }
+
   private coordinatorCtx(): KernelCoordinatorContext {
     return {
       stateStore: this.stateStore,
@@ -408,6 +466,7 @@ export class SuperWorkKernel {
       finalizingEpics: this.finalizingEpics,
       isStopped: () => this.stopped,
       emitEvent: (event) => this.emitEvent(event),
+      recordFlightEvent: (event) => this.recordFlightEvent(event),
       getAvailableEngines: () => this.getAvailableEngines(),
       getEffectiveDailyBudget: (repo, utcDate) => getEffectiveDailyBudget(repo, utcDate),
       createRepoProbeExecutor: (repo) => this.createRepoProbeExecutor(repo),
@@ -435,6 +494,9 @@ export class SuperWorkKernel {
       escalateTicket: (ticket, kind, summary, contextPayload) =>
         this.escalateTicket(ticket, kind, summary, contextPayload),
       createDirectTicket: (input) => this.router.createDirectTicket(input),
+      createEpic: (input) => this.createEpic(input),
+      createCampaign: (input) => this.createCampaign(input),
+      previewRequirementIntake: (input) => this.previewRequirementIntake(input),
       inspectWorktrees: (repoId) => this.inspectWorktrees(repoId),
       gcWorktrees: (options) => this.gcWorktrees(options),
       cleanupTicketWorktree: (ticketId) => this.cleanupTicketWorktree(ticketId),
@@ -1275,6 +1337,7 @@ export class SuperWorkKernel {
       if (this.stopped) return 0;
       await this.router.resolveDependenciesForWaitingTickets(synced);
       await syncEpicStatusesOp(this.coordinatorCtx(), synced);
+      await syncMilestonesOp(this.coordinatorCtx(), synced.id).catch(() => undefined);
     }
     if (this.stopped) return 0;
     await this.processDueRoutines();
@@ -1392,6 +1455,7 @@ export class SuperWorkKernel {
       const reposAfter = await this.stateStore.listRepos();
       for (const repo of reposAfter) {
         await syncEpicStatusesOp(this.coordinatorCtx(), repo);
+        await syncMilestonesOp(this.coordinatorCtx(), repo.id).catch(() => undefined);
       }
 
       const waiting = await this.stateStore.listTickets({ status: "waiting_deps" });
@@ -1618,8 +1682,19 @@ export class SuperWorkKernel {
         ?.verificationPassed,
     );
 
+    let hotspotFiles: Array<{ filePath: string; lineCount: number }> | undefined;
+    if (repo && this.workspace.scanCodeHotspots && changedFiles.length > 0) {
+      const changedSet = new Set(changedFiles);
+      const all = await this.workspace.scanCodeHotspots(repo.rootPath, 1500).catch(() => []);
+      const touched = all
+        .filter((h) => changedSet.has(h.filePath))
+        .map((h) => ({ filePath: h.filePath, lineCount: h.lineCount }));
+      if (touched.length > 0) hotspotFiles = touched;
+    }
+
     const riskAssessment = evaluateTicketRisk({
       ticket,
+      hotspotFiles,
       repo: repo ?? undefined,
       changedFiles,
       addedLines,
@@ -1963,7 +2038,23 @@ export class SuperWorkKernel {
       }
     }
 
+    let surgicalContextPack: string | undefined;
+    if (
+      (stage === "plan" || stage === "implement" || stage === "review") &&
+      this.workspace.buildSurgicalContextPack &&
+      !ticket.mandate.allowedPaths.includes("**")
+    ) {
+      const pack = await this.workspace
+        .buildSurgicalContextPack({
+          worktreePath: ticket.worktreePath ?? repo.rootPath,
+          allowedPaths: ticket.mandate.allowedPaths,
+        })
+        .catch(() => undefined);
+      if (pack?.trim()) surgicalContextPack = pack.trim();
+    }
+
     return this.memory.buildWorkerPromptContext(ticket, stage, relatedMemory, {
+      surgicalContextPack,
       verificationCommands: repo.verificationCommands,
       smokeCheck: repo.smokeCheck,
       repoConventions:
@@ -2017,6 +2108,28 @@ export class SuperWorkKernel {
 
   async processDueRoutines(now = new Date()): Promise<number> {
     return processDueRoutinesTick(this.coordinatorCtx(), now);
+  }
+
+  // --- Milestones (v1.4.0 Direction B) ---
+  async createMilestone(input: CreateMilestoneInput): Promise<Milestone> {
+    return createMilestoneOp(this.coordinatorCtx(), input);
+  }
+
+  async getMilestone(id: string): Promise<Milestone | null> {
+    return (await this.stateStore.getMilestone?.(id)) ?? null;
+  }
+
+  async listMilestones(repoId?: string): Promise<Milestone[]> {
+    return (await this.stateStore.listMilestones?.(repoId)) ?? [];
+  }
+
+  async syncMilestones(repoId: string): Promise<void> {
+    await syncMilestonesOp(this.coordinatorCtx(), repoId);
+  }
+
+  /** Explicit-only release (REST / CLI / Inbox signoff); never invoked by the scheduler. */
+  async releaseMilestone(id: string, options: ReleaseMilestoneOptions = {}): Promise<Milestone> {
+    return releaseMilestoneOp(this.coordinatorCtx(), id, options);
   }
 
   // --- Goal Campaigns (v1.2.0 Pillar A) ---

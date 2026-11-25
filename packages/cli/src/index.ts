@@ -8,6 +8,7 @@ import type {
   CampaignDirection,
   DagNodeMutationInput,
   EnginePreference,
+  Milestone,
   PipelineTemplateId,
   RequirementRouteKind,
   StageKind,
@@ -259,8 +260,18 @@ function formatEventLine(ev: ParsedSseEvent, watchedTicketId?: string): string {
     return `${childPrefix}[${ev.event}] ${run?.stage ?? "?"} (${run?.engine ?? "?"}) status=${run?.status ?? "?"}${run?.summary ? `: ${run.summary.slice(0, 120)}` : ""}`;
   }
   if (ev.event === "verification_completed") {
-    const res = data.result as { ok?: boolean; summary?: string } | undefined;
-    return `${childPrefix}[verification] ${res?.ok ? "PASS" : "FAIL"}: ${res?.summary ?? ""}`;
+    const res = data.result as
+      | {
+          ok?: boolean;
+          summary?: string;
+          scopedVerification?: { usedScoped?: boolean; estimatedSavedMs?: number };
+        }
+      | undefined;
+    const scoped = res?.scopedVerification;
+    const scopedTag = scoped?.usedScoped
+      ? ` [scoped gate${scoped.estimatedSavedMs ? `, saved ~${Math.round(scoped.estimatedSavedMs / 1000)}s` : ""}]`
+      : "";
+    return `${childPrefix}[verification]${scopedTag} ${res?.ok ? "PASS" : "FAIL"}: ${res?.summary ?? ""}`;
   }
   if (ev.event === "playbook_updated") {
     const entry = data.entry as { id?: string; source?: string; rule?: string } | undefined;
@@ -387,7 +398,7 @@ async function waitForTicketCompletion(
 }
 
 function printHelp(stdout: (line: string) => void): void {
-  stdout(`super-work v1.3.0 CLI
+  stdout(`super-work v1.4.0 CLI
 
 Usage:
   super-work up [-d|--detach] [--host 127.0.0.1] [--port 4318] [--data-dir path] [--token <token>]
@@ -410,9 +421,11 @@ Usage:
   super-work epic <title> [-d|--desc <text>] [--repo <id>] [--template fast|standard|strict] [--tdd]
                   [--engine auto|...] [--preview-only] [--per-subtask] [--wait] [--auto-start] [--json]
   super-work campaign [list | get <id> | create <name> -d <prompt> --metric <cmd> --target <num> [--direction increase|decrease] [--unit <u>] [--regex <re>] [--delivery-mode staging_branch|per_wave_merge] [--max-iter 5] [--budget 5] [--paths <csv>] [--start] | start <id> [-m <note>] | pause <id> [-m <reason>] | deliver <id> [--action local_merge|push_and_create_pr] | delete <id>] [--repo <id>] [--auto-start] [--json]
+  super-work milestone [list | create --name <n> [--version <v>] [--repo <id>] [--template fast|standard|strict] [--engine <e>] [--budget <usd>] <req...> | show <id> | release <id> [--bump] [--tag] [--push]] [--auto-start] [--json]
   super-work train [list | flush | eject <entryId> [-m <reason>]] [--repo <id>] [--auto-start] [--json]
   super-work blueprints [--repo <id>] [--auto-start] [--json]
   super-work doctor [--fix] [--auto-start] [--json]
+  super-work digest [--repo <id>] [--hours <n>] [--markdown] [--json] [--auto-start]
   super-work backup [list | create | restore <backupId> [--force]] [--auto-start] [--json]
   super-work bundle [export <repoId> [-o <path>] | import <repoId> <path>] [--auto-start] [--json]
   super-work eval [list [--repo <id>] | save <ticketId> | run <evalCaseId> [--engines <csv>] [--budget <usd>] | runs [--repo <id>]] [--auto-start] [--json]
@@ -658,7 +671,10 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
       stdout(`super-work daemon: ${baseUrl} (LLM: ${result.health.llmProvider})`);
       stdout(`Engines: ${result.health.availableEngines.join(", ") || "none"}`);
       if (repo) {
-        stdout(`Repo: ${repo.name} (${repo.id}) · mode=${repo.mode} · base=${repo.baseBranch}`);
+        stdout(
+          `Repo: ${repo.name} (${repo.id}) · mode=${repo.mode} · base=${repo.baseBranch}` +
+            (repo.verificationStrategy ? ` · verify=${repo.verificationStrategy}` : ""),
+        );
       }
       stdout(
         `Tickets: total=${result.metrics.ticketCounts.total}, active=${result.metrics.ticketCounts.active}, delivered=${result.metrics.ticketCounts.delivered}, needs_human=${result.metrics.ticketCounts.needsHuman}`,
@@ -1730,6 +1746,49 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
       return 0;
     }
 
+    if (cmd === "digest") {
+      const hoursRaw = getStringFlag(flags, "hours");
+      const hours = hoursRaw !== undefined && hoursRaw !== "" ? Number(hoursRaw) : 24;
+      if (!Number.isFinite(hours) || hours < 0) {
+        stdout("Error: --hours must be a non-negative number (0 = all time)");
+        return 1;
+      }
+      const repoId = getStringFlag(flags, "repo");
+      const { digest } = await withAutoStart(
+        baseUrl,
+        autoStart,
+        () => client.getRunDigest({ repoId, hours }),
+        stdout,
+      );
+      if (asJson) {
+        stdout(JSON.stringify(digest, null, 2));
+      } else if (flags.markdown) {
+        stdout(digest.markdownEn);
+        stdout("");
+        stdout(digest.markdownZh);
+      } else {
+        const s = digest.ticketSummary;
+        stdout(
+          `Run Digest (${digest.windowHours > 0 ? `last ${digest.windowHours}h` : "all time"}): tickets=${s.total} delivered=${s.delivered} reverted=${s.reverted} escalated=${s.escalated} active=${s.active} cost=$${s.totalCostUsd.toFixed(2)}`,
+        );
+        stdout(
+          `  Scoped gate: ${digest.gateSavings.scopedRuns} run(s), saved ${Math.round(digest.gateSavings.totalSavedMs / 1000)}s`,
+        );
+        stdout(
+          `  Self-host: canary=${digest.selfHost.canaryPassed} reloads=${digest.selfHost.reloadsCompleted} rollbacks=${digest.selfHost.canaryRolledBack} watchdogSwitches=${digest.selfHost.watchdogSwitches}`,
+        );
+        for (const e of digest.engines) {
+          stdout(
+            `  ${e.engine.padEnd(9)} tickets=${e.tickets} delivered=${e.delivered} failed/reverted=${e.failedOrReverted} pass=${(e.passRate * 100).toFixed(0)}% cost=$${e.totalCostUsd.toFixed(2)}`,
+          );
+        }
+        for (const ev of digest.events.slice(0, 10)) {
+          stdout(`  ${ev.createdAt} [${ev.kind}] ${ev.summary}`);
+        }
+      }
+      return 0;
+    }
+
     if (cmd === "doctor") {
       const fix = Boolean(flags.fix);
       const report = await withAutoStart(
@@ -1746,6 +1805,14 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
         );
         for (const item of report.items) {
           stdout(`  [${item.status.toUpperCase()}] (${item.category}) ${item.title}: ${item.detail}`);
+        }
+        if (report.hotspots && report.hotspots.length > 0) {
+          stdout(`Hotspots (>1500 lines): ${report.hotspots.length}`);
+          for (const h of report.hotspots) {
+            stdout(
+              `  ${String(h.lineCount).padStart(6)} lines  ${String(h.exportedSymbolCount).padStart(3)} exports  ${String(h.dependentCount).padStart(3)} dependents  ${h.filePath}`,
+            );
+          }
         }
       }
       return 0;
@@ -2169,6 +2236,100 @@ export async function runCli(argv: string[], options?: CliRunOptions): Promise<n
         return 0;
       }
       stderr(`Unknown campaign subcommand: ${subCmd}`);
+      return 1;
+    }
+
+    if (cmd === "milestone") {
+      const subCmd = positionals[1] ?? "list";
+      const fmt = (m: Milestone): string =>
+        `Milestone [${m.id}] ${m.name}${m.targetVersion ? ` v${m.targetVersion}` : ""} status=${m.status} items=${m.items.filter((i) => i.status === "delivered").length}/${m.items.length}`;
+      if (subCmd === "list") {
+        const repoFlag = getStringFlag(flags, "repo");
+        const { milestones } = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () => client.listMilestones(repoFlag),
+          stdout,
+        );
+        if (asJson) stdout(JSON.stringify({ milestones }, null, 2));
+        else if (milestones.length === 0) stdout("No milestones.");
+        else for (const m of milestones) stdout(fmt(m));
+        return 0;
+      }
+      if (subCmd === "show") {
+        const id = positionals[2];
+        if (!id) {
+          stderr("Error: milestone id is required. Usage: super-work milestone show <id>");
+          return 1;
+        }
+        const { milestone } = await withAutoStart(baseUrl, autoStart, () => client.getMilestone(id), stdout);
+        if (asJson) {
+          stdout(JSON.stringify({ milestone }, null, 2));
+        } else {
+          stdout(fmt(milestone));
+          for (const i of milestone.items) {
+            stdout(
+              `  Wave ${i.waveIndex + 1} #${i.index + 1} [${i.status}] ${i.title}${i.dependsOnIndices.length ? ` (after #${i.dependsOnIndices.map((d) => d + 1).join(",#")})` : ""}`,
+            );
+          }
+          if (milestone.releaseNotesEn) stdout(`\n${milestone.releaseNotesEn}`);
+        }
+        return 0;
+      }
+      if (subCmd === "create") {
+        const name = getStringFlag(flags, "name");
+        const requirements = positionals.slice(2).map((r) => r.trim()).filter(Boolean);
+        if (!name || requirements.length === 0) {
+          stderr(
+            "Error: --name <n> and at least one requirement are required. Usage: super-work milestone create --name <n> [--version <v>] [--repo <id>] <req...>",
+          );
+          return 1;
+        }
+        const repoId = await resolveTargetRepoId(client, getStringFlag(flags, "repo"));
+        const budgetRaw = getStringFlag(flags, "budget");
+        const { milestone } = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () =>
+            client.createMilestone({
+              repoId,
+              name,
+              targetVersion: getStringFlag(flags, "version"),
+              requirements,
+              template: getStringFlag(flags, "template") as PipelineTemplateId | undefined,
+              preferredEngine: getStringFlag(flags, "engine") as EnginePreference | undefined,
+              maxBudgetUsdPerItem: budgetRaw ? Number(budgetRaw) : undefined,
+            }),
+          stdout,
+        );
+        stdout(asJson ? JSON.stringify({ milestone }, null, 2) : `Created ${fmt(milestone)}`);
+        return 0;
+      }
+      if (subCmd === "release") {
+        const id = positionals[2];
+        if (!id) {
+          stderr("Error: milestone id is required. Usage: super-work milestone release <id> [--bump] [--tag] [--push]");
+          return 1;
+        }
+        const { milestone } = await withAutoStart(
+          baseUrl,
+          autoStart,
+          () =>
+            client.releaseMilestone(id, {
+              bumpVersion: Boolean(flags.bump),
+              createTag: Boolean(flags.tag),
+              pushRemote: Boolean(flags.push),
+            }),
+          stdout,
+        );
+        stdout(
+          asJson
+            ? JSON.stringify({ milestone }, null, 2)
+            : `Released ${fmt(milestone)}${milestone.releasedTag ? ` tag=${milestone.releasedTag}` : ""}${milestone.releasedCommitSha ? ` commit=${milestone.releasedCommitSha.slice(0, 8)}` : ""}`,
+        );
+        return 0;
+      }
+      stderr(`Unknown milestone subcommand: ${subCmd}`);
       return 1;
     }
 

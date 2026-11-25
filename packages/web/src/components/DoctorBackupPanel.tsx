@@ -14,6 +14,7 @@ import { useI18n } from "../i18n.tsx";
 import { api } from "../api.ts";
 import type {
   BackupArchiveInfo,
+  CodeHotspotItem,
   SelfReloadState,
   ServiceStatusResponse,
   SystemDoctorReport,
@@ -37,6 +38,8 @@ export function DoctorBackupPanel() {
   const [creatingBackup, setCreatingBackup] = useState(false);
   const [confirmRestoreId, setConfirmRestoreId] = useState<string | null>(null);
   const [restoringId, setRestoringId] = useState<string | null>(null);
+  const [confirmHotspotPath, setConfirmHotspotPath] = useState<string | null>(null);
+  const [spawningHotspot, setSpawningHotspot] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -114,6 +117,31 @@ export function DoctorBackupPanel() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setRestoringId(null);
+    }
+  };
+
+  const handleSpawnRefactor = async (h: CodeHotspotItem) => {
+    if (!h.repoId) {
+      setError("Missing repoId for hotspot");
+      return;
+    }
+    setSpawningHotspot(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const { ticket } = await api.createTicket({
+        repoId: h.repoId,
+        blueprintId: "safe-refactor",
+        title: `Safe-refactor: split ${h.filePath} (${h.lineCount} lines)`,
+        description: `Split oversized file ${h.filePath} (${h.lineCount} lines, ${h.exportedSymbolCount} exports, ${h.dependentCount} dependents) into cohesive modules without changing behavior. Keep public exports stable.`,
+        allowedPaths: [h.packageDir === "." ? "**" : `${h.packageDir}/**`],
+      });
+      setConfirmHotspotPath(null);
+      setNotice(`${t("doctor.hotspot.created")}: ${ticket.id}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSpawningHotspot(false);
     }
   };
 
@@ -222,6 +250,65 @@ export function DoctorBackupPanel() {
           })}
         </div>
       </section>
+
+      {/* Codebase Hotspot Radar */}
+      {(report?.hotspots?.length ?? 0) > 0 && (
+        <section className="space-y-3 rounded-xl border border-amber-500/30 bg-amber-500/5 p-4">
+          <div className="flex items-center gap-2 font-semibold text-zinc-100">
+            <AlertTriangle className="w-4 h-4 text-amber-400" />
+            <span>{t("doctor.hotspot.title")}</span>
+          </div>
+          <p className="text-[11px] text-zinc-400">{t("doctor.hotspot.subtitle")}</p>
+          <div className="space-y-2">
+            {report!.hotspots!.map((h) => (
+              <div
+                key={`${h.repoId ?? ""}:${h.filePath}`}
+                className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-3 text-xs space-y-2"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="font-mono text-zinc-100 truncate">{h.filePath}</div>
+                    <div className="text-[11px] text-zinc-400">
+                      {h.lineCount} {t("doctor.hotspot.lines")} · {h.exportedSymbolCount}{" "}
+                      {t("doctor.hotspot.symbols")} · {h.dependentCount} {t("doctor.hotspot.dependents")}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmHotspotPath(h.filePath)}
+                    disabled={spawningHotspot || !h.repoId}
+                    className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-[11px] font-medium disabled:opacity-40"
+                  >
+                    {t("doctor.hotspot.spawn")}
+                  </button>
+                </div>
+                {confirmHotspotPath === h.filePath && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-amber-100">
+                    <span>{t("doctor.hotspot.confirmBanner")}</span>
+                    <span className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void handleSpawnRefactor(h)}
+                        disabled={spawningHotspot}
+                        className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white disabled:opacity-40"
+                      >
+                        {t("doctor.hotspot.confirm")}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmHotspotPath(null)}
+                        className="px-2.5 py-1 rounded border border-zinc-700 text-zinc-200 hover:bg-zinc-800"
+                      >
+                        {t("doctor.hotspot.cancel")}
+                      </button>
+                    </span>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* SQLite Hot Backups */}
       <section className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">

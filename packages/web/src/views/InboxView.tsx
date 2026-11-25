@@ -109,6 +109,10 @@ const KIND_STYLE: Record<InboxItem["kind"], { color: string; icon: typeof Eye }>
     color: "bg-amber-500/15 text-amber-300 border-amber-500/30",
     icon: AlertTriangle,
   },
+  milestone_ready: {
+    color: "bg-teal-500/15 text-teal-300 border-teal-500/30",
+    icon: Layers,
+  },
 };
 
 export function InboxView({
@@ -422,6 +426,26 @@ export function InboxView({
                 <p className="text-xs text-zinc-300 whitespace-pre-wrap leading-relaxed bg-zinc-950/60 border border-zinc-800/80 rounded-lg p-3">
                   {item.summary}
                 </p>
+
+                {item.kind === "milestone_ready" &&
+                  (() => {
+                    const notes = String(
+                      (locale === "zh"
+                        ? item.contextPayload.releaseNotesZh
+                        : item.contextPayload.releaseNotesEn) ?? "",
+                    );
+                    if (!notes) return null;
+                    return (
+                      <div className="rounded-lg border border-teal-500/25 bg-teal-500/5 p-3 space-y-1.5">
+                        <div className="text-[11px] font-semibold uppercase tracking-wider text-teal-300">
+                          {t("milestone.inboxNotes")}
+                        </div>
+                        <pre className="max-h-56 overflow-auto whitespace-pre-wrap text-xs text-zinc-300 leading-relaxed font-sans">
+                          {notes}
+                        </pre>
+                      </div>
+                    );
+                  })()}
 
                 {item.kind === "outbox_signoff" &&
                   (() => {

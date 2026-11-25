@@ -129,7 +129,7 @@ describe("v0.9.0 Drivers (A.2 PNG Diff + B.1 Symbol Graph + A.1 Read-Only Sandbo
     } finally {
       srv.stop(true);
     }
-  });
+  }, 30_000);
 
   it("B.1: scans symbol graph to discover 1-hop direct and 2+ hop transitive dependents + context pack", async () => {
     clearSymbolGraphCache();

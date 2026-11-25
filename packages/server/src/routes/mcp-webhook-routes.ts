@@ -459,12 +459,55 @@ export function registerMcpWebhookRoutes(ctx: ServerRouteContext): void {
       }
       throw new Error(`Unknown self-host action: ${action}`);
     },
+    manageMilestones: async (args) => {
+      const action = String(args.action ?? "list");
+      if (action === "list") {
+        return { milestones: await kernel.listMilestones(args.repoId ? String(args.repoId) : undefined) };
+      }
+      if (action === "get") {
+        const milestone = await kernel.getMilestone(String(args.id ?? ""));
+        if (!milestone) throw new Error(`Milestone not found: ${String(args.id ?? "")}`);
+        return { milestone };
+      }
+      if (action === "create") {
+        const milestone = await kernel.createMilestone({
+          repoId: String(args.repoId ?? ""),
+          name: String(args.name ?? ""),
+          targetVersion: args.targetVersion ? String(args.targetVersion) : undefined,
+          requirements: Array.isArray(args.requirements) ? args.requirements.map(String) : [],
+          preferredEngine: args.preferredEngine as EnginePreference | undefined,
+          template: args.template as PipelineTemplateId | undefined,
+          maxBudgetUsdPerItem:
+            typeof args.maxBudgetUsdPerItem === "number" ? args.maxBudgetUsdPerItem : undefined,
+        });
+        return { milestone };
+      }
+      if (action === "release") {
+        const milestone = await kernel.releaseMilestone(String(args.id ?? ""), {
+          bumpVersion: args.bumpVersion === true,
+          createTag: args.createTag === true,
+          pushRemote: args.pushRemote === true,
+        });
+        return { milestone };
+      }
+      throw new Error(`Unknown milestone action: ${action}`);
+    },
+    getRunDigest: async (args) => {
+      const rawHours = Number(args.hours ?? 24);
+      const hours = Number.isFinite(rawHours) ? Math.min(Math.max(rawHours, 0), 8760) : 24;
+      return {
+        digest: await kernel.getRunDigest({
+          repoId: args.repoId ? String(args.repoId) : undefined,
+          hours,
+        }),
+      };
+    },
   });
 
   app.get("/api/mcp", (c) => {
     return c.json({
       name: "super-work",
-      version: "1.3.0",
+      version: "1.4.0",
       transport: "streamable-http",
       endpoint: "/api/mcp",
     });

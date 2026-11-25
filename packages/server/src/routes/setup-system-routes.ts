@@ -273,6 +273,24 @@ export function registerSetupSystemRoutes(ctx: ServerRouteContext): void {
     return c.json({ metrics });
   });
 
+  // --- Direction D: Flight Recorder & Run Digest ---
+  app.get("/api/digest", async (c) => {
+    const repoId = c.req.query("repoId") || undefined;
+    const rawHours = c.req.query("hours");
+    const parsed = rawHours === undefined || rawHours === "" ? 24 : Number(rawHours);
+    const hours = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 0), 8760) : 24;
+    const digest = await kernel.getRunDigest({ repoId, hours });
+    return c.json({ digest });
+  });
+
+  app.get("/api/flight-events", async (c) => {
+    const repoId = c.req.query("repoId") || undefined;
+    const rawLimit = Number(c.req.query("limit") ?? 50);
+    const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(Math.floor(rawLimit), 1), 500) : 50;
+    const events = await kernel.listFlightEvents({ repoId, limit });
+    return c.json({ events });
+  });
+
   // --- v1.1.0 A.2 Chief-of-Staff Advisor ---
   app.post("/api/chief/ask", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as {

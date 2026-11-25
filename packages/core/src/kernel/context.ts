@@ -2,6 +2,7 @@ import type { MemoryManager } from "../memory.ts";
 import type {
   ArtifactStore,
   ControlPlaneLLM,
+  CreateEpicInput,
   DirectTicketInput,
   OutboxExecutor,
   PreviewProvider,
@@ -13,6 +14,9 @@ import type {
 } from "../ports.ts";
 import type { TwoTierWatchdog } from "../watchdog.ts";
 import type {
+  CreateCampaignInput,
+  FlightEvent,
+  GoalCampaign,
   HandoverDigest,
   InboxItemKind,
   KernelEvent,
@@ -20,6 +24,8 @@ import type {
   OutboxEntry,
   PlaybookEntry,
   RepoConfig,
+  RequirementIntakeInput,
+  RequirementIntakePlan,
   SelfReloadState,
   SpillArtifact,
   StageKind,
@@ -56,6 +62,8 @@ export interface KernelCoordinatorContext {
   finalizingEpics: Set<string>;
   isStopped(): boolean;
   emitEvent(event: KernelEvent): void;
+  /** Best-effort persistent Flight Recorder write; never throws. */
+  recordFlightEvent?(event: Omit<FlightEvent, "id" | "createdAt">): Promise<void>;
   getAvailableEngines(): Promise<WorkerEngineId[]>;
   getEffectiveDailyBudget(repo: RepoConfig, utcDate: string): number | undefined;
   createRepoProbeExecutor(repo: RepoConfig): RepoProbeExecutor | undefined;
@@ -106,6 +114,9 @@ export interface KernelCoordinatorContext {
     contextPayload: Record<string, unknown>,
   ): Promise<void>;
   createDirectTicket(input: DirectTicketInput): Promise<Ticket>;
+  createEpic(input: CreateEpicInput): Promise<{ epic: Ticket; subtasks: Ticket[] }>;
+  createCampaign(input: CreateCampaignInput): Promise<GoalCampaign>;
+  previewRequirementIntake(input: RequirementIntakeInput): Promise<RequirementIntakePlan>;
   inspectWorktrees(repoId?: string): Promise<ManagedWorktreeItem[]>;
   gcWorktrees(options?: { repoId?: string }): Promise<WorktreeGcResult>;
   cleanupTicketWorktree(ticketId: string): Promise<Ticket | null>;

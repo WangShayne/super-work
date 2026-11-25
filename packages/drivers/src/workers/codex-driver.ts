@@ -32,16 +32,11 @@ export function buildCodexCliArgs(input: WorkerTurnInput): string[] {
   }
 
   const readOnly = input.stage === "plan" || input.stage === "review";
-  const sandboxMode = readOnly ? "read-only" : "workspace-write";
-  return [
-    "exec",
-    "--json",
-    ...extraFlags,
-    "-s",
-    sandboxMode,
-    "--approve-for-me",
-    input.prompt,
-  ];
+  // codex-cli 0.166.0 forbids combining -s with --approve-for-me
+  if (readOnly) {
+    return ["exec", "--json", ...extraFlags, "-s", "read-only", input.prompt];
+  }
+  return ["exec", "--json", ...extraFlags, "--approve-for-me", input.prompt];
 }
 
 export function parseCodexStreamLine(line: string): WorkerStreamEvent[] {

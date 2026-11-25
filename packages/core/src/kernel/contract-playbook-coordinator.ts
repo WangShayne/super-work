@@ -17,7 +17,13 @@ import type {
   RepoContractFile,
   Ticket,
 } from "../types.ts";
-import { isTerminalTicketStatus, newId, normalizeSmokeCheckConfig, nowIso } from "../utils.ts";
+import {
+  isTerminalTicketStatus,
+  newId,
+  normalizeSmokeCheckConfig,
+  normalizeVerificationStrategy,
+  nowIso,
+} from "../utils.ts";
 import type { KernelCoordinatorContext } from "./context.ts";
 
 export async function syncRepoContractOp(
@@ -84,6 +90,8 @@ export async function syncRepoContractOp(
       contract.verificationCommands !== undefined
         ? contract.verificationCommands.map((s) => String(s).trim()).filter(Boolean)
         : repo.verificationCommands,
+    verificationStrategy:
+      normalizeVerificationStrategy(contract.verificationStrategy) ?? repo.verificationStrategy,
     setupCommands:
       contract.setupCommands !== undefined
         ? contract.setupCommands.map((s) => String(s).trim()).filter(Boolean)
@@ -191,6 +199,7 @@ export async function exportRepoContractOp(
       ? { sensitivePaths: repo.sensitivePaths }
       : {}),
     verificationCommands: repo.verificationCommands ?? [],
+    ...(repo.verificationStrategy ? { verificationStrategy: repo.verificationStrategy } : {}),
     setupCommands: repo.setupCommands ?? [],
     ...(hasHooks ? { hooks: repo.hooks } : {}),
     ...(repo.smokeCheck ? { smokeCheck: repo.smokeCheck } : {}),

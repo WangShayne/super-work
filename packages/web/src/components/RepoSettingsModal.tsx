@@ -54,6 +54,7 @@ import type {
   SpecClarificationResult,
   TaskBlueprint,
   Ticket,
+  VerificationStrategy,
   VisualDiffMode,
   WorkerEngineId,
   WorktreeGcResult,
@@ -139,6 +140,8 @@ export function RepoSettingsModal({
   const [reviewEngine, setReviewEngine] = useState<WorkerEngineId>("codex");
   const [fallbackEngines, setFallbackEngines] = useState<WorkerEngineId[]>([]);
   const [sandboxMode, setSandboxMode] = useState<SandboxMode>("balanced");
+  const [verificationStrategy, setVerificationStrategy] =
+    useState<VerificationStrategy>("always_full");
   const [deliveryChannel, setDeliveryChannel] = useState<DeliveryChannel>("auto_pr_or_branch");
   const [verificationInput, setVerificationInput] = useState("");
   const [setupInput, setSetupInput] = useState("");
@@ -224,6 +227,7 @@ export function RepoSettingsModal({
     setReviewEngine(repo.preferredReviewEngine);
     setFallbackEngines(repo.fallbackEngines ?? []);
     setSandboxMode(repo.sandboxMode ?? "balanced");
+    setVerificationStrategy(repo.verificationStrategy ?? "always_full");
     setDeliveryChannel(repo.defaultDeliveryChannel ?? "auto_pr_or_branch");
     setVerificationInput((repo.verificationCommands ?? []).join("\n"));
     setSetupInput((repo.setupCommands ?? []).join("\n"));
@@ -374,6 +378,7 @@ export function RepoSettingsModal({
         preferredReviewEngine: reviewEngine,
         fallbackEngines: fallbackEngines.length > 0 ? fallbackEngines : null,
         sandboxMode,
+        verificationStrategy,
         defaultDeliveryChannel: deliveryChannel,
         verificationCommands,
         setupCommands,
@@ -434,6 +439,7 @@ export function RepoSettingsModal({
       setSmokeCheckCmds((res.repo.smokeCheck?.checkCommands ?? []).join("\n"));
       setPreviewCommand(res.repo.previewCommand ?? "");
       setSandboxMode(res.repo.sandboxMode ?? "balanced");
+      setVerificationStrategy(res.repo.verificationStrategy ?? "always_full");
       setBrowserEnabled(Boolean(res.repo.smokeCheck?.browserCheck?.enabled));
       setBrowserPaths((res.repo.smokeCheck?.browserCheck?.paths ?? ["/"]).join(", "));
       setBrowserSelector(res.repo.smokeCheck?.browserCheck?.waitForSelector ?? "");
@@ -798,6 +804,27 @@ export function RepoSettingsModal({
                     <option value="strict">{t("modal.repoSettings.sandboxStrict")}</option>
                     <option value="off">{t("modal.repoSettings.sandboxOff")}</option>
                   </select>
+                </div>
+
+                <div>
+                  <label className="block text-zinc-400 mb-1">
+                    {t("modal.repoSettings.verificationStrategyTitle")}
+                  </label>
+                  <select
+                    value={verificationStrategy}
+                    onChange={(e) => setVerificationStrategy(e.target.value as VerificationStrategy)}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-2 text-zinc-100"
+                  >
+                    <option value="always_full">
+                      {t("modal.repoSettings.verificationStrategyAlwaysFull")}
+                    </option>
+                    <option value="impact_scoped">
+                      {t("modal.repoSettings.verificationStrategyImpactScoped")}
+                    </option>
+                  </select>
+                  <p className="mt-1 text-[11px] text-zinc-500">
+                    {t("modal.repoSettings.verificationStrategyHint")}
+                  </p>
                 </div>
 
                 <div>

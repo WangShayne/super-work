@@ -27,7 +27,13 @@ function setAndEmitReloadState(ctx: KernelCoordinatorContext, partial: Partial<S
 function scheduleDrainAndReload(
   ctx: KernelCoordinatorContext,
   reason: string,
-  meta: { ticketId?: string; commitSha?: string; canaryPort?: number; canaryDurationMs?: number },
+  meta: {
+    repoId?: string;
+    ticketId?: string;
+    commitSha?: string;
+    canaryPort?: number;
+    canaryDurationMs?: number;
+  },
 ): void {
   const runner = ctx.selfHostRunner;
   if (!runner) return;
@@ -66,6 +72,27 @@ function scheduleDrainAndReload(
       activeRunsRemaining: 0,
       ...meta,
       summary: `Drain complete; reloading super-work daemon (${reason}).`,
+    });
+
+    const flightMeta = {
+      reason,
+      commitSha: meta.commitSha,
+      canaryPort: meta.canaryPort,
+      canaryDurationMs: meta.canaryDurationMs,
+    };
+    await ctx.recordFlightEvent?.({
+      repoId: meta.repoId,
+      ticketId: meta.ticketId,
+      kind: "canary_passed",
+      summary: `Boot Canary passed${meta.commitSha ? ` for ${meta.commitSha.slice(0, 8)}` : ""}`,
+      metadata: flightMeta,
+    });
+    await ctx.recordFlightEvent?.({
+      repoId: meta.repoId,
+      ticketId: meta.ticketId,
+      kind: "reload_completed",
+      summary: `Daemon reload triggered: ${reason}`,
+      metadata: flightMeta,
     });
 
     await runner.triggerProcessReload(reason);
@@ -128,6 +155,7 @@ export async function handleSelfHostPostMergeOp(
       summary: `${canary.summary}. Draining active work before reload...`,
     });
     scheduleDrainAndReload(ctx, `Self-host delivery ${deliveredTicket.id} verified by Boot Canary`, {
+      repoId: repo.id,
       ticketId: deliveredTicket.id,
       commitSha,
       canaryPort: canary.canaryPort,
@@ -179,6 +207,21 @@ export async function handleSelfHostPostMergeOp(
   };
   await ctx.stateStore.saveInboxItem(inboxItem);
   ctx.emitEvent({ type: "inbox_created", item: inboxItem, timestamp: ts });
+
+  if (revertCommitSha) {
+    await ctx.recordFlightEvent?.({
+      repoId: repo.id,
+      ticketId: deliveredTicket.id,
+      kind: "canary_rolled_back",
+      summary: `Boot Canary failed; auto-reverted ${commitSha ? commitSha.slice(0, 8) : "HEAD"} -> ${revertCommitSha.slice(0, 8)}`,
+      metadata: {
+        failedCommitSha: commitSha,
+        revertCommitSha,
+        canaryDurationMs: canary.durationMs,
+        buildOk: canary.buildOk,
+      },
+    });
+  }
 
   setAndEmitReloadState(ctx, {
     phase: revertCommitSha ? "rolled_back" : "failed",

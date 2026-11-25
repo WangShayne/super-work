@@ -20,9 +20,11 @@ import type {
   InboxItem,
   InboxItemStatus,
   MergeTrainEntry,
+  Milestone,
   OutboxEntry,
   PipelineTemplateId,
   PlaybookEntry,
+  FlightEvent,
   PreviewSession,
   RepoConfig,
   RepoContractFile,
@@ -33,6 +35,7 @@ import type {
   RequirementIntakeResult,
   RestoreCheckpointInput,
   RoutineRun,
+  RunDigestReport,
   RoutineScheduleKind,
   RoutineSpec,
   SelfReloadState,
@@ -126,6 +129,22 @@ export class SuperWorkHttpClient {
 
   getHealth(): Promise<DaemonHealth> {
     return this.request<DaemonHealth>("/api/health");
+  }
+
+  getRunDigest(options?: { repoId?: string; hours?: number }): Promise<{ digest: RunDigestReport }> {
+    const params = new URLSearchParams();
+    if (options?.repoId) params.set("repoId", options.repoId);
+    if (options?.hours !== undefined) params.set("hours", String(options.hours));
+    const qs = params.toString();
+    return this.request<{ digest: RunDigestReport }>(`/api/digest${qs ? `?${qs}` : ""}`);
+  }
+
+  listFlightEvents(options?: { repoId?: string; limit?: number }): Promise<{ events: FlightEvent[] }> {
+    const params = new URLSearchParams();
+    if (options?.repoId) params.set("repoId", options.repoId);
+    if (options?.limit !== undefined) params.set("limit", String(options.limit));
+    const qs = params.toString();
+    return this.request<{ events: FlightEvent[] }>(`/api/flight-events${qs ? `?${qs}` : ""}`);
   }
 
   getMetrics(repoId?: string): Promise<{ metrics: RepoMetricsSummary }> {
@@ -607,6 +626,40 @@ export class SuperWorkHttpClient {
   getCampaign(id: string): Promise<{ campaign: GoalCampaign; waves: GoalCampaignWave[] }> {
     return this.request<{ campaign: GoalCampaign; waves: GoalCampaignWave[] }>(
       `/api/campaigns/${encodeURIComponent(id)}`,
+    );
+  }
+
+  listMilestones(repoId?: string): Promise<{ milestones: Milestone[] }> {
+    const qs = repoId ? `?repoId=${encodeURIComponent(repoId)}` : "";
+    return this.request<{ milestones: Milestone[] }>(`/api/milestones${qs}`);
+  }
+
+  getMilestone(id: string): Promise<{ milestone: Milestone }> {
+    return this.request<{ milestone: Milestone }>(`/api/milestones/${encodeURIComponent(id)}`);
+  }
+
+  createMilestone(payload: {
+    repoId: string;
+    name: string;
+    targetVersion?: string;
+    requirements: string[];
+    preferredEngine?: EnginePreference;
+    template?: PipelineTemplateId;
+    maxBudgetUsdPerItem?: number;
+  }): Promise<{ milestone: Milestone }> {
+    return this.request<{ milestone: Milestone }>("/api/milestones", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  releaseMilestone(
+    id: string,
+    options: { bumpVersion?: boolean; createTag?: boolean; pushRemote?: boolean },
+  ): Promise<{ milestone: Milestone }> {
+    return this.request<{ milestone: Milestone }>(
+      `/api/milestones/${encodeURIComponent(id)}/release`,
+      { method: "POST", body: JSON.stringify(options) },
     );
   }
 

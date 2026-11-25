@@ -62,6 +62,7 @@ bun run setup -- --auto
 4. **效能与预算（Metrics & Budget）**：展示当日预算水位进度条、端到端交付成功率、累计花费、按引擎 × 任务类别的 Bandit 评分矩阵，以及 **Golden Eval 黄金基准回放评测台**。
 5. **下钻详情抽屉 & 命令行客户端（`bun run cli` / `super-work`）**：
    - `super-work up [-d] [--host 127.0.0.1] [--port 4318]` / `super-work service [install|uninstall|start|stop|status|logs]`：前台/系统常驻守护进程（`launchd` / `systemd --user`）安装与启停管理。
+   - `super-work milestone [list | create --name <n> [--version <v>] [--repo <id>] <需求...> | show <id> | release <id> [--bump] [--tag] [--push]]`：创建多波次里程碑并显式发布（未传 `--tag` / `--push` 时不会打标签或推送）。
    - `super-work campaign ...` / `super-work train [list|flush|eject]`：终端创建/控制指标驱动目标战役与并行合并列车队列。
    - `super-work status`、`intake [--preview] [--wait] "<需求>"`、`wait <ticketId|epicId>`、`reload [--skip-canary] [--force]`、`ask <问题>`、`steer <ticketId> <纠偏指令>`、`blueprints`、`dispatch <title> -d <desc> [--blueprint <id>] [--gate-policy <policy>] [--wait]`、`epic <title> [--preview-only|--wait]`、`inbox [list|approve|reject|batch]`、`eval [list|save|run|delete]`、`doctor [--fix]`、`backup [list|create|restore <id>]`、`bundle [export|import <file>]`、`logs <ticketId> [-f]`、`watch`、`revert <ticketId>`、`playbook [list|add|toggle|delete|sync --export]`。
 
@@ -103,6 +104,12 @@ bun run setup -- --auto
 
 ---
 
+### 5. 里程碑：多需求波次编排与受控发布（`v1.4.0`）
+1. 打开 **派单 → 里程碑批量编排**（或执行 `super-work milestone create --name "v1.4.0 发布" --version 1.4.0 "需求一" "需求二"`），填写名称、目标版本及 Markdown 列表（项目符号/编号）形式的需求清单。
+2. 路径重叠的需求自动串行到后续波次，互不相干的并行执行；可在看板上查看波次卡片。
+3. 全部交付后里程碑进入**待发布**：可在看板或收件箱「里程碑待发布」卡片中查看中英文发布说明。
+4. 显式发布：勾选「同步升级 package.json 版本」（默认勾选），按需勾选「创建 Git 标签」「推送到远端」（默认均关闭），再点击确认。同样可通过 `POST /api/milestones/:id/release`、`super-work milestone release <id> --bump` 或在收件箱批准（仅升级版本）完成。
+
 ## 四、 多任务并发最佳实践与常见问题（FAQ）
 
 1. **如何让多个 Worker 真正并发而不互相排队？**
@@ -118,3 +125,12 @@ bun run setup -- --auto
    - 提示：对 `super-work` 自身开发后可在 **环境与模型 → 系统自检与热备份 → 自举热演进** 手动触发金丝雀重启，或运行 `super-work reload`。
 4. **在哪里查看或清理工作树与数据库？**
    - 所有运行时状态库（`super-work.db`）、Spill 产物与临时 `worktrees/` 均隔离存放在 `.super-work/`（或 `SUPER_WORK_DATA_DIR` 指定目录）下，且已被 `.gitignore` 忽略；开启仓库的「自动回收 Worktree」后，任务交付或取消时会自动回收工作树目录（仍保留分支 Diff 可回看），也可以点击状态栏 **「工作树池」** 一键 GC 清理历史或孤儿目录。
+
+## 五、 自托管快速检查：里程碑与运行摘要
+
+列出所有里程碑，并以 Markdown 输出最近 24 小时的运行摘要，用于快速确认自托管实例运行正常：
+
+```bash
+super-work milestone list
+super-work digest --hours 24 --markdown
+```

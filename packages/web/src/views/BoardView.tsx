@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { lazy, Suspense, useMemo, useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -19,6 +19,8 @@ import {
 import { DagCanvas } from "../components/DagCanvas.tsx";
 import { formatStage, formatTicketStatus, type TranslationKey, useI18n } from "../i18n.tsx";
 import type { RepoConfig, Ticket, TicketStatus } from "../types.ts";
+
+const MilestonePanel = lazy(() => import("../components/MilestonePanel.tsx"));
 
 interface BoardViewProps {
   tickets: Ticket[];
@@ -139,6 +141,14 @@ export function BoardView({
 
   return (
     <div className="p-5 space-y-4 overflow-x-auto">
+      <Suspense fallback={null}>
+        <MilestonePanel
+          repoId={selectedRepoId}
+          onInspectTicket={onSelectTicket}
+          onRefreshParent={onRefresh}
+        />
+      </Suspense>
+
       {/* Board Search & Filter Toolbar */}
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-800/80 bg-zinc-900/40 px-3.5 py-2.5 text-xs">
         <div className="relative flex-1 min-w-[220px] max-w-sm">

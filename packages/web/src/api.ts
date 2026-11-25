@@ -7,6 +7,8 @@ import type {
   ChiefAskResult,
   CliScanReport,
   CreateCampaignInput,
+  CreateMilestoneInput,
+  Milestone,
   DagNodeMutationInput,
   DeliveryChannel,
   DeliveryGatePolicy,
@@ -39,7 +41,9 @@ import type {
   RepoConfig,
   RepoContractFile,
   RepoKnowledgeBundle,
+  FlightEvent,
   RepoMetricsSummary,
+  RunDigestReport,
   RequirementIntakeInput,
   RequirementIntakePlan,
   RequirementIntakeResult,
@@ -63,6 +67,7 @@ import type {
   TicketCheckpoint,
   TicketDetailResponse,
   TicketReviewComment,
+  VerificationStrategy,
   WorkerEngineId,
   WorktreeGcResult,
 } from "./types.ts";
@@ -118,6 +123,7 @@ export const api = {
     preferredImplementEngine?: EnginePreference;
     preferredReviewEngine?: WorkerEngineId;
     verificationCommands?: string[];
+    verificationStrategy?: VerificationStrategy;
     defaultDeliveryChannel?: DeliveryChannel;
     hooks?: LifecycleHooksConfig;
   }) => request<{ repo: RepoConfig }>("/api/repos", { method: "POST", body: JSON.stringify(payload) }),
@@ -275,6 +281,22 @@ export const api = {
     request<{ metrics: RepoMetricsSummary }>(
       repoId ? `/api/metrics?repoId=${encodeURIComponent(repoId)}` : "/api/metrics",
     ),
+
+  getRunDigest: (options?: { repoId?: string; hours?: number }) => {
+    const params = new URLSearchParams();
+    if (options?.repoId) params.set("repoId", options.repoId);
+    if (options?.hours !== undefined) params.set("hours", String(options.hours));
+    const qs = params.toString();
+    return request<{ digest: RunDigestReport }>(`/api/digest${qs ? `?${qs}` : ""}`);
+  },
+
+  listFlightEvents: (options?: { repoId?: string; limit?: number }) => {
+    const params = new URLSearchParams();
+    if (options?.repoId) params.set("repoId", options.repoId);
+    if (options?.limit !== undefined) params.set("limit", String(options.limit));
+    const qs = params.toString();
+    return request<{ events: FlightEvent[] }>(`/api/flight-events${qs ? `?${qs}` : ""}`);
+  },
 
   listTickets: (repoId?: string) =>
     request<{ tickets: Ticket[] }>(repoId ? `/api/tickets?repoId=${encodeURIComponent(repoId)}` : "/api/tickets"),
@@ -677,6 +699,26 @@ export const api = {
     request<{ campaign: GoalCampaign; waves: GoalCampaignWave[] }>(
       `/api/campaigns/${encodeURIComponent(id)}`,
     ),
+
+  listMilestones: (repoId?: string) =>
+    request<{ milestones: Milestone[] }>(
+      `/api/milestones${repoId ? `?repoId=${encodeURIComponent(repoId)}` : ""}`,
+    ),
+
+  createMilestone: (payload: CreateMilestoneInput) =>
+    request<{ milestone: Milestone }>("/api/milestones", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  releaseMilestone: (
+    id: string,
+    options: { bumpVersion: boolean; createTag: boolean; pushRemote: boolean },
+  ) =>
+    request<{ milestone: Milestone }>(`/api/milestones/${encodeURIComponent(id)}/release`, {
+      method: "POST",
+      body: JSON.stringify(options),
+    }),
 
   createCampaign: (payload: CreateCampaignInput) =>
     request<{ campaign: GoalCampaign }>("/api/campaigns", {

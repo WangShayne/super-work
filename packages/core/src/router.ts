@@ -604,6 +604,7 @@ export class EventIntakeRouter {
           ? effectiveInput.preferredEngine
           : undefined,
       campaignId: effectiveInput.campaignId,
+      milestoneId: effectiveInput.milestoneId,
       campaignWave: effectiveInput.campaignWave,
       targetBranch: effectiveInput.targetBranch,
       barrierGroupId: effectiveInput.barrierGroupId,

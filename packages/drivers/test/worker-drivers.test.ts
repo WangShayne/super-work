@@ -91,9 +91,13 @@ describe("Worker CLI flag mapping and JSONL stream parsers", () => {
       'model_reasoning_effort="xhigh"',
       "-s",
       "read-only",
-      "--approve-for-me",
       "Implement feature X",
     ]);
+    expect(freshReview).not.toContain("--approve-for-me");
+
+    const freshImplement = buildCodexCliArgs({ ...baseInput, stage: "implement" });
+    expect(freshImplement).toEqual(["exec", "--json", "--approve-for-me", "Implement feature X"]);
+    expect(freshImplement).not.toContain("-s");
 
     const resumeArgs = buildCodexCliArgs({
       ...baseInput,

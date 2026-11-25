@@ -23,6 +23,7 @@ import { registerAutonomyRoutes } from "./routes/autonomy-routes.ts";
 import type { ServerRouteContext } from "./routes/context.ts";
 import { registerInboxOutboxRoutes } from "./routes/inbox-outbox-routes.ts";
 import { registerMcpWebhookRoutes } from "./routes/mcp-webhook-routes.ts";
+import { registerMilestoneRoutes } from "./routes/milestone-routes.ts";
 import { registerRepoRoutes } from "./routes/repo-routes.ts";
 import { registerSetupSystemRoutes } from "./routes/setup-system-routes.ts";
 import { registerTicketRoutes } from "./routes/ticket-routes.ts";
@@ -55,6 +56,7 @@ function resolveEventTarget(
     case "routine_run_updated":
     case "eval_run_updated":
     case "campaign_updated":
+    case "milestone_updated":
     case "merge_train_updated":
       return { repoId: event.repoId };
     case "lifecycle_hook_executed":
@@ -273,6 +275,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
   registerTicketRoutes(routeCtx);
   registerInboxOutboxRoutes(routeCtx);
   registerAutonomyRoutes(routeCtx);
+  registerMilestoneRoutes(routeCtx);
   registerMcpWebhookRoutes(routeCtx);
 
   // --- Real-time SSE Bus ---

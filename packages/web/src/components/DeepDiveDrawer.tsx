@@ -34,6 +34,7 @@ import {
   Trash2,
   Wrench,
   X,
+  Zap,
 } from "lucide-react";
 import { api } from "../api.ts";
 import { DagCanvas } from "./DagCanvas.tsx";
@@ -52,10 +53,29 @@ import type {
   MemorySearchHit,
   RepoConfig,
   ReviewCommentStatus,
+  ScopedVerificationInfo,
   SubmitReviewCommentsInput,
   Ticket,
   TicketDetailResponse,
+  VerificationRunResult,
 } from "../types.ts";
+
+/**
+ * Reads the scoped-gate record of a stage run from the live SSE trail
+ * (`verification_completed` carries `{ stageRunId, result }`). Newest event wins.
+ */
+function scopedVerificationForRun(
+  events: LiveEventLogEntry[],
+  stageRunId: string,
+): ScopedVerificationInfo | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (!ev || ev.kind !== "verification_completed") continue;
+    const raw = ev.raw as { stageRunId?: string; result?: VerificationRunResult } | undefined;
+    if (raw?.stageRunId === stageRunId) return raw.result?.scopedVerification;
+  }
+  return undefined;
+}
 
 function HandoverDigestView({ digest }: { digest: HandoverDigest }) {
   const { t } = useI18n();
@@ -1024,6 +1044,7 @@ export function DeepDiveDrawer({
                   <div className="space-y-2">
                     {detail?.stageRuns.map((run) => {
                       const spans = run.spans ?? [];
+                      const scopedGate = scopedVerificationForRun(ticketLiveEvents, run.id);
                       const totalSpanMs = Math.max(
                         1,
                         spans.reduce((acc, sp) => acc + Math.max(1, sp.durationMs), 0),
@@ -1064,6 +1085,22 @@ export function DeepDiveDrawer({
                               >
                                 {run.steered ? "steered" : run.status}
                               </span>
+                              {scopedGate?.usedScoped && (
+                                <span
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 font-mono text-[10px]"
+                                  title={[scopedGate.reason, ...scopedGate.commandsRun].join("\n")}
+                                >
+                                  <Zap className="w-3 h-3" />
+                                  {t("drawer.scopedGate")}
+                                  {(scopedGate.estimatedSavedMs ?? 0) > 0 && (
+                                    <span>
+                                      {" · "}
+                                      {t("drawer.scopedGateSaved")}
+                                      {Math.round((scopedGate.estimatedSavedMs ?? 0) / 1000)}s
+                                    </span>
+                                  )}
+                                </span>
+                              )}
                             </div>
                             <span className="font-mono text-zinc-500">${run.costUsd.toFixed(3)}</span>
                           </div>

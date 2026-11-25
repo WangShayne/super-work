@@ -26,4 +26,6 @@ export * from "./outbox.ts";
 export * from "./epic.ts";
 export * from "./intake.ts";
 export * from "./router.ts";
+export * from "./digest.ts";
+export * from "./milestone.ts";
 export * from "./kernel.ts";

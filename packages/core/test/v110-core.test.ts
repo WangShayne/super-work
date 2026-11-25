@@ -280,7 +280,7 @@ describe("v1.1.0 Core Engines (B.2 Tool Profiler & Clarification + A.2 Chief + M
   });
 
   it("MCP: negotiates 1.3.0, exposes 23 tools, and dispatches steer/batch/ask_chief/manage_evals", async () => {
-    expect(MCP_TOOL_DEFINITIONS).toHaveLength(23);
+    expect(MCP_TOOL_DEFINITIONS).toHaveLength(25);
     const calls: string[] = [];
     const stubHost: McpToolHost = {
       getHealth: async () => ({ ok: true }),
@@ -322,7 +322,7 @@ describe("v1.1.0 Core Engines (B.2 Tool Profiler & Clarification + A.2 Chief + M
       { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26" } },
       stubHost,
     )) as McpJsonRpcResponse;
-    expect((initRes.result as { serverInfo: { version: string } }).serverInfo.version).toBe("1.3.0");
+    expect((initRes.result as { serverInfo: { version: string } }).serverInfo.version).toBe("1.4.0");
 
     for (const [idx, call] of [
       { name: "steer_ticket", arguments: { ticketId: "t1", instruction: "focus src/a.ts" } },

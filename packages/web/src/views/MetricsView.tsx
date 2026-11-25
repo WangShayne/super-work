@@ -1,5 +1,15 @@
-import { useCallback, useEffect, useState } from "react";
-import { Activity, AlertTriangle, Award, CheckCircle2, Cpu, DollarSign, Play, Trash2 } from "lucide-react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import {
+  Activity,
+  AlertTriangle,
+  Award,
+  CheckCircle2,
+  Cpu,
+  DollarSign,
+  Plane,
+  Play,
+  Trash2,
+} from "lucide-react";
 import { api } from "../api.ts";
 import { formatEngineDisplayName, useI18n } from "../i18n.tsx";
 import type {
@@ -9,6 +19,8 @@ import type {
   RepoMetricsSummary,
   WorkerEngineId,
 } from "../types.ts";
+
+const FlightRecorderPanel = lazy(() => import("../components/FlightRecorderPanel.tsx"));
 
 interface MetricsViewProps {
   metrics: RepoMetricsSummary | null;
@@ -28,7 +40,7 @@ function formatDurationMs(ms: number): string {
 
 export function MetricsView({ metrics, repo, availableEngines = ["mock"] }: MetricsViewProps) {
   const { locale, t } = useI18n();
-  const [subTab, setSubTab] = useState<"telemetry" | "evals">("telemetry");
+  const [subTab, setSubTab] = useState<"telemetry" | "evals" | "flight">("telemetry");
   const [evalCases, setEvalCases] = useState<EvalCase[]>([]);
   const [evalRuns, setEvalRuns] = useState<EvalRunRecord[]>([]);
   const [selectedEngines, setSelectedEngines] = useState<WorkerEngineId[]>(() =>
@@ -160,6 +172,18 @@ export function MetricsView({ metrics, repo, availableEngines = ["mock"] }: Metr
               <Award className="w-3.5 h-3.5" />
               {t("metrics.tabEvalSuite")}
             </button>
+            <button
+              type="button"
+              onClick={() => setSubTab("flight")}
+              className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-md transition ${
+                subTab === "flight"
+                  ? "bg-indigo-600 text-white font-medium"
+                  : "text-zinc-400 hover:text-zinc-200"
+              }`}
+            >
+              <Plane className="w-3.5 h-3.5" />
+              {t("metrics.tabFlight")}
+            </button>
           </div>
           {repo && (
             <div className="flex items-center gap-2 text-xs font-mono text-zinc-400">
@@ -176,7 +200,13 @@ export function MetricsView({ metrics, repo, availableEngines = ["mock"] }: Metr
         </div>
       </div>
 
-      {subTab === "evals" ? (
+      {subTab === "flight" ? (
+        <Suspense
+          fallback={<div className="p-8 text-center text-xs text-zinc-500">{t("flight.loading")}</div>}
+        >
+          <FlightRecorderPanel repoId={repo?.id} />
+        </Suspense>
+      ) : subTab === "evals" ? (
         <div className="space-y-5">
           {evalError && (
             <div className="p-3 rounded-lg border border-rose-500/40 bg-rose-500/10 text-rose-200 text-xs">

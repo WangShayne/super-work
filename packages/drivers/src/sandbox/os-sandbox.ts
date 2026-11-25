@@ -50,6 +50,7 @@ const BASE_ENV_KEYS = [
   "http_proxy",
   "https_proxy",
   "no_proxy",
+  "SUPER_WORK_IN_OS_SANDBOX",
 ];
 
 const ENGINE_ALLOWED_PREFIXES: Record<SanitizedEnvOptions["engine"], string[]> = {
@@ -456,7 +457,14 @@ export function wrapCommandWithOsSandbox(options: WrapSandboxOptions): WrappedSa
     },
   });
 
-  if (options.skipOuterSandbox) {
+  // Already inside our own Seatbelt profile: the child inherits that confinement, and a nested
+  // sandbox_init fails with "Operation not permitted" (exit 71). Explicit skipOuterSandbox:false forces wrapping.
+  const nestedInSandbox =
+    process.platform === "darwin" &&
+    options.skipOuterSandbox !== false &&
+    (options.baseEnv ?? process.env).SUPER_WORK_IN_OS_SANDBOX === "1";
+
+  if (options.skipOuterSandbox || nestedInSandbox) {
     return {
       argv: options.commandArgv,
       env,
@@ -476,6 +484,7 @@ export function wrapCommandWithOsSandbox(options: WrapSandboxOptions): WrappedSa
       allowNetwork: options.allowNetwork,
       mode,
     });
+    env.SUPER_WORK_IN_OS_SANDBOX = "1";
     return {
       argv: ["/usr/bin/sandbox-exec", "-p", profileText, ...options.commandArgv],
       env,

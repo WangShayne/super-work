@@ -1,4 +1,5 @@
 import type {
+  CodeHotspotItem,
   ArenaCandidateResult,
   ArtifactKind,
   CampaignDirection,
@@ -16,8 +17,10 @@ import type {
   EpicSubtaskSpec,
   EvalCase,
   EvalRunRecord,
+  FlightEvent,
   GoalCampaign,
   GoalCampaignWave,
+  Milestone,
   HandoverDigest,
   InboxItem,
   InboxItemStatus,
@@ -211,6 +214,13 @@ export interface WorkspaceProvider {
   getDiff(worktreePath: string, baseBranch: string): Promise<string>;
   getBranchDiff(rootRepoPath: string, baseBranch: string, branchName: string): Promise<string>;
   getRepoStructureSummary?(rootRepoPath: string): Promise<string>;
+  buildSurgicalContextPack?(input: {
+    worktreePath: string;
+    allowedPaths: string[];
+    maxFiles?: number;
+    maxChars?: number;
+  }): Promise<string | undefined>;
+  scanCodeHotspots?(rootRepoPath: string, thresholdLines?: number): Promise<CodeHotspotItem[]>;
   runVerificationCommands(
     worktreePath: string,
     commands: string[],
@@ -256,6 +266,18 @@ export interface WorkspaceProvider {
     contract: RepoContractFile,
   ): Promise<{ filePath: string; rawHash: string }>;
   analyzeSymbolImpact?(rootRepoPath: string, scopePatterns: string[]): Promise<SymbolImpactReport>;
+  resolveScopedVerification?(input: {
+    rootRepoPath: string;
+    worktreePath: string;
+    baseBranch: string;
+    fullCommands: string[];
+    sensitivePaths?: string[];
+  }): Promise<{
+    useScoped: boolean;
+    commands: string[];
+    estimatedSavedMs: number;
+    reason: string;
+  }>;
   getChangedFilesSince?(worktreePath: string, refOrSha: string): Promise<string[]>;
   revertPathsToCommit?(worktreePath: string, commitSha: string, paths: string[]): Promise<void>;
   getHeadCommitSha?(repoOrWorktreePath: string, rev?: string): Promise<string>;
@@ -326,6 +348,15 @@ export interface WorkspaceProvider {
     sandboxMode?: SandboxMode;
     forbiddenPaths?: string[];
   }): Promise<{ ok: boolean; rawOutput: string; exitCode: number; durationMs: number }>;
+  executeMilestoneRelease?(input: {
+    rootRepoPath: string;
+    baseBranch: string;
+    targetVersion?: string;
+    bumpVersion: boolean;
+    createTag: boolean;
+    pushRemote: boolean;
+    releaseNotes?: string;
+  }): Promise<{ commitSha?: string; tag?: string; bumpedFiles: string[]; pushed: boolean }>;
   resetBranchRef?(rootRepoPath: string, branchName: string, targetCommitSha: string): Promise<void>;
   prepareSpeculativeMergeSlot?(input: {
     rootRepoPath: string;
@@ -389,6 +420,14 @@ export interface StateStore {
   ): Promise<OutboxEntry[]>;
   requeueInterruptedOutboxEntries(nowIso: string): Promise<number>;
   checkpointWal?(): Promise<void> | void;
+
+  // Flight Recorder (Direction D)
+  recordFlightEvent?(event: FlightEvent): Promise<void>;
+  listFlightEvents?(filter?: {
+    repoId?: string;
+    limit?: number;
+    sinceIso?: string;
+  }): Promise<FlightEvent[]>;
 
   // Daily Budget & Metrics
   getDailyRepoSpendUsd(repoId: string, utcDatePrefix: string): Promise<number>;
@@ -467,6 +506,10 @@ export interface StateStore {
   getCampaign?(id: string): Promise<GoalCampaign | null>;
   listCampaigns?(repoId?: string): Promise<GoalCampaign[]>;
   deleteCampaign?(id: string): Promise<boolean>;
+  // Milestones (v1.4.0 Direction B)
+  saveMilestone?(milestone: Milestone): Promise<void>;
+  getMilestone?(id: string): Promise<Milestone | null>;
+  listMilestones?(repoId?: string): Promise<Milestone[]>;
   saveCampaignWave?(wave: GoalCampaignWave): Promise<void>;
   listCampaignWaves?(campaignId: string): Promise<GoalCampaignWave[]>;
 
@@ -544,6 +587,7 @@ export interface DirectTicketInput {
   acceptanceCriteria?: string[];
   threadKey?: string;
   campaignId?: string;
+  milestoneId?: string;
   campaignWave?: number;
   targetBranch?: string;
   barrierGroupId?: string;

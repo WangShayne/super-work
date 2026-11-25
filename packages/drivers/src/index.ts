@@ -4,6 +4,8 @@ export * from "./workspace/git-worktree-provider.ts";
 export * from "./workspace/readonly-repo-prober.ts";
 export * from "./workspace/repo-structure-scanner.ts";
 export * from "./workspace/symbol-graph-scanner.ts";
+export * from "./workspace/surgical-context-builder.ts";
+export * from "./workspace/impact-verification-planner.ts";
 export * from "./sandbox/os-sandbox.ts";
 export * from "./browser/cdp-browser-check.ts";
 export * from "./browser/png-visual-diff.ts";

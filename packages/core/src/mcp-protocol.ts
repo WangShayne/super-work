@@ -42,6 +42,8 @@ export interface McpToolHost {
   manageMergeTrain?(args: Record<string, unknown>): Promise<unknown>;
   dispatchRequirement?(args: Record<string, unknown>): Promise<unknown>;
   manageSelfHost?(args: Record<string, unknown>): Promise<unknown>;
+  manageMilestones?(args: Record<string, unknown>): Promise<unknown>;
+  getRunDigest?(args: Record<string, unknown>): Promise<unknown>;
 }
 
 export const MCP_PROTOCOL_VERSIONS = ["2025-03-26", "2024-11-05"] as const;
@@ -459,6 +461,41 @@ export const MCP_TOOL_DEFINITIONS = [
       required: ["action"],
     },
   },
+  {
+    name: "manage_milestones",
+    description:
+      "List, create, inspect or explicitly release Milestones: multi-requirement backlogs auto-split into dependency-ordered waves with synthesized bilingual release notes. Release never happens automatically; tag and push default to false.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["list", "create", "get", "release"] },
+        repoId: { type: "string" },
+        id: { type: "string" },
+        name: { type: "string" },
+        targetVersion: { type: "string" },
+        requirements: { type: "array", items: { type: "string" } },
+        preferredEngine: { type: "string" },
+        template: { type: "string" },
+        maxBudgetUsdPerItem: { type: "number" },
+        bumpVersion: { type: "boolean" },
+        createTag: { type: "boolean" },
+        pushRemote: { type: "boolean" },
+      },
+      required: ["action"],
+    },
+  },
+  {
+    name: "get_run_digest",
+    description:
+      "Bilingual Run Digest from the persistent Flight Recorder: delivered/reverted/escalated tickets, scoped-gate savings, canary and reload telemetry.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repoId: { type: "string" },
+        hours: { type: "number" },
+      },
+    },
+  },
 ] as const;
 
 export const MCP_RESOURCES = [
@@ -543,7 +580,7 @@ async function handleSingleMcpRequest(
             },
             serverInfo: {
               name: "super-work",
-              version: "1.3.0",
+              version: "1.4.0",
             },
           },
         };
@@ -664,6 +701,18 @@ async function handleSingleMcpRequest(
                 throw new Error("manage_self_host is not implemented on this MCP host");
               }
               result = await host.manageSelfHost(args);
+              break;
+            case "manage_milestones":
+              if (!host.manageMilestones) {
+                throw new Error("manage_milestones is not implemented on this MCP host");
+              }
+              result = await host.manageMilestones(args);
+              break;
+            case "get_run_digest":
+              if (!host.getRunDigest) {
+                throw new Error("get_run_digest is not implemented on this MCP host");
+              }
+              result = await host.getRunDigest(args);
               break;
             default:
               return jsonRpcError(id, -32601, `Unknown tool: ${name}`);

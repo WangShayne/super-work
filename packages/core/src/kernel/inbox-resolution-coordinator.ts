@@ -21,6 +21,7 @@ import { adoptArenaCandidateWinnerOp, cleanupArenaCandidateWorktreesOp } from ".
 import { deliverCampaignOp, startCampaignOp } from "./campaign-coordinator.ts";
 import type { KernelCoordinatorContext } from "./context.ts";
 import { applyEpicReplanProposalOp } from "./epic-replan-coordinator.ts";
+import { releaseMilestoneOp } from "./milestone-coordinator.ts";
 
 function utcTodayString(): string {
   return new Date().toISOString().slice(0, 10);
@@ -47,7 +48,7 @@ export async function resolveInboxItemOp(
   }
 
   let ticket = await ctx.stateStore.getTicket(item.ticketId);
-  if (!ticket && item.kind !== "campaign_paused") {
+  if (!ticket && item.kind !== "campaign_paused" && item.kind !== "milestone_ready") {
     throw new Error(`Ticket not found for inbox item: ${item.ticketId}`);
   }
 
@@ -60,6 +61,61 @@ export async function resolveInboxItemOp(
   };
   await ctx.stateStore.saveInboxItem(resolvedItem);
   ctx.emitEvent({ type: "inbox_resolved", item: resolvedItem, timestamp: ts });
+
+  if (item.kind === "milestone_ready") {
+    const milestoneId = item.contextPayload?.milestoneId as string | undefined;
+    if (decision === "approved" && milestoneId) {
+      try {
+        // Explicit human signoff: bump version only; never tag/push implicitly.
+        await releaseMilestoneOp(ctx, milestoneId, {
+          bumpVersion: true,
+          createTag: false,
+          pushRemote: false,
+        });
+      } catch (err) {
+        // Re-open the card so the human can retry after fixing the repo state.
+        await ctx.stateStore.saveInboxItem(item);
+        ctx.emitEvent({ type: "inbox_created", item, timestamp: nowIso() });
+        throw err;
+      }
+    }
+    return {
+      item: resolvedItem,
+      ticket: {
+        id: item.ticketId,
+        repoId: item.repoId,
+        threadId: `thr_${item.id}`,
+        sourceTriggerId: `trg_${item.id}`,
+        title: item.title,
+        description: item.summary,
+        status: "delivered",
+        template: "fast",
+        currentStage: "implement",
+        stageRetries: 0,
+        mandate: {
+          allowedPaths: ["**"],
+          forbiddenPaths: [],
+          allowNetwork: false,
+          allowExternalSideEffects: false,
+          maxCostUsd: 2,
+          maxDurationSec: 600,
+          maxStageRetries: 2,
+        },
+        dependsOn: [],
+        nativeSessions: {},
+        inlineMemory: {
+          goal: item.summary,
+          acceptanceCriteria: [],
+          stageNotes: [],
+          threadUpdates: [],
+        },
+        costUsd: 0,
+        priority: 1,
+        createdAt: ts,
+        updatedAt: ts,
+      },
+    };
+  }
 
   if (item.kind === "campaign_paused") {
     const campaignId = item.contextPayload?.campaignId as string | undefined;

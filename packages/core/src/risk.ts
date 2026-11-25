@@ -34,6 +34,7 @@ export interface EvaluateTicketRiskInput {
   reviewReport?: ReviewReport;
   smokeResult?: SmokeCheckResult;
   staticVerificationPassed?: boolean;
+  hotspotFiles?: Array<{ filePath: string; lineCount: number }>;
 }
 
 export function resolveEffectiveDeliveryGatePolicy(
@@ -107,6 +108,19 @@ export function evaluateTicketRisk(input: EvaluateTicketRiskInput): TicketRiskAs
       label: "Downstream symbol impact fanout",
       delta: fanoutDelta,
       detail: `${directDeps} direct, ${transitiveDeps} transitive`,
+    });
+  }
+
+  if (input.hotspotFiles && input.hotspotFiles.length > 0) {
+    rawScore += 8;
+    factors.push({
+      key: "hotspot_complexity",
+      label: "Oversized hotspot files touched",
+      delta: 8,
+      detail: input.hotspotFiles
+        .slice(0, 3)
+        .map((h) => `${h.filePath} (${h.lineCount} lines)`)
+        .join(", "),
     });
   }
 

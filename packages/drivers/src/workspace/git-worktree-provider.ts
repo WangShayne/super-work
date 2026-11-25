@@ -8,6 +8,7 @@ import type {
   BrowserCheckConfig,
   ConflictFileHunk,
   ControlProbeRequest,
+  CodeHotspotItem,
   ControlProbeStep,
   RepoConfig,
   RepoContractFile,
@@ -26,11 +27,17 @@ import { runCdpBrowserCheck, type BrowserCheckExecutionResult } from "../browser
 import { comparePngVisualDiff } from "../browser/png-visual-diff.ts";
 import { wrapCommandWithOsSandbox, buildSanitizedWorkerEnv } from "../sandbox/os-sandbox.ts";
 import {
+  resolveImpactScopedVerification,
+  type ImpactScopedVerificationInput,
+  type ImpactScopedVerificationPlan,
+} from "./impact-verification-planner.ts";
+import {
   executeReadOnlyProbeTool,
   runDeterministicRepoPreProbe,
 } from "./readonly-repo-prober.ts";
 import { scanRepoStructureSummary } from "./repo-structure-scanner.ts";
 import { analyzeRepoSymbolImpact } from "./symbol-graph-scanner.ts";
+import { buildSurgicalContextPackImpl, scanCodeHotspotsImpl } from "./surgical-context-builder.ts";
 
 export async function allocateFreeLocalPort(): Promise<number> {
   return new Promise<number>((resolvePort, rejectPort) => {
@@ -1211,6 +1218,25 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     return analyzeRepoSymbolImpact(rootRepoPath, scopePatterns);
   }
 
+  async buildSurgicalContextPack(input: {
+    worktreePath: string;
+    allowedPaths: string[];
+    maxFiles?: number;
+    maxChars?: number;
+  }): Promise<string | undefined> {
+    return buildSurgicalContextPackImpl(input);
+  }
+
+  async scanCodeHotspots(rootRepoPath: string, thresholdLines = 1500): Promise<CodeHotspotItem[]> {
+    return scanCodeHotspotsImpl(rootRepoPath, thresholdLines);
+  }
+
+  async resolveScopedVerification(
+    input: ImpactScopedVerificationInput,
+  ): Promise<ImpactScopedVerificationPlan> {
+    return resolveImpactScopedVerification(input, { runGit });
+  }
+
   async getHeadCommitSha(repoOrWorktreePath: string, rev = "HEAD"): Promise<string> {
     const res = await runGit(["rev-parse", "--verify", rev], repoOrWorktreePath);
     if (res.exitCode !== 0 || !res.stdout.trim()) {
@@ -1533,6 +1559,114 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     } finally {
       await this.cleanupWorkspace(wtPath, input.rootRepoPath).catch(() => {});
     }
+  }
+
+  /**
+   * Controlled Milestone release on the base branch. Version bump, tag and push are each
+   * independently opt-in; nothing is tagged or pushed unless explicitly requested.
+   */
+  async executeMilestoneRelease(input: {
+    rootRepoPath: string;
+    baseBranch: string;
+    targetVersion?: string;
+    bumpVersion: boolean;
+    createTag: boolean;
+    pushRemote: boolean;
+    releaseNotes?: string;
+  }): Promise<{ commitSha?: string; tag?: string; bumpedFiles: string[]; pushed: boolean }> {
+    const { rootRepoPath, baseBranch } = input;
+    const version = input.targetVersion?.trim().replace(/^v/i, "");
+    const doBump = input.bumpVersion && Boolean(version);
+    const doTag = input.createTag === true && Boolean(version);
+    const doPush = input.pushRemote === true;
+    const result: { commitSha?: string; tag?: string; bumpedFiles: string[]; pushed: boolean } = {
+      bumpedFiles: [],
+      pushed: false,
+    };
+    if (!doBump && !doTag && !doPush) return result;
+
+    const must = async (args: string[], what: string): Promise<GitCommandResult> => {
+      const res = await runGit(args, rootRepoPath);
+      if (res.exitCode !== 0) {
+        throw new Error(`${what} failed: ${(res.stderr || res.stdout).trim()}`);
+      }
+      return res;
+    };
+
+    const head = await must(["rev-parse", "--abbrev-ref", "HEAD"], "Resolve HEAD");
+    if (head.stdout.trim() !== baseBranch) {
+      await must(["checkout", baseBranch], `Checkout ${baseBranch}`);
+    }
+    const dirty = await must(["status", "--porcelain", "--untracked-files=no"], "Git status");
+    if (dirty.stdout.trim()) {
+      throw new Error(`Refusing milestone release: '${baseBranch}' has uncommitted tracked changes`);
+    }
+
+    if (doBump && version) {
+      const candidates = ["package.json"];
+      const pkgDir = join(rootRepoPath, "packages");
+      if (existsSync(pkgDir)) {
+        const entries = await readdir(pkgDir, { withFileTypes: true });
+        for (const e of entries.filter((d) => d.isDirectory()).sort((a, b) => a.name.localeCompare(b.name))) {
+          candidates.push(`packages/${e.name}/package.json`);
+        }
+      }
+      const versionRe = /("version"\s*:\s*")[^"]*(")/;
+      for (const rel of candidates) {
+        const abs = join(rootRepoPath, rel);
+        if (!existsSync(abs)) continue;
+        const raw = await readFile(abs, "utf8");
+        if (!versionRe.test(raw)) continue;
+        const next = raw.replace(versionRe, `$1${version}$2`);
+        if (next === raw) continue;
+        await writeFile(abs, next, "utf8");
+        result.bumpedFiles.push(rel);
+      }
+      if (result.bumpedFiles.length > 0) {
+        await must(["add", "--", ...result.bumpedFiles], "Stage version bump");
+        await must(
+          [
+            "-c",
+            "user.name=super-work",
+            "-c",
+            "user.email=super-work@localhost",
+            "commit",
+            "-m",
+            `chore(release): bump version to v${version}`,
+          ],
+          "Commit version bump",
+        );
+      }
+    }
+
+    const sha = await runGit(["rev-parse", "HEAD"], rootRepoPath);
+    if (sha.exitCode === 0) result.commitSha = sha.stdout.trim();
+
+    if (doTag && version) {
+      const tag = `v${version}`;
+      await must(
+        [
+          "-c",
+          "user.name=super-work",
+          "-c",
+          "user.email=super-work@localhost",
+          "tag",
+          "-a",
+          tag,
+          "-m",
+          input.releaseNotes?.trim() ? input.releaseNotes.trim().slice(0, 4000) : `Release ${tag}`,
+        ],
+        `Create tag ${tag}`,
+      );
+      result.tag = tag;
+    }
+
+    if (doPush) {
+      await must(["push", "origin", baseBranch], `Push ${baseBranch}`);
+      if (result.tag) await must(["push", "origin", result.tag], `Push ${result.tag}`);
+      result.pushed = true;
+    }
+    return result;
   }
 
   async resetBranchRef(

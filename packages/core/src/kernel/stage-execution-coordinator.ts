@@ -29,6 +29,7 @@ import type {
   InboxItem,
   RepoConfig,
   ReviewReport,
+  ScopedVerificationInfo,
   SmokeCheckResult,
   SpillArtifact,
   StageKind,
@@ -217,6 +218,65 @@ export async function ensureVisualBaselineDirOp(
   }
 }
 
+const FINAL_GATE_FULL_REASON = "final delivery gate enforces full verification";
+
+/**
+ * Decides which commands the static gate executes. Only repos opted into
+ * `impact_scoped` ever get a `scopedVerification` record; the default
+ * (`always_full`) path returns the configured commands untouched.
+ * Final delivery gates (rebase, unified-epic final, merge train) never narrow.
+ */
+async function resolveGateCommands(
+  ctx: KernelCoordinatorContext,
+  ticket: Ticket,
+  repo: RepoConfig,
+  worktreePath: string,
+  commands: string[],
+  options?: { isFinalDeliveryGate?: boolean },
+): Promise<{ commandsToRun: string[]; scopedVerification?: ScopedVerificationInfo }> {
+  if (repo.verificationStrategy !== "impact_scoped") {
+    return { commandsToRun: commands };
+  }
+
+  const full = (reason: string) => ({
+    commandsToRun: commands,
+    scopedVerification: { usedScoped: false, commandsRun: commands, reason },
+  });
+
+  if (options?.isFinalDeliveryGate === true) {
+    return full(FINAL_GATE_FULL_REASON);
+  }
+  if (!ctx.workspace.resolveScopedVerification) {
+    return full("workspace provider does not support scoped verification");
+  }
+
+  try {
+    const resolved = await ctx.workspace.resolveScopedVerification({
+      rootRepoPath: repo.rootPath,
+      worktreePath,
+      baseBranch: ticket.targetBranch ?? repo.baseBranch,
+      fullCommands: commands,
+      sensitivePaths: repo.sensitivePaths,
+    });
+    if (resolved.useScoped && resolved.commands.length > 0) {
+      return {
+        commandsToRun: resolved.commands,
+        scopedVerification: {
+          usedScoped: true,
+          commandsRun: resolved.commands,
+          skippedFullCommands: commands,
+          estimatedSavedMs: resolved.estimatedSavedMs,
+          reason: resolved.reason,
+        },
+      };
+    }
+    return full(resolved.reason);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return full(`scoped planner failed (${msg.slice(0, 160)}); ran full verification`);
+  }
+}
+
 export async function runRepoVerificationGateOp(
   ctx: KernelCoordinatorContext,
   ticket: Ticket,
@@ -236,10 +296,22 @@ export async function runRepoVerificationGateOp(
   let staticResult: VerificationRunResult | undefined;
 
   if (commands.length > 0) {
-    const staticSpan = spans.start("static_verify", `Static verify (${commands.length} cmd)`);
-    staticResult = await ctx.workspace.runVerificationCommands(
+    const { commandsToRun, scopedVerification } = await resolveGateCommands(
+      ctx,
+      ticket,
+      repo,
       worktreePath,
       commands,
+      options,
+    );
+    const usedScoped = scopedVerification?.usedScoped === true;
+    const staticSpan = spans.start(
+      "static_verify",
+      `Static verify (${commandsToRun.length} cmd${usedScoped ? ", scoped" : ""})`,
+    );
+    const rawResult = await ctx.workspace.runVerificationCommands(
+      worktreePath,
+      commandsToRun,
       ticket.mandate.maxDurationSec,
       {
         sandboxMode: repo.sandboxMode ?? "balanced",
@@ -249,21 +321,42 @@ export async function runRepoVerificationGateOp(
         rootRepoPath: repo.rootPath,
       },
     );
+    staticResult = scopedVerification ? { ...rawResult, scopedVerification } : rawResult;
+    if (scopedVerification?.usedScoped) {
+      await ctx.recordFlightEvent?.({
+        repoId: repo.id,
+        ticketId: ticket.id,
+        kind: "scoped_gate_run",
+        summary: `Impact-scoped gate ran ${commandsToRun.length} cmd(s); ${scopedVerification.reason}`,
+        savedMs: scopedVerification.estimatedSavedMs,
+        metadata: {
+          stage: stageRun.stage,
+          ok: rawResult.ok,
+          commandsRun: scopedVerification.commandsRun,
+          skippedFullCommands: scopedVerification.skippedFullCommands,
+        },
+      });
+    }
     spans.end(staticSpan, staticResult.ok ? "ok" : "failed", staticResult.failedCommand);
 
-    const logBody = staticResult.results
+    const commandLogBody = staticResult.results
       .map(
         (r) =>
           `$ ${r.command}\n[exit=${r.exitCode}, duration=${r.durationMs}ms]\n${r.output || "(no output)"}\n`,
       )
       .join("\n---\n");
+    const scopedHeader =
+      scopedVerification && usedScoped
+        ? `[scoped gate] ${scopedVerification.reason}\n[skipped full commands] ${(scopedVerification.skippedFullCommands ?? []).join(" && ")}\n\n`
+        : "";
+    const logBody = commandLogBody ? `${scopedHeader}${commandLogBody}` : "";
 
     const testArtifact = await ctx.artifactStore.writeSpill(
       {
         ticketId: ticket.id,
         stageRunId: stageRun.id,
         kind: "test_log",
-        summary: `${staticResult.ok ? "PASS" : "FAIL"} verification (${commands.join(" && ")})`,
+        summary: `${staticResult.ok ? "PASS" : "FAIL"} verification${usedScoped ? " [scoped]" : ""} (${commandsToRun.join(" && ")})`,
         ext: "log",
       },
       logBody || staticResult.summary,
@@ -480,6 +573,9 @@ export async function runRepoVerificationGateOp(
       ? [staticResult?.summary, sanitizedSmokeRes.summary].filter(Boolean).join("\n")
       : `Smoke check failed (${sanitizedSmokeRes.failedStep ?? smokeCfg!.startCommand}): ${sanitizedSmokeRes.summary}`,
     smokeResult: sanitizedSmokeRes,
+    ...(staticResult?.scopedVerification
+      ? { scopedVerification: staticResult.scopedVerification }
+      : {}),
   };
 
   ctx.emitEvent({
@@ -1081,6 +1177,14 @@ export async function runTicketStageOp(
         };
         await ctx.stateStore.saveStageRun(abortedRun);
         await ctx.stateStore.saveTicket(nextTicket);
+        await ctx.recordFlightEvent?.({
+          repoId: repo.id,
+          ticketId: ticket.id,
+          kind: "watchdog_switch",
+          engine: altEngine,
+          summary: `Watchdog switched engine ${driver.engine} -> ${altEngine}: ${dec.reason}`,
+          metadata: { fromEngine: driver.engine, toEngine: altEngine, stage: stageRun.stage },
+        });
         ctx.emitEvent({ type: "ticket_updated", ticket: nextTicket, timestamp: nextTicket.updatedAt });
         return;
       }

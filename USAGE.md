@@ -62,6 +62,7 @@ bun run setup -- --auto
 4. **Metrics & Budget**: Live daily budget progress, delivery rate, cumulative cost, per-engine latency & pass-rate metrics, Bandit matrix, and the **Golden Eval Suite** comparison board.
 5. **Deep Dive Drawer & `@super-work/cli`** (`bun run cli` / `super-work`):
    - `super-work up [-d] [--host 127.0.0.1] [--port 4318]` / `super-work service [install|uninstall|start|stop|status|logs]` — Manage foreground or OS background daemon (`launchd` / `systemd --user`).
+   - `super-work milestone [list | create --name <n> [--version <v>] [--repo <id>] <req...> | show <id> | release <id> [--bump] [--tag] [--push]]` — Create multi-wave Milestones and release them explicitly (tag/push are off unless you pass `--tag` / `--push`).
    - `super-work campaign ...` / `super-work train [list|flush|eject]` — Drive metric Goal Campaigns and inspect/flush/eject Merge Train queues.
    - `super-work status`, `intake [--preview] [--wait] "<requirement>"`, `wait <ticketId|epicId>`, `reload [--skip-canary] [--force]`, `ask <question>`, `steer <ticketId> <instruction>`, `blueprints`, `dispatch <title> -d <desc> [--blueprint <id>] [--gate-policy <policy>] [--wait]`, `epic <title> [--preview-only|--wait]`, `inbox [list|approve|reject|batch]`, `eval [list|save|run|delete]`, `doctor [--fix]`, `backup [list|create|restore <id>]`, `bundle [export|import <file>]`, `logs <ticketId> [-f]`, `watch [--repo <id>|--ticket <id>]`, `revert <ticketId>`, `playbook [list|add|toggle|delete|sync --export]` — Drop raw natural-language requirements via `intake`, wait on live SSE progress, trigger Boot Canary self-reloads, live-steer workers, query Chief-of-Staff, run Golden Evals, manage backups/restores, and revert merges safely.
 
@@ -102,6 +103,12 @@ bun run setup -- --auto
 
 ---
 
+### 5. Milestones: Multi-Requirement Waves & Controlled Release (`v1.4.0`)
+1. Open **Dispatch → Milestone** (or run `super-work milestone create --name "v1.4.0 release" --version 1.4.0 "req one" "req two"`), enter a name, the target version and a Markdown bullet/numbered list of requirements.
+2. Requirements touching overlapping paths are serialized into later waves automatically; independent ones run in parallel. Track wave cards on the Board.
+3. When every item is delivered the milestone turns **Ready to release**: review the EN/ZH release notes on the Board or in the Inbox `MILESTONE READY` card.
+4. Release explicitly: tick *bump versions* (default on), optionally *create tag* / *push* (both default off), then confirm. The same flow is available via `POST /api/milestones/:id/release`, `super-work milestone release <id> --bump`, or approving the Inbox card (bump only).
+
 ## 4. Concurrency Best Practices & FAQ
 
 1. **How do multiple Workers run truly in parallel without blocking each other?**
@@ -117,3 +124,12 @@ bun run setup -- --auto
    - Tip: For self-hosted restarts on `super-work` itself, open **Env & LLM → Doctor & Hot Backup → Self-Host Reload** or run `super-work reload`.
 4. **Where are runtime databases, worktrees, and Spill artifacts stored?**
    - Everything lives inside `.super-work/` (or `SUPER_WORK_DATA_DIR`), which is ignored by `.gitignore`. By default, delivered and cancelled worktree directories are automatically reclaimed while keeping committed branches viewable, or click **Worktrees** in the header strip to run manual GC.
+
+## 5. Quick Self-Hosted Milestone & Digest Check
+
+List your milestones and print the last 24 hours of run digest in Markdown to confirm a self-hosted instance is healthy:
+
+```bash
+super-work milestone list
+super-work digest --hours 24 --markdown
+```

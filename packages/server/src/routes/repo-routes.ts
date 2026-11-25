@@ -5,6 +5,7 @@ import {
   newId,
   normalizePlaybookRuleText,
   normalizeSmokeCheckConfig,
+  normalizeVerificationStrategy,
   nowIso,
 } from "@super-work/core";
 import type {
@@ -17,6 +18,7 @@ import type {
   SandboxMode,
   SmokeCheckConfig,
   TaskBlueprint,
+  VerificationStrategy,
   WorkerEngineId,
 } from "@super-work/core";
 import { type ServerRouteContext, normalizeHooksConfig } from "./context.ts";
@@ -73,6 +75,7 @@ export function registerRepoRoutes(ctx: ServerRouteContext): void {
       verificationCommands: Array.isArray(body.verificationCommands)
         ? body.verificationCommands.map((s) => String(s).trim()).filter(Boolean)
         : [],
+      verificationStrategy: normalizeVerificationStrategy(body.verificationStrategy),
       setupCommands: Array.isArray(body.setupCommands)
         ? body.setupCommands.map((s) => String(s).trim()).filter(Boolean)
         : [],
@@ -123,7 +126,9 @@ export function registerRepoRoutes(ctx: ServerRouteContext): void {
       | "sensitivePaths"
       | "blueprints"
       | "hooks"
+      | "verificationStrategy"
     > & {
+      verificationStrategy?: VerificationStrategy | null;
       maxConcurrentWorkers?: number | null;
       dailyBudgetUsd?: number | null;
       conventions?: string | null;
@@ -195,6 +200,10 @@ export function registerRepoRoutes(ctx: ServerRouteContext): void {
         patch.verificationCommands !== undefined
           ? patch.verificationCommands.map((s) => String(s).trim()).filter(Boolean)
           : (existing.verificationCommands ?? []),
+      verificationStrategy:
+        patch.verificationStrategy !== undefined
+          ? normalizeVerificationStrategy(patch.verificationStrategy)
+          : existing.verificationStrategy,
       setupCommands:
         patch.setupCommands !== undefined
           ? patch.setupCommands.map((s) => String(s).trim()).filter(Boolean)

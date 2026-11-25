@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { MilestoneDispatchForm } from "./MilestoneDispatchForm.tsx";
 import {
   Activity,
   AlertTriangle,
@@ -158,7 +159,9 @@ export function DispatchTaskModal({
   onIntakeSuccess,
 }: DispatchModalProps) {
   const { locale, t } = useI18n();
-  const [dispatchMode, setDispatchMode] = useState<"intake" | "single" | "epic">("intake");
+  const [dispatchMode, setDispatchMode] = useState<"intake" | "single" | "epic" | "milestone">(
+    "intake",
+  );
   const [intakeRequirement, setIntakeRequirement] = useState("");
   const [intakeTitle, setIntakeTitle] = useState("");
   const [intakeRoute, setIntakeRoute] = useState<"auto" | RequirementRouteKind>("auto");
@@ -550,7 +553,7 @@ export function DispatchTaskModal({
         </div>
 
         {/* Mode Switcher */}
-        <div className="grid grid-cols-3 gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/70 p-1 text-xs">
+        <div className="grid grid-cols-4 gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/70 p-1 text-xs">
           <button
             type="button"
             onClick={() => setDispatchMode("intake")}
@@ -586,8 +589,23 @@ export function DispatchTaskModal({
             <Layers className="w-3.5 h-3.5" />
             {t("modal.dispatch.modeEpic")}
           </button>
+          <button
+            type="button"
+            onClick={() => setDispatchMode("milestone")}
+            className={`inline-flex items-center justify-center gap-1.5 py-1.5 rounded-md font-medium transition ${
+              dispatchMode === "milestone"
+                ? "bg-indigo-600 text-white"
+                : "text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            <GitBranch className="w-3.5 h-3.5" />
+            {t("milestone.modeTab")}
+          </button>
         </div>
 
+        {dispatchMode === "milestone" ? (
+          <MilestoneDispatchForm repoId={repoId} onClose={onClose} />
+        ) : (
         <form onSubmit={handleSubmit} className="space-y-3 text-xs">
           {dispatchMode === "intake" ? (
             <div className="space-y-3">
@@ -1462,6 +1480,7 @@ export function DispatchTaskModal({
             </button>
           </div>
         </form>
+        )}
       </div>
     </div>
   );
