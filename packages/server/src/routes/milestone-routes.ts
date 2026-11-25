@@ -1,4 +1,9 @@
-import type { EnginePreference, PipelineTemplateId } from "@super-work/core";
+import type {
+  EnginePreference,
+  MilestoneIntegrationMode,
+  PipelineTemplateId,
+  RequirementRouteKind,
+} from "@super-work/core";
 import type { ServerRouteContext } from "./context.ts";
 
 export function registerMilestoneRoutes(ctx: ServerRouteContext): void {
@@ -19,7 +24,16 @@ export function registerMilestoneRoutes(ctx: ServerRouteContext): void {
       preferredEngine?: EnginePreference;
       template?: PipelineTemplateId;
       maxBudgetUsdPerItem?: number;
+      integrationMode?: MilestoneIntegrationMode;
+      preferredRoute?: "auto" | RequirementRouteKind;
     };
+    if (
+      body.integrationMode !== undefined &&
+      body.integrationMode !== "direct_main" &&
+      body.integrationMode !== "milestone_branch"
+    ) {
+      return c.json({ error: "integrationMode must be direct_main or milestone_branch" }, 400);
+    }
     if (!body.repoId || !body.name || !Array.isArray(body.requirements)) {
       return c.json({ error: "repoId, name and requirements[] are required" }, 400);
     }
@@ -33,6 +47,8 @@ export function registerMilestoneRoutes(ctx: ServerRouteContext): void {
         template: body.template,
         maxBudgetUsdPerItem:
           typeof body.maxBudgetUsdPerItem === "number" ? body.maxBudgetUsdPerItem : undefined,
+        integrationMode: body.integrationMode,
+        preferredRoute: body.preferredRoute,
       });
       return c.json({ milestone }, 201);
     } catch (err) {
@@ -51,6 +67,8 @@ export function registerMilestoneRoutes(ctx: ServerRouteContext): void {
       bumpVersion?: boolean;
       createTag?: boolean;
       pushRemote?: boolean;
+      squashReleaseCommit?: boolean;
+      releaseCommitMessage?: string;
     };
     const id = c.req.param("id");
     const existing = await kernel.getMilestone(id);
@@ -60,6 +78,9 @@ export function registerMilestoneRoutes(ctx: ServerRouteContext): void {
         bumpVersion: body.bumpVersion === true,
         createTag: body.createTag === true,
         pushRemote: body.pushRemote === true,
+        squashReleaseCommit: body.squashReleaseCommit === true,
+        releaseCommitMessage:
+          typeof body.releaseCommitMessage === "string" ? body.releaseCommitMessage : undefined,
       });
       return c.json({ milestone });
     } catch (err) {

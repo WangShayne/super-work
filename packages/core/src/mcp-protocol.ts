@@ -44,6 +44,7 @@ export interface McpToolHost {
   manageSelfHost?(args: Record<string, unknown>): Promise<unknown>;
   manageMilestones?(args: Record<string, unknown>): Promise<unknown>;
   getRunDigest?(args: Record<string, unknown>): Promise<unknown>;
+  manageEngineHealth?(args: Record<string, unknown>): Promise<unknown>;
 }
 
 export const MCP_PROTOCOL_VERSIONS = ["2025-03-26", "2024-11-05"] as const;
@@ -480,6 +481,23 @@ export const MCP_TOOL_DEFINITIONS = [
         bumpVersion: { type: "boolean" },
         createTag: { type: "boolean" },
         pushRemote: { type: "boolean" },
+        integrationMode: { type: "string", enum: ["direct_main", "milestone_branch"] },
+        preferredRoute: { type: "string", enum: ["auto", "single_ticket"] },
+        squashReleaseCommit: { type: "boolean" },
+        releaseCommitMessage: { type: "string" },
+      },
+      required: ["action"],
+    },
+  },
+  {
+    name: "manage_engine_health",
+    description:
+      "Inspect or recover the Engine Circuit Breaker: list per-engine health, reset a tripped engine, or re-probe engines.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["list", "reset", "probe"] },
+        engine: { type: "string", enum: ["claude", "codex", "gemini", "opencode", "mock"] },
       },
       required: ["action"],
     },
@@ -580,7 +598,7 @@ async function handleSingleMcpRequest(
             },
             serverInfo: {
               name: "super-work",
-              version: "1.4.0",
+              version: "1.5.0",
             },
           },
         };
@@ -707,6 +725,12 @@ async function handleSingleMcpRequest(
                 throw new Error("manage_milestones is not implemented on this MCP host");
               }
               result = await host.manageMilestones(args);
+              break;
+            case "manage_engine_health":
+              if (!host.manageEngineHealth) {
+                throw new Error("manage_engine_health is not implemented on this MCP host");
+              }
+              result = await host.manageEngineHealth(args);
               break;
             case "get_run_digest":
               if (!host.getRunDigest) {

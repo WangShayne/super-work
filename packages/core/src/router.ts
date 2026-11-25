@@ -614,6 +614,9 @@ export class EventIntakeRouter {
       deliveryGatePolicy: effectiveInput.deliveryGatePolicy ?? repo.deliveryGatePolicy,
       riskThreshold: effectiveInput.riskThreshold ?? repo.riskThreshold,
       tddMode: tddMode || undefined,
+      refactorGuard: effectiveInput.refactorGuard?.targetHotspotPath
+        ? effectiveInput.refactorGuard
+        : undefined,
       pauseBeforeRun: effectiveInput.pauseBeforeRun || undefined,
       taskCategory: classifyTaskCategory(effectiveInput.title, effectiveInput.description, mandate.allowedPaths),
       impactSummary: semantic.impactSummary,

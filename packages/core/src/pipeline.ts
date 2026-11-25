@@ -86,6 +86,21 @@ export function selectEngineForStage(
   repo: RepoConfig,
   stage: StageKind,
   explicitOverride?: EnginePreference,
+  trippedEngines?: WorkerEngineId[],
+): WorkerEngineId {
+  const base = selectEngineForStageBase(repo, stage, explicitOverride);
+  if (!trippedEngines?.includes(base) || base === "mock") return base;
+  // Skip a tripped engine: prefer a healthy real engine in default order, else keep the original.
+  const healthy = (["claude", "codex", "gemini", "opencode"] as WorkerEngineId[]).find(
+    (e) => e !== base && !trippedEngines.includes(e),
+  );
+  return healthy ?? base;
+}
+
+function selectEngineForStageBase(
+  repo: RepoConfig,
+  stage: StageKind,
+  explicitOverride?: EnginePreference,
 ): WorkerEngineId {
   if (explicitOverride && explicitOverride !== "auto") {
     return explicitOverride;
@@ -104,8 +119,15 @@ export function selectReviewEngine(input: {
   implementEngine: WorkerEngineId;
   availableEngines: WorkerEngineId[];
   explicitWatchdogEngine?: WorkerEngineId;
+  trippedEngines?: WorkerEngineId[];
 }): WorkerEngineId {
-  const { repo, implementEngine, availableEngines, explicitWatchdogEngine } = input;
+  const { repo, implementEngine, explicitWatchdogEngine } = input;
+  const tripped = input.trippedEngines ?? [];
+  const healthyAvailable = input.availableEngines.filter((e) => e === "mock" || !tripped.includes(e));
+  // Never leave the pool without a real engine: if all real engines are tripped, use the full list.
+  const availableEngines = healthyAvailable.some((e) => e !== "mock")
+    ? healthyAvailable
+    : input.availableEngines;
   if (explicitWatchdogEngine && availableEngines.includes(explicitWatchdogEngine)) {
     return explicitWatchdogEngine;
   }

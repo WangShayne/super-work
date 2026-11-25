@@ -402,6 +402,12 @@ export interface InlineMemory {
   activeHint?: string;
 }
 
+export interface RefactorGuardConfig {
+  targetHotspotPath?: string;
+  maxLinesAfter?: number;
+  enforceExportParity?: boolean;
+}
+
 export interface Ticket {
   id: string;
   repoId: string;
@@ -438,6 +444,7 @@ export interface Ticket {
   arenaCandidates?: ArenaCandidateResult[];
   arenaWinnerId?: string;
   tddMode?: boolean;
+  refactorGuard?: RefactorGuardConfig;
   lockedTestPaths?: string[];
   specTestCommitSha?: string;
   specTestChallengeCount?: number;
@@ -1364,7 +1371,30 @@ export type FlightEventKind =
   | "scoped_gate_run"
   | "watchdog_switch"
   | "milestone_ready"
-  | "milestone_released";
+  | "milestone_released"
+  | "engine_tripped"
+  | "spillover_quarantined";
+
+export type EngineHealthStatus = "healthy" | "tripped";
+
+export type EngineHealthFailureKind =
+  | "model_unsupported"
+  | "tier_ineligible"
+  | "auth_invalid"
+  | "quota_exhausted"
+  | "transient";
+
+export interface EngineHealthRecord {
+  engine: WorkerEngineId;
+  status: EngineHealthStatus;
+  failureKind?: EngineHealthFailureKind;
+  reason?: string;
+  trippedAt?: string;
+  cooldownUntil?: string;
+  consecutiveFailures: number;
+  lastProbedAt?: string;
+  updatedAt: string;
+}
 
 export interface FlightEvent {
   id: string;
@@ -1433,11 +1463,15 @@ export interface MilestoneItem {
   summary?: string;
 }
 
+export type MilestoneIntegrationMode = "direct_main" | "milestone_branch";
+
 export interface Milestone {
   id: string;
   repoId: string;
   name: string;
   targetVersion?: string;
+  integrationMode?: MilestoneIntegrationMode;
+  stagingBranch?: string;
   status: MilestoneStatus;
   items: MilestoneItem[];
   releaseNotesZh?: string;
@@ -1457,4 +1491,6 @@ export interface CreateMilestoneInput {
   preferredEngine?: EnginePreference;
   template?: PipelineTemplateId;
   maxBudgetUsdPerItem?: number;
+  integrationMode?: MilestoneIntegrationMode;
+  preferredRoute?: "auto" | "single_ticket";
 }

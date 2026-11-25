@@ -36,7 +36,7 @@ import {
   runDeterministicRepoPreProbe,
 } from "./readonly-repo-prober.ts";
 import { scanRepoStructureSummary } from "./repo-structure-scanner.ts";
-import { analyzeRepoSymbolImpact } from "./symbol-graph-scanner.ts";
+import { analyzeRepoSymbolImpact, verifyHotspotParityImpl } from "./symbol-graph-scanner.ts";
 import { buildSurgicalContextPackImpl, scanCodeHotspotsImpl } from "./surgical-context-builder.ts";
 
 export async function allocateFreeLocalPort(): Promise<number> {
@@ -85,6 +85,26 @@ export async function runGit(
   return { exitCode, stdout, stderr };
 }
 
+interface PorcelainEntry {
+  xy: string;
+  path: string;
+}
+
+async function readPorcelainEntries(cwd: string): Promise<PorcelainEntry[]> {
+  const res = await runGit(["status", "--porcelain", "-uall", "-z"], cwd);
+  if (res.exitCode !== 0) return [];
+  const tokens = res.stdout.split("\0");
+  const out: PorcelainEntry[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (!t || t.length < 4) continue;
+    const xy = t.slice(0, 2);
+    out.push({ xy, path: t.slice(3) });
+    if (xy.includes("R") || xy.includes("C")) i++; // skip the rename/copy origin token
+  }
+  return out;
+}
+
 export type BrowserCheckRunner = (
   baseUrl: string,
   config: BrowserCheckConfig,
@@ -123,6 +143,19 @@ export class GitWorktreeProvider implements WorkspaceProvider {
         );
       }
     }
+  }
+
+  async ensureBranchExists(input: {
+    rootRepoPath: string;
+    branchName: string;
+    baseBranch: string;
+  }): Promise<void> {
+    const check = await runGit(
+      ["rev-parse", "--verify", "--quiet", `refs/heads/${input.branchName}`],
+      input.rootRepoPath,
+    );
+    if (check.exitCode === 0) return;
+    await this.ensureBranch(input.rootRepoPath, input.branchName, input.baseBranch);
   }
 
   async getRepoStructureSummary(rootRepoPath: string): Promise<string> {
@@ -416,6 +449,68 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     return check.exitCode === 0 ? baseRef : baseBranch;
   }
 
+  /** Dirty (modified/staged/untracked) paths of the root repo, repo-relative. */
+  async snapshotRepoDirtyPaths(rootRepoPath: string): Promise<string[]> {
+    const entries = await readPorcelainEntries(rootRepoPath);
+    return Array.from(new Set(entries.map((e) => e.path))).sort();
+  }
+
+  /**
+   * Isolates writes a worker leaked into the root repo during a turn: tracked paths that were not
+   * dirty beforehand are restored to HEAD, new untracked files are deleted. Pre-existing dirty paths
+   * are never touched. The reverted diff + untracked list is returned for audit.
+   */
+  async quarantineRepoSpillover(input: {
+    rootRepoPath: string;
+    preTurnDirtyPaths: string[];
+  }): Promise<{ quarantinedPaths: string[]; diffSummary: string }> {
+    const root = resolve(input.rootRepoPath);
+    const pre = new Set(input.preTurnDirtyPaths);
+    const isSafe = (p: string): boolean =>
+      !!p &&
+      !p.startsWith("/") &&
+      !p.split("/").includes("..") &&
+      p !== ".git" &&
+      !p.startsWith(".git/") &&
+      !p.startsWith(".super-work/");
+    const fresh = (await readPorcelainEntries(root)).filter((e) => !pre.has(e.path) && isSafe(e.path));
+    if (fresh.length === 0) return { quarantinedPaths: [], diffSummary: "" };
+
+    const untracked = fresh.filter((e) => e.xy === "??").map((e) => e.path);
+    const added = fresh.filter((e) => e.xy !== "??" && e.xy.includes("A")).map((e) => e.path);
+    const modified = fresh.filter((e) => e.xy !== "??" && !e.xy.includes("A")).map((e) => e.path);
+
+    const parts: string[] = [];
+    const trackedPaths = [...modified, ...added];
+    if (trackedPaths.length > 0) {
+      const diff = await runGit(["diff", "HEAD", "--", ...trackedPaths], root);
+      parts.push(`## Tracked changes reverted\n${diff.stdout.trim() || trackedPaths.join("\n")}`);
+    }
+    if (untracked.length > 0) {
+      parts.push(`## Untracked files removed\n${untracked.join("\n")}`);
+    }
+    const quarantined: string[] = [];
+    if (modified.length > 0) {
+      const res = await runGit(["checkout", "HEAD", "--", ...modified], root);
+      if (res.exitCode === 0) quarantined.push(...modified);
+    }
+    if (added.length > 0) {
+      const res = await runGit(["rm", "-f", "-q", "--", ...added], root);
+      if (res.exitCode === 0) quarantined.push(...added);
+    }
+    for (const rel of untracked) {
+      const abs = resolve(root, rel);
+      if (!abs.startsWith(`${root}/`)) continue;
+      try {
+        await rm(abs, { force: true });
+        quarantined.push(rel);
+      } catch {
+        // leave in place; reported as not quarantined
+      }
+    }
+    return { quarantinedPaths: quarantined.sort(), diffSummary: parts.join("\n\n") };
+  }
+
   async getChangedFiles(worktreePath: string, baseBranch: string): Promise<string[]> {
     const diffBase = await this.resolveDiffBase(worktreePath, baseBranch);
     const [diffTracked, diffCached, untracked] = await Promise.all([
@@ -509,6 +604,9 @@ export class GitWorktreeProvider implements WorkspaceProvider {
               allowNetwork: options?.allowNetwork,
               engine: "verification",
               baseEnv: options?.env ?? process.env,
+              // Balanced: keep env secret scrubbing but skip the outer sandbox-exec so test suites that
+              // launch headless Chrome (own sandbox_init) are not denied by a nested Seatbelt.
+              skipOuterSandbox: sandboxMode === "balanced" ? true : undefined,
             })
           : {
               argv: baseArgv,
@@ -1218,6 +1316,30 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     return analyzeRepoSymbolImpact(rootRepoPath, scopePatterns);
   }
 
+  async getDiffStat(worktreePath: string, baseBranch: string): Promise<string> {
+    const res = await runGit(["diff", "--stat", `${baseBranch}...HEAD`], worktreePath);
+    if (res.exitCode === 0) return res.stdout.trim();
+    const fallback = await runGit(
+      ["diff", "--stat", await this.resolveDiffBase(worktreePath, baseBranch)],
+      worktreePath,
+    );
+    return fallback.exitCode === 0 ? fallback.stdout.trim() : "";
+  }
+
+  async verifyHotspotRefactorParity(input: {
+    worktreePath: string;
+    baseBranch: string;
+    targetHotspotPath: string;
+    maxLinesAfter: number;
+    enforceExportParity: boolean;
+  }) {
+    const readBase = async (rel: string): Promise<string | null> => {
+      const res = await runGit(["show", `${input.baseBranch}:${rel}`], input.worktreePath);
+      return res.exitCode === 0 ? res.stdout : null;
+    };
+    return verifyHotspotParityImpl({ ...input, readBase });
+  }
+
   async buildSurgicalContextPack(input: {
     worktreePath: string;
     allowedPaths: string[];
@@ -1573,17 +1695,34 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     createTag: boolean;
     pushRemote: boolean;
     releaseNotes?: string;
-  }): Promise<{ commitSha?: string; tag?: string; bumpedFiles: string[]; pushed: boolean }> {
+    stagingBranch?: string;
+    squashReleaseCommit?: boolean;
+    releaseCommitMessage?: string;
+  }): Promise<{
+    commitSha?: string;
+    tag?: string;
+    bumpedFiles: string[];
+    pushed: boolean;
+    squashed?: boolean;
+  }> {
     const { rootRepoPath, baseBranch } = input;
     const version = input.targetVersion?.trim().replace(/^v/i, "");
     const doBump = input.bumpVersion && Boolean(version);
     const doTag = input.createTag === true && Boolean(version);
     const doPush = input.pushRemote === true;
-    const result: { commitSha?: string; tag?: string; bumpedFiles: string[]; pushed: boolean } = {
+    const doSquash = input.squashReleaseCommit === true;
+    const stagingBranch = input.stagingBranch?.trim() || undefined;
+    const result: {
+      commitSha?: string;
+      tag?: string;
+      bumpedFiles: string[];
+      pushed: boolean;
+      squashed?: boolean;
+    } = {
       bumpedFiles: [],
       pushed: false,
     };
-    if (!doBump && !doTag && !doPush) return result;
+    if (!doBump && !doTag && !doPush && !doSquash && !stagingBranch) return result;
 
     const must = async (args: string[], what: string): Promise<GitCommandResult> => {
       const res = await runGit(args, rootRepoPath);
@@ -1600,6 +1739,36 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     const dirty = await must(["status", "--porcelain", "--untracked-files=no"], "Git status");
     if (dirty.stdout.trim()) {
       throw new Error(`Refusing milestone release: '${baseBranch}' has uncommitted tracked changes`);
+    }
+
+    const identity = ["-c", "user.name=super-work", "-c", "user.email=super-work@localhost"];
+    const preReleaseSha = (await must(["rev-parse", "HEAD"], "Resolve pre-release HEAD")).stdout.trim();
+
+    if (stagingBranch) {
+      const exists = await runGit(
+        ["show-ref", "--verify", "--quiet", `refs/heads/${stagingBranch}`],
+        rootRepoPath,
+      );
+      if (exists.exitCode === 0) {
+        const merged = await runGit(
+          [
+            ...identity,
+            "merge",
+            "--no-ff",
+            "-m",
+            `Merge milestone staging branch ${stagingBranch}`,
+            stagingBranch,
+          ],
+          rootRepoPath,
+        );
+        if (merged.exitCode !== 0) {
+          await runGit(["merge", "--abort"], rootRepoPath).catch(() => undefined);
+          throw new Error(
+            `Merge ${stagingBranch} into ${baseBranch} failed: ${(merged.stderr || merged.stdout).trim()}`,
+          );
+        }
+        await runGit(["branch", "-D", stagingBranch], rootRepoPath);
+      }
     }
 
     if (doBump && version) {
@@ -1636,6 +1805,34 @@ export class GitWorktreeProvider implements WorkspaceProvider {
           ],
           "Commit version bump",
         );
+      }
+    }
+
+    if (doSquash) {
+      const preSquashHead = (await must(["rev-parse", "HEAD"], "Resolve HEAD")).stdout.trim();
+      if (preSquashHead !== preReleaseSha) {
+        const preTree = (await must(["rev-parse", "HEAD^{tree}"], "Resolve tree")).stdout.trim();
+        await must(["reset", "--soft", preReleaseSha], "Soft reset for squash");
+        await must(
+          [
+            ...identity,
+            "commit",
+            "--allow-empty",
+            "-m",
+            input.releaseCommitMessage?.trim() || `feat: release v${version ?? "milestone"}`,
+          ],
+          "Commit squashed release",
+        );
+        const postTree = (await must(["rev-parse", "HEAD^{tree}"], "Resolve tree")).stdout.trim();
+        if (postTree !== preTree) {
+          await runGit(["reset", "--hard", preSquashHead], rootRepoPath);
+          throw new Error(
+            `Squash release tree mismatch (${postTree} != ${preTree}); restored ${preSquashHead}`,
+          );
+        }
+        result.squashed = true;
+      } else {
+        result.squashed = false;
       }
     }
 

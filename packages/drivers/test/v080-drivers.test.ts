@@ -1,5 +1,5 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createDefaultMandate, type RepoConfig, type Ticket } from "@super-work/core";
@@ -106,7 +106,8 @@ describe("v0.8.0 Drivers (C.1 OS Sandbox & Env Scrubbing + B.1 CDP Browser Gate)
     tempDirs.push(dir);
     const repoPath = await createTempGitRepo(dir, "sandbox-repo");
     const worktreeBase = join(dir, "worktrees");
-    const outsideFile = join(dir, "outside-secret.txt");
+    // Host temp dirs are intentionally writable (v1.5.0), so probe a denied area: the user home.
+    const outsideFile = join(homedir(), `.sw-v080-outside-${Date.now()}.txt`);
 
     const workspace = new GitWorktreeProvider(worktreeBase);
     const repo: RepoConfig = {

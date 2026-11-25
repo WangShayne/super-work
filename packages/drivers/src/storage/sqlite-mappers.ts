@@ -1,5 +1,6 @@
 import type {
   ArenaCandidateResult,
+  RefactorGuardConfig,
   CampaignDeliveryMode,
   CampaignDirection,
   CampaignStatus,
@@ -7,6 +8,8 @@ import type {
   CasebookEntry,
   ConflictSemanticContext,
   DeliveryGatePolicy,
+  EngineHealthFailureKind,
+  EngineHealthRecord,
   EnginePreference,
   EpicReplanProposal,
   EvalCandidateRun,
@@ -18,6 +21,7 @@ import type {
   GoalCampaignWave,
   HandoverDigest,
   Milestone,
+  MilestoneIntegrationMode,
   MilestoneItem,
   MilestoneStatus,
   InboxItem,
@@ -207,6 +211,9 @@ export function mapTicketRow(r: Record<string, unknown>): Ticket {
     tddMode: Boolean(r.tdd_mode),
     lockedTestPaths: r.locked_test_paths_json
       ? (JSON.parse(String(r.locked_test_paths_json)) as string[])
+      : undefined,
+    refactorGuard: r.refactor_guard_json
+      ? (JSON.parse(String(r.refactor_guard_json)) as RefactorGuardConfig)
       : undefined,
     specTestCommitSha: r.spec_test_commit_sha ? String(r.spec_test_commit_sha) : undefined,
     specTestChallengeCount:
@@ -438,6 +445,10 @@ export function mapMilestoneRow(r: Record<string, unknown>): Milestone {
     digestSummary: r.digest_summary ? String(r.digest_summary) : undefined,
     releasedCommitSha: r.released_commit_sha ? String(r.released_commit_sha) : undefined,
     releasedTag: r.released_tag ? String(r.released_tag) : undefined,
+    integrationMode: r.integration_mode
+      ? (String(r.integration_mode) as MilestoneIntegrationMode)
+      : undefined,
+    stagingBranch: r.staging_branch ? String(r.staging_branch) : undefined,
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
   };
@@ -665,6 +676,20 @@ export function mapMergeTrainEntryRow(r: Record<string, unknown>): MergeTrainEnt
     mergedCommitSha: r.merged_commit_sha ? String(r.merged_commit_sha) : undefined,
     errorSummary: r.error_summary ? String(r.error_summary) : undefined,
     createdAt: String(r.created_at),
+    updatedAt: String(r.updated_at),
+  };
+}
+
+export function mapEngineHealthRow(r: Record<string, unknown>): EngineHealthRecord {
+  return {
+    engine: String(r.engine) as WorkerEngineId,
+    status: String(r.status) as EngineHealthRecord["status"],
+    ...(r.failure_kind != null ? { failureKind: String(r.failure_kind) as EngineHealthFailureKind } : {}),
+    ...(r.reason != null ? { reason: String(r.reason) } : {}),
+    ...(r.tripped_at != null ? { trippedAt: String(r.tripped_at) } : {}),
+    ...(r.cooldown_until != null ? { cooldownUntil: String(r.cooldown_until) } : {}),
+    consecutiveFailures: Number(r.consecutive_failures ?? 0),
+    ...(r.last_probed_at != null ? { lastProbedAt: String(r.last_probed_at) } : {}),
     updatedAt: String(r.updated_at),
   };
 }

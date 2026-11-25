@@ -29,3 +29,4 @@ export * from "./router.ts";
 export * from "./digest.ts";
 export * from "./milestone.ts";
 export * from "./kernel.ts";
+export * from "./engine-health.ts";

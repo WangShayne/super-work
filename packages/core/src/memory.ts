@@ -6,6 +6,7 @@ import type {
   HandoverDigest,
   InlineStageNote,
   MemorySearchHit,
+  ReviewEvidencePacket,
   ReviewFinding,
   SmokeCheckConfig,
   SpillArtifact,
@@ -23,6 +24,45 @@ export interface WorkerPromptOptions {
   casebookContext?: string;
   upstreamHandovers?: HandoverDigest[];
   surgicalContextPack?: string;
+  reviewEvidence?: ReviewEvidencePacket;
+}
+
+const REVIEW_EVIDENCE_MAX_CHARS = 2800;
+
+export function formatReviewEvidence(packet: ReviewEvidencePacket): string {
+  const base = packet.baseBranch;
+  const head = [
+    `## Authoritative Review Diff & Gate Evidence`,
+    `Committed diff target: \`git diff ${base}...HEAD\` (base branch: ${base}).`,
+    `NOTE: a clean working tree does NOT mean an empty diff — the implementation is already committed on the branch. Review the committed branch diff above, not \`git diff\` of uncommitted changes.`,
+  ].join("\n");
+  const gateLines = [
+    `Preceding gate: ${packet.gatePassed ? "PASS" : "FAIL"}`,
+    `Gate commands: ${packet.gateCommands.length > 0 ? packet.gateCommands.join(" && ") : "(none)"}`,
+    ...(packet.gateDurationMs !== undefined ? [`Gate duration: ${packet.gateDurationMs}ms`] : []),
+    `Gate summary: ${packet.gateSummary.replace(/\s+/g, " ").trim().slice(0, 400)}`,
+  ].join("\n");
+
+  const budgetFor = (used: number) => Math.max(0, REVIEW_EVIDENCE_MAX_CHARS - used);
+  const fixed = head.length + gateLines.length + 80;
+  const filesBudget = Math.min(900, budgetFor(fixed));
+  let filesBlock = "";
+  const shown: string[] = [];
+  for (const f of packet.changedFiles) {
+    const next = [...shown, f].join(", ");
+    if (next.length > filesBudget) break;
+    shown.push(f);
+  }
+  const hidden = packet.changedFiles.length - shown.length;
+  filesBlock = `Changed files (${packet.changedFiles.length}): ${shown.join(", ") || "(none)"}${hidden > 0 ? ` (+${hidden} more)` : ""}`;
+
+  const statBudget = Math.max(0, budgetFor(fixed + filesBlock.length) - 40);
+  const stat = packet.diffStat.trim();
+  const statBlock = stat
+    ? `Diff stat:\n${stat.length > statBudget ? `${stat.slice(0, statBudget)}\n…(truncated)` : stat}`
+    : `Diff stat: (unavailable)`;
+
+  return [head, filesBlock, statBlock, gateLines].join("\n").slice(0, REVIEW_EVIDENCE_MAX_CHARS);
 }
 
 export class MemoryManager {
@@ -83,6 +123,10 @@ export class MemoryManager {
       sections.push(
         `\n## Surgical Symbol & Line Map\n${opts.surgicalContextPack.trim().slice(0, 2400)}`,
       );
+    }
+
+    if (stage === "review" && opts.reviewEvidence) {
+      sections.push(`\n${formatReviewEvidence(opts.reviewEvidence)}`);
     }
 
     if (opts.playbookContext?.trim()) {

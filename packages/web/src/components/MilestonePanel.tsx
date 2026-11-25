@@ -42,6 +42,7 @@ function MilestoneCard({
   const [bumpVersion, setBumpVersion] = useState(true);
   const [createTag, setCreateTag] = useState(false);
   const [pushRemote, setPushRemote] = useState(false);
+  const [squash, setSquash] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [releasing, setReleasing] = useState(false);
   const [error, setError] = useState("");
@@ -54,7 +55,12 @@ function MilestoneCard({
     setReleasing(true);
     setError("");
     try {
-      await api.releaseMilestone(milestone.id, { bumpVersion, createTag, pushRemote });
+      await api.releaseMilestone(milestone.id, {
+        bumpVersion,
+        createTag,
+        pushRemote,
+        squashReleaseCommit: squash,
+      });
       setConfirming(false);
       onChanged();
     } catch (err) {
@@ -82,6 +88,14 @@ function MilestoneCard({
           >
             {t(`milestone.status.${milestone.status}` as TranslationKey)}
           </span>
+          {milestone.stagingBranch && (
+            <span
+              title={milestone.stagingBranch}
+              className="px-1.5 py-0.5 rounded border border-violet-500/30 bg-violet-500/15 text-[10px] font-mono text-violet-300 truncate max-w-[220px]"
+            >
+              {t("milestone.stagingBadge")}: {milestone.stagingBranch}
+            </span>
+          )}
         </div>
         <span className="text-zinc-500">
           {delivered}/{milestone.items.length}
@@ -182,6 +196,14 @@ function MilestoneCard({
               />
               {t("milestone.optPush")}
             </label>
+            <label className="inline-flex items-center gap-1.5">
+              <input
+                type="checkbox"
+                checked={squash}
+                onChange={(e) => setSquash(e.target.checked)}
+              />
+              {t("milestone.optSquash")}
+            </label>
           </div>
 
           {error && <div className="text-rose-400">{error}</div>}
@@ -223,6 +245,65 @@ function MilestoneCard({
   );
 }
 
+function ReleasedMilestoneRow({ milestone }: { milestone: Milestone }) {
+  const { locale, t } = useI18n();
+  const [open, setOpen] = useState(false);
+  const [notesLang, setNotesLang] = useState<"zh" | "en">(locale);
+  const notes = notesLang === "zh" ? milestone.releaseNotesZh : milestone.releaseNotesEn;
+
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5 space-y-2 text-xs">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="w-full flex flex-wrap items-center justify-between gap-2 text-left"
+      >
+        <span className="flex items-center gap-2 min-w-0">
+          <span className="font-medium text-zinc-200 truncate">{milestone.name}</span>
+          {milestone.targetVersion && (
+            <span className="px-1.5 py-0.5 rounded border border-emerald-500/30 bg-emerald-500/15 text-[10px] text-emerald-300">
+              v{milestone.targetVersion}
+            </span>
+          )}
+          {milestone.releasedCommitSha && (
+            <span
+              className="font-mono text-[10px] text-zinc-500"
+              title={`${t("milestone.releasedCommit")}: ${milestone.releasedCommitSha}`}
+            >
+              {milestone.releasedCommitSha.slice(0, 8)}
+            </span>
+          )}
+        </span>
+        <span className="text-[11px] text-zinc-500">
+          {open ? t("milestone.historyHide") : t("milestone.historyShow")}
+        </span>
+      </button>
+      {open && (
+        <div className="space-y-2">
+          <div className="inline-flex rounded-md border border-zinc-800 overflow-hidden">
+            {(["zh", "en"] as const).map((lang) => (
+              <button
+                key={lang}
+                type="button"
+                onClick={() => setNotesLang(lang)}
+                className={`px-2 py-0.5 text-[11px] ${
+                  notesLang === lang ? "bg-indigo-600 text-white" : "text-zinc-400 hover:text-zinc-200"
+                }`}
+              >
+                {t(lang === "zh" ? "milestone.notesZh" : "milestone.notesEn")}
+              </button>
+            ))}
+          </div>
+          <pre className="max-h-60 overflow-auto whitespace-pre-wrap rounded-lg border border-zinc-800 bg-zinc-950/70 p-3 text-zinc-300 leading-relaxed font-sans">
+            {notes || t("milestone.noNotes")}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function MilestonePanel({
   repoId,
   onInspectTicket,
@@ -230,6 +311,8 @@ export default function MilestonePanel({
 }: MilestonePanelProps) {
   const { t } = useI18n();
   const [milestones, setMilestones] = useState<Milestone[]>([]);
+  const [released, setReleased] = useState<Milestone[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(async () => {
@@ -239,6 +322,7 @@ export default function MilestonePanel({
       setMilestones(
         res.milestones.filter((m) => m.status === "active" || m.status === "ready_to_release"),
       );
+      setReleased(res.milestones.filter((m) => m.status === "released"));
     } catch {
       // Milestones are optional; stay silent when the daemon predates v1.4.
     } finally {
@@ -252,7 +336,7 @@ export default function MilestonePanel({
     return () => clearInterval(timer);
   }, [load]);
 
-  if (milestones.length === 0) return null;
+  if (milestones.length === 0 && released.length === 0) return null;
 
   return (
     <section className="space-y-2.5">
@@ -280,6 +364,25 @@ export default function MilestonePanel({
           }}
         />
       ))}
+      {released.length > 0 && (
+        <div className="space-y-2 border-t border-zinc-800 pt-2.5">
+          <button
+            type="button"
+            onClick={() => setHistoryOpen((v) => !v)}
+            aria-expanded={historyOpen}
+            className="w-full flex items-center justify-between text-xs font-semibold uppercase tracking-wider text-zinc-400 hover:text-zinc-200"
+          >
+            <span>
+              {t("milestone.historyTitle")} ({released.length})
+            </span>
+            <span className="text-[11px] font-normal normal-case text-zinc-500">
+              {historyOpen ? t("milestone.historyHide") : t("milestone.historyShow")}
+            </span>
+          </button>
+          {historyOpen &&
+            released.map((m) => <ReleasedMilestoneRow key={m.id} milestone={m} />)}
+        </div>
+      )}
     </section>
   );
 }

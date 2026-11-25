@@ -479,6 +479,14 @@ export function registerMcpWebhookRoutes(ctx: ServerRouteContext): void {
           template: args.template as PipelineTemplateId | undefined,
           maxBudgetUsdPerItem:
             typeof args.maxBudgetUsdPerItem === "number" ? args.maxBudgetUsdPerItem : undefined,
+          integrationMode:
+            args.integrationMode === "milestone_branch" || args.integrationMode === "direct_main"
+              ? args.integrationMode
+              : undefined,
+          preferredRoute:
+            args.preferredRoute === "auto" || args.preferredRoute === "single_ticket"
+              ? args.preferredRoute
+              : undefined,
         });
         return { milestone };
       }
@@ -487,10 +495,29 @@ export function registerMcpWebhookRoutes(ctx: ServerRouteContext): void {
           bumpVersion: args.bumpVersion === true,
           createTag: args.createTag === true,
           pushRemote: args.pushRemote === true,
+          squashReleaseCommit: args.squashReleaseCommit === true,
+          releaseCommitMessage:
+            typeof args.releaseCommitMessage === "string" ? args.releaseCommitMessage : undefined,
         });
         return { milestone };
       }
       throw new Error(`Unknown milestone action: ${action}`);
+    },
+    manageEngineHealth: async (args) => {
+      const action = String(args.action ?? "list");
+      const engines = ["claude", "codex", "gemini", "opencode", "mock"] as const;
+      const engine = engines.find((e) => e === args.engine);
+      if (args.engine && !engine) throw new Error(`Unknown engine: ${String(args.engine)}`);
+      if (action === "list") return { engines: await kernel.listEngineHealth() };
+      if (action === "reset") {
+        if (!engine) throw new Error("engine is required for reset");
+        return { engine: await kernel.resetEngineHealth(engine) };
+      }
+      if (action === "probe") {
+        const probed = await kernel.reprobeEngineHealth(engine);
+        return { probed, engines: await kernel.listEngineHealth() };
+      }
+      throw new Error(`Unknown engine health action: ${action}`);
     },
     getRunDigest: async (args) => {
       const rawHours = Number(args.hours ?? 24);
@@ -507,7 +534,7 @@ export function registerMcpWebhookRoutes(ctx: ServerRouteContext): void {
   app.get("/api/mcp", (c) => {
     return c.json({
       name: "super-work",
-      version: "1.4.0",
+      version: "1.5.0",
       transport: "streamable-http",
       endpoint: "/api/mcp",
     });

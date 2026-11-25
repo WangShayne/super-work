@@ -94,6 +94,22 @@ export interface BrowserCheckSummary {
   summary: string;
 }
 
+export interface ReviewEvidencePacket {
+  baseBranch: string;
+  diffStat: string;
+  changedFiles: string[];
+  gatePassed: boolean;
+  gateCommands: string[];
+  gateDurationMs?: number;
+  gateSummary: string;
+}
+
+export interface RefactorGuardConfig {
+  targetHotspotPath?: string;
+  maxLinesAfter?: number;
+  enforceExportParity?: boolean;
+}
+
 export interface SmokeCheckConfig {
   enabled: boolean;
   startCommand: string;
@@ -738,6 +754,7 @@ export interface Ticket {
   arenaCandidates?: ArenaCandidateResult[];
   arenaWinnerId?: string;
   tddMode?: boolean;
+  refactorGuard?: RefactorGuardConfig;
   lockedTestPaths?: string[];
   specTestCommitSha?: string;
   specTestChallengeCount?: number;
@@ -816,7 +833,8 @@ export type ArtifactKind =
   | "review_report"
   | "handover"
   | "screenshot"
-  | "visual_diff";
+  | "visual_diff"
+  | "log";
 
 export interface SpillArtifact {
   id: string;
@@ -1671,6 +1689,29 @@ export interface SelfReloadState {
   updatedAt: string;
 }
 
+// --- Persistent Engine Circuit Breaker (v1.5.0 Direction A) ---
+
+export type EngineHealthStatus = "healthy" | "tripped";
+
+export type EngineHealthFailureKind =
+  | "model_unsupported"
+  | "tier_ineligible"
+  | "auth_invalid"
+  | "quota_exhausted"
+  | "transient";
+
+export interface EngineHealthRecord {
+  engine: WorkerEngineId;
+  status: EngineHealthStatus;
+  failureKind?: EngineHealthFailureKind;
+  reason?: string;
+  trippedAt?: string;
+  cooldownUntil?: string;
+  consecutiveFailures: number;
+  lastProbedAt?: string;
+  updatedAt: string;
+}
+
 // --- Flight Recorder & Run Digest (Direction D) ---
 
 export type FlightEventKind =
@@ -1680,7 +1721,9 @@ export type FlightEventKind =
   | "scoped_gate_run"
   | "watchdog_switch"
   | "milestone_ready"
-  | "milestone_released";
+  | "milestone_released"
+  | "engine_tripped"
+  | "spillover_quarantined";
 
 export interface FlightEvent {
   id: string;
@@ -1722,6 +1765,8 @@ export interface RunDigestReport {
     reloadsCompleted: number;
     canaryRolledBack: number;
     watchdogSwitches: number;
+    engineTripped: number;
+    spilloverQuarantined: number;
   };
   engines: RunDigestEngineBreakdown[];
   events: FlightEvent[];
@@ -1749,11 +1794,15 @@ export interface MilestoneItem {
   summary?: string;
 }
 
+export type MilestoneIntegrationMode = "direct_main" | "milestone_branch";
+
 export interface Milestone {
   id: string;
   repoId: string;
   name: string;
   targetVersion?: string;
+  integrationMode?: MilestoneIntegrationMode;
+  stagingBranch?: string;
   status: MilestoneStatus;
   items: MilestoneItem[];
   releaseNotesZh?: string;

@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { api } from "../api.ts";
 import { useI18n } from "../i18n.tsx";
+import type { MilestoneIntegrationMode } from "../types.ts";
 
 /** Split a Markdown bullet / numbered list (or plain lines) into individual requirements. */
 export function parseMilestoneRequirements(raw: string): string[] {
@@ -21,6 +22,8 @@ export function MilestoneDispatchForm({ repoId, onClose, onCreated }: MilestoneD
   const [name, setName] = useState("");
   const [version, setVersion] = useState("");
   const [text, setText] = useState("");
+  const [integrationMode, setIntegrationMode] = useState<MilestoneIntegrationMode>("milestone_branch");
+  const [preferredRoute, setPreferredRoute] = useState<"auto" | "single_ticket">("auto");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
@@ -38,6 +41,8 @@ export function MilestoneDispatchForm({ repoId, onClose, onCreated }: MilestoneD
         name: name.trim(),
         targetVersion: version.trim() || undefined,
         requirements,
+        integrationMode,
+        preferredRoute,
       });
       await onCreated?.();
       onClose();
@@ -68,6 +73,30 @@ export function MilestoneDispatchForm({ repoId, onClose, onCreated }: MilestoneD
             placeholder={t("milestone.versionPlaceholder")}
             className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-1.5 text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
           />
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="block text-zinc-400 mb-1">{t("milestone.integrationLabel")}</label>
+          <select
+            value={integrationMode}
+            onChange={(e) => setIntegrationMode(e.target.value as MilestoneIntegrationMode)}
+            className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-1.5 text-zinc-200 focus:outline-none focus:border-indigo-500"
+          >
+            <option value="milestone_branch">{t("milestone.integration.milestone_branch")}</option>
+            <option value="direct_main">{t("milestone.integration.direct_main")}</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-zinc-400 mb-1">{t("milestone.routeLabel")}</label>
+          <select
+            value={preferredRoute}
+            onChange={(e) => setPreferredRoute(e.target.value as "auto" | "single_ticket")}
+            className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-1.5 text-zinc-200 focus:outline-none focus:border-indigo-500"
+          >
+            <option value="auto">{t("milestone.route.auto")}</option>
+            <option value="single_ticket">{t("milestone.route.single_ticket")}</option>
+          </select>
         </div>
       </div>
       <div>

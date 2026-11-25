@@ -74,7 +74,7 @@ const LABELS_EN: DigestLabels = {
   cost: "Cost (USD)",
   gate: (n, s) => `Impact-scoped gate: ${n} run(s), saved ${s}`,
   selfHost: (c) =>
-    `Self-host: ${c.canaryPassed} canary passed, ${c.reloadsCompleted} reloads, ${c.canaryRolledBack} rollbacks, ${c.watchdogSwitches} watchdog switches`,
+    `Self-host: ${c.canaryPassed} canary passed, ${c.reloadsCompleted} reloads, ${c.canaryRolledBack} rollbacks, ${c.watchdogSwitches} watchdog switches, ${c.engineTripped ?? 0} engine trips, ${c.spilloverQuarantined ?? 0} spillover quarantines`,
   engineHeader: ["Engine", "Tickets", "Delivered", "Failed/Reverted", "Pass rate", "Cost (USD)", "Avg duration"],
   events: "Recent flight events",
   none: "(none)",
@@ -91,7 +91,7 @@ const LABELS_ZH: DigestLabels = {
   cost: "花费 (USD)",
   gate: (n, s) => `影响范围校验门：${n} 次运行，节省 ${s}`,
   selfHost: (c) =>
-    `自举：Canary 通过 ${c.canaryPassed} 次，重载 ${c.reloadsCompleted} 次，回滚 ${c.canaryRolledBack} 次，Watchdog 切换 ${c.watchdogSwitches} 次`,
+    `自举：Canary 通过 ${c.canaryPassed} 次，重载 ${c.reloadsCompleted} 次，回滚 ${c.canaryRolledBack} 次，Watchdog 切换 ${c.watchdogSwitches} 次，引擎熔断 ${c.engineTripped ?? 0} 次，溢出隔离 ${c.spilloverQuarantined ?? 0} 次`,
   engineHeader: ["引擎", "工单", "已交付", "失败/回滚", "通过率", "花费 (USD)", "平均耗时"],
   events: "最近飞行事件",
   none: "（无）",
@@ -200,6 +200,8 @@ export function buildRunDigestReport(input: BuildRunDigestInput): RunDigestRepor
       reloadsCompleted: count("reload_completed"),
       canaryRolledBack: count("canary_rolled_back"),
       watchdogSwitches: count("watchdog_switch"),
+      engineTripped: count("engine_tripped"),
+      spilloverQuarantined: count("spillover_quarantined"),
     },
     engines,
     events: events.slice(0, MAX_DIGEST_EVENTS),

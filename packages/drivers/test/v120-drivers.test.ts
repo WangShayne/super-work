@@ -297,6 +297,9 @@ describe("v1.2.0 Drivers (SQLite Split, Hooks/Train Git Ops, ReadOnly super-work
       worktreePath: "/tmp/wt-test",
       rootRepoPath: "/tmp/repo-test",
       sandboxTempDir: "/tmp/sw-tmp",
+      // Hermetic: host $TMPDIR/home may legitimately contain "super-work" in their paths.
+      hostTempDirs: ["/tmp/sw-host-tmp"],
+      homeDir: "/tmp/sw-home",
       mode: "balanced",
       allowNetwork: false,
       forbiddenPaths: [".env", "**/.env.*"],

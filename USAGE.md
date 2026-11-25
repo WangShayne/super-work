@@ -109,6 +109,13 @@ bun run setup -- --auto
 3. When every item is delivered the milestone turns **Ready to release**: review the EN/ZH release notes on the Board or in the Inbox `MILESTONE READY` card.
 4. Release explicitly: tick *bump versions* (default on), optionally *create tag* / *push* (both default off), then confirm. The same flow is available via `POST /api/milestones/:id/release`, `super-work milestone release <id> --bump`, or approving the Inbox card (bump only).
 
+### 6. Milestone Staging Branch & Squash Release (`v1.5.0`)
+1. In **Dispatch → Milestone** pick **Integration mode = Milestone staging branch** (CLI: `super-work milestone create --name "v1.5.0 release" --version 1.5.0 --integration milestone_branch --route auto "req one" "req two"`). Choose `--route single_ticket` to skip epic/campaign splitting.
+2. Items merge automatically into `super-work/milestone/<id>` (shown as a *Staging branch* badge) with no per-item signoff; your base branch is untouched until release.
+3. When all items are delivered, approve the single **MILESTONE READY** card, or release explicitly: tick *Squash into one release commit* to get one clean commit (tree-identical to the merged result). CLI: `super-work milestone release <id> --bump --squash [-m "feat: release v1.5.0"]`; REST body: `{"bumpVersion":true,"squashReleaseCommit":true,"createTag":false,"pushRemote":false}`.
+4. Released milestones move to the collapsible **Released History** section (version, release commit SHA, EN/ZH notes).
+5. Engine health is available via `GET /api/system/engines` and MCP `manage_engine_health` (`list|reset|probe`).
+
 ## 4. Concurrency Best Practices & FAQ
 
 1. **How do multiple Workers run truly in parallel without blocking each other?**

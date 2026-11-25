@@ -104,6 +104,7 @@ import type {
   EpicDecompositionPlan,
   EvalCase,
   EvalRunRecord,
+  EngineHealthRecord,
   FlightEvent,
   GoalCampaign,
   GoalCampaignWave,
@@ -121,6 +122,7 @@ import type {
   PlaybookEntry,
   PreviewSession,
   RepoConfig,
+  ReviewEvidencePacket,
   RepoContractFile,
   RepoKnowledgeBundle,
   RequirementIntakeInput,
@@ -401,6 +403,40 @@ export class SuperWorkKernel {
     } catch {
       // Flight recorder failures must never block delivery, reload or rollback paths
     }
+  }
+
+  async listEngineHealth(): Promise<EngineHealthRecord[]> {
+    return (await this.stateStore.listEngineHealth?.()) ?? [];
+  }
+
+  async resetEngineHealth(engine: WorkerEngineId): Promise<EngineHealthRecord> {
+    const now = nowIso();
+    const record: EngineHealthRecord = { engine, status: "healthy", consecutiveFailures: 0, updatedAt: now };
+    await this.stateStore.saveEngineHealth?.(record);
+    return record;
+  }
+
+  /**
+   * Clears the cooldown of tripped engines so the next stage re-probes them with a real turn;
+   * a still-broken engine re-trips immediately on its first deterministic error.
+   */
+  async reprobeEngineHealth(engine?: WorkerEngineId): Promise<EngineHealthRecord[]> {
+    const now = nowIso();
+    const all = await this.listEngineHealth();
+    const out: EngineHealthRecord[] = [];
+    for (const rec of all) {
+      if (rec.status !== "tripped" || (engine && rec.engine !== engine)) continue;
+      const next: EngineHealthRecord = {
+        ...rec,
+        status: "healthy",
+        cooldownUntil: undefined,
+        lastProbedAt: now,
+        updatedAt: now,
+      };
+      await this.stateStore.saveEngineHealth?.(next);
+      out.push(next);
+    }
+    return out;
   }
 
   async listFlightEvents(filter?: {
@@ -1948,7 +1984,7 @@ export class SuperWorkKernel {
     ticket: Ticket,
     repo: RepoConfig,
     stage: StageKind,
-    options?: { skipHitTracking?: boolean },
+    options?: { skipHitTracking?: boolean; reviewEvidence?: ReviewEvidencePacket },
   ): Promise<string> {
     const ts = nowIso();
     const [relatedMemory, playbookEntries, caseEntries] = await Promise.all([
@@ -2055,6 +2091,7 @@ export class SuperWorkKernel {
 
     return this.memory.buildWorkerPromptContext(ticket, stage, relatedMemory, {
       surgicalContextPack,
+      reviewEvidence: options?.reviewEvidence,
       verificationCommands: repo.verificationCommands,
       smokeCheck: repo.smokeCheck,
       repoConventions:

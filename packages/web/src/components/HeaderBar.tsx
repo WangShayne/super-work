@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import {
   Activity,
+  AlertTriangle,
   Bot,
   BrainCircuit,
   Clock,
@@ -42,6 +43,8 @@ interface HeaderBarProps {
   onOpenWorktrees: () => void;
   onOpenSetup: () => void;
   onOpenCommandPalette?: () => void;
+  trippedEngineCount?: number;
+  onOpenEngineHealth?: () => void;
 }
 
 interface StatusCapsuleProps {
@@ -150,6 +153,8 @@ export function HeaderBar({
   onOpenWorktrees,
   onOpenSetup,
   onOpenCommandPalette,
+  trippedEngineCount = 0,
+  onOpenEngineHealth,
 }: HeaderBarProps) {
   const { locale, t, toggleLocale } = useI18n();
   const activeRepo = repos.find((r) => r.id === selectedRepoId) ?? repos[0];
@@ -201,7 +206,7 @@ export function HeaderBar({
               <div className="flex items-center gap-2">
                 <span className="font-semibold tracking-tight text-zinc-100 text-sm">super-work</span>
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
-                  v1.4
+                  v1.5
                 </span>
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700/60">
                   {t("brand.badge")}
@@ -298,6 +303,18 @@ export function HeaderBar({
             >
               <Command className="w-3.5 h-3.5" />
               {t("header.commandPaletteBtn")}
+            </button>
+          )}
+
+          {trippedEngineCount > 0 && (
+            <button
+              type="button"
+              onClick={onOpenEngineHealth ?? onOpenSetup}
+              title={t("engines.badgeTitle")}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 text-amber-200 text-xs font-medium transition"
+            >
+              <AlertTriangle className="w-3.5 h-3.5" />
+              {t("engines.badge")} · {trippedEngineCount}
             </button>
           )}
 

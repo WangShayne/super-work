@@ -230,6 +230,8 @@ export interface SeatbeltProfileInput {
   worktreePath: string;
   rootRepoPath?: string;
   sandboxTempDir: string;
+  /** Host temp dirs (defaults to $TMPDIR and os.tmpdir()) that CLI-internal sandboxes write into. */
+  hostTempDirs?: string[];
   gitAdminDirs?: string[];
   forbiddenPaths?: string[];
   readOnlyPaths?: string[];
@@ -274,6 +276,14 @@ export function buildMacosSeatbeltProfile(input: SeatbeltProfileInput): string {
     ...safeRealpathVariants(input.sandboxTempDir),
     "/dev",
   ]);
+  const hostTempDirs = (input.hostTempDirs ?? [process.env.TMPDIR, tmpdir()]).filter(
+    (d): d is string => typeof d === "string" && d.trim().length > 0 && resolve(d) !== "/",
+  );
+  for (const tmp of hostTempDirs) {
+    for (const v of safeRealpathVariants(tmp)) {
+      allowWritePrefixes.add(v);
+    }
+  }
   for (const adminDir of input.gitAdminDirs ?? []) {
     for (const v of safeRealpathVariants(adminDir)) {
       allowWritePrefixes.add(v);

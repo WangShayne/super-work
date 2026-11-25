@@ -15,6 +15,7 @@ import { api } from "../api.ts";
 import type {
   BackupArchiveInfo,
   CodeHotspotItem,
+  EngineHealthRecord,
   SelfReloadState,
   ServiceStatusResponse,
   SystemDoctorReport,
@@ -40,6 +41,8 @@ export function DoctorBackupPanel() {
   const [restoringId, setRestoringId] = useState<string | null>(null);
   const [confirmHotspotPath, setConfirmHotspotPath] = useState<string | null>(null);
   const [spawningHotspot, setSpawningHotspot] = useState(false);
+  const [engines, setEngines] = useState<EngineHealthRecord[]>([]);
+  const [enginesBusy, setEnginesBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -47,12 +50,14 @@ export function DoctorBackupPanel() {
     setLoadingDoctor(true);
     setError(null);
     try {
-      const [doc, bk, svc, rel] = await Promise.all([
+      const [doc, bk, svc, rel, eng] = await Promise.all([
         api.runDoctor(false),
         api.listBackups(),
         api.getSystemService(20).catch(() => null),
         api.getSelfReloadStatus().catch(() => null),
+        api.listEngineHealth().catch(() => null),
       ]);
+      if (eng) setEngines(eng.engines);
       setReport(doc);
       setBackups(bk.backups);
       if (svc) setServiceInfo(svc);
@@ -135,6 +140,11 @@ export function DoctorBackupPanel() {
         title: `Safe-refactor: split ${h.filePath} (${h.lineCount} lines)`,
         description: `Split oversized file ${h.filePath} (${h.lineCount} lines, ${h.exportedSymbolCount} exports, ${h.dependentCount} dependents) into cohesive modules without changing behavior. Keep public exports stable.`,
         allowedPaths: [h.packageDir === "." ? "**" : `${h.packageDir}/**`],
+        refactorGuard: {
+          targetHotspotPath: h.filePath,
+          maxLinesAfter: 1200,
+          enforceExportParity: true,
+        },
       });
       setConfirmHotspotPath(null);
       setNotice(`${t("doctor.hotspot.created")}: ${ticket.id}`);
@@ -166,6 +176,20 @@ export function DoctorBackupPanel() {
 
   const hasFixable = Boolean(report?.items.some((i) => i.status !== "ok" && i.fixable));
 
+  const runEngineAction = async (action: () => Promise<unknown>, doneKey: "engines.resetDone" | "engines.reprobed") => {
+    setEnginesBusy(true);
+    setError(null);
+    try {
+      await action();
+      setEngines((await api.listEngineHealth()).engines);
+      setNotice(t(doneKey));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setEnginesBusy(false);
+    }
+  };
+
   return (
     <div className="space-y-5">
       {error && (
@@ -178,6 +202,69 @@ export function DoctorBackupPanel() {
           {notice}
         </div>
       )}
+
+      {/* Engine Circuit Breaker */}
+      <section className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 font-semibold text-zinc-100">
+            <ShieldAlert className="w-4 h-4 text-amber-400" />
+            <span>{t("engines.title")}</span>
+          </div>
+          <button
+            type="button"
+            disabled={enginesBusy || !engines.some((e) => e.status === "tripped")}
+            onClick={() => void runEngineAction(() => api.probeEngineHealth(), "engines.reprobed")}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 text-[11px] disabled:opacity-40"
+          >
+            <RefreshCw className={`w-3 h-3 ${enginesBusy ? "animate-spin" : ""}`} />
+            {t("engines.reprobeBtn")}
+          </button>
+        </div>
+        {engines.length === 0 ? (
+          <p className="text-xs text-zinc-400">{t("engines.allHealthy")}</p>
+        ) : (
+          <ul className="space-y-2">
+            {engines.map((e) => (
+              <li
+                key={e.engine}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-xs"
+              >
+                <div className="space-y-0.5 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-zinc-100">{e.engine}</span>
+                    <span
+                      className={`px-2 py-0.5 rounded-full text-[10px] border ${
+                        e.status === "tripped"
+                          ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+                          : "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                      }`}
+                    >
+                      {e.status === "tripped" ? t("engines.statusTripped") : t("engines.statusHealthy")}
+                    </span>
+                    {e.failureKind && (
+                      <span className="text-zinc-400">{t(`engines.kind.${e.failureKind}`)}</span>
+                    )}
+                  </div>
+                  <div className="text-zinc-500 truncate">
+                    {t("engines.failures")}: {e.consecutiveFailures}
+                    {e.cooldownUntil ? ` · ${t("engines.cooldownUntil")} ${e.cooldownUntil}` : ""}
+                    {e.reason ? ` · ${e.reason}` : ""}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={enginesBusy}
+                  onClick={() => void runEngineAction(() => api.resetEngineHealth(e.engine), "engines.resetDone")}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 text-[11px] disabled:opacity-40"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  {t("engines.resetBtn")}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
 
       {/* System Doctor */}
       <section className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
@@ -272,6 +359,7 @@ export function DoctorBackupPanel() {
                       {h.lineCount} {t("doctor.hotspot.lines")} · {h.exportedSymbolCount}{" "}
                       {t("doctor.hotspot.symbols")} · {h.dependentCount} {t("doctor.hotspot.dependents")}
                     </div>
+                    <div className="text-[11px] text-amber-300/80">{t("doctor.hotspot.targetHint")}</div>
                   </div>
                   <button
                     type="button"

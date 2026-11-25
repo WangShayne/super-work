@@ -6,6 +6,7 @@ import type {
   EngineMetricRow,
   EvalCase,
   EvalRunRecord,
+  EngineHealthRecord,
   FlightEvent,
   GoalCampaign,
   GoalCampaignWave,
@@ -42,6 +43,7 @@ import {
   mapCheckpointRow,
   mapEvalCaseRow,
   mapEvalRunRow,
+  mapEngineHealthRow,
   mapFlightEventRow,
   mapGoalCampaignRow,
   mapGoalCampaignWaveRow,
@@ -276,7 +278,7 @@ export class SqliteStateStore implements StateStore {
           worktree_path, branch_name, worktree_cleaned_at,
           native_sessions_json, preferred_engine, active_engine, failed_engines_json,
           arena_mode, arena_competitor_engine, arena_candidates_json, arena_winner_id,
-          tdd_mode, locked_test_paths_json, spec_test_commit_sha, spec_test_challenge_count,
+          tdd_mode, locked_test_paths_json, refactor_guard_json, spec_test_commit_sha, spec_test_challenge_count,
           task_category, routing_rationale, auto_arena_escalated, impact_summary_json, pause_before_run,
           blueprint_id, delivery_gate_policy, risk_threshold, risk_assessment_json, conflict_resolution_count, conflict_context_json,
           clarification_count, steer_count,
@@ -284,7 +286,7 @@ export class SqliteStateStore implements StateStore {
           epic_replan_count, epic_replan_history_json, pending_epic_replan_json,
           model_override, effort_override,
           inline_memory_json, handover_digest_json, cost_usd, priority, error_message, created_at, updated_at
-        ) VALUES (?, ?,?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?,?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           title = excluded.title,
           description = excluded.description,
@@ -318,6 +320,7 @@ export class SqliteStateStore implements StateStore {
           arena_winner_id = excluded.arena_winner_id,
           tdd_mode = excluded.tdd_mode,
           locked_test_paths_json = excluded.locked_test_paths_json,
+          refactor_guard_json = excluded.refactor_guard_json,
           spec_test_commit_sha = excluded.spec_test_commit_sha,
           spec_test_challenge_count = excluded.spec_test_challenge_count,
           task_category = excluded.task_category,
@@ -389,6 +392,7 @@ export class SqliteStateStore implements StateStore {
         ticket.arenaWinnerId ?? null,
         ticket.tddMode ? 1 : 0,
         ticket.lockedTestPaths ? JSON.stringify(ticket.lockedTestPaths) : null,
+        ticket.refactorGuard ? JSON.stringify(ticket.refactorGuard) : null,
         ticket.specTestCommitSha ?? null,
         ticket.specTestChallengeCount ?? 0,
         ticket.taskCategory ?? null,
@@ -1314,6 +1318,43 @@ export class SqliteStateStore implements StateStore {
     tx();
   }
 
+  // --- Engine Circuit Breaker (v1.5.0 Direction A) ---
+  async saveEngineHealth(rec: EngineHealthRecord): Promise<void> {
+    this.db
+      .query(
+        `INSERT OR REPLACE INTO engine_health (
+          engine, status, failure_kind, reason, tripped_at, cooldown_until,
+          consecutive_failures, last_probed_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        rec.engine,
+        rec.status,
+        rec.failureKind ?? null,
+        rec.reason ?? null,
+        rec.trippedAt ?? null,
+        rec.cooldownUntil ?? null,
+        Math.max(0, Math.floor(rec.consecutiveFailures)),
+        rec.lastProbedAt ?? null,
+        rec.updatedAt,
+      );
+  }
+
+  async getEngineHealth(engine: WorkerEngineId): Promise<EngineHealthRecord | null> {
+    const row = this.db.query("SELECT * FROM engine_health WHERE engine = ?").get(engine) as
+      | Record<string, unknown>
+      | null;
+    return row ? mapEngineHealthRow(row) : null;
+  }
+
+  async listEngineHealth(): Promise<EngineHealthRecord[]> {
+    const rows = this.db.query("SELECT * FROM engine_health ORDER BY engine ASC").all() as Record<
+      string,
+      unknown
+    >[];
+    return rows.map(mapEngineHealthRow);
+  }
+
   // --- Flight Recorder (Direction D) ---
   async recordFlightEvent(event: FlightEvent): Promise<void> {
     this.db
@@ -1364,8 +1405,9 @@ export class SqliteStateStore implements StateStore {
       .query(
         `INSERT INTO milestones (
           id, repo_id, name, target_version, status, items_json, release_notes_zh,
-          release_notes_en, digest_summary, released_commit_sha, released_tag, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          release_notes_en, digest_summary, released_commit_sha, released_tag,
+          integration_mode, staging_branch, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           target_version = excluded.target_version,
@@ -1376,6 +1418,8 @@ export class SqliteStateStore implements StateStore {
           digest_summary = excluded.digest_summary,
           released_commit_sha = excluded.released_commit_sha,
           released_tag = excluded.released_tag,
+          integration_mode = excluded.integration_mode,
+          staging_branch = excluded.staging_branch,
           updated_at = excluded.updated_at`,
       )
       .run(
@@ -1390,6 +1434,8 @@ export class SqliteStateStore implements StateStore {
         m.digestSummary ?? null,
         m.releasedCommitSha ?? null,
         m.releasedTag ?? null,
+        m.integrationMode ?? null,
+        m.stagingBranch ?? null,
         m.createdAt,
         m.updatedAt,
       );

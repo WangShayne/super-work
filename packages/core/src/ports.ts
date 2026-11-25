@@ -1,5 +1,6 @@
 import type {
   CodeHotspotItem,
+  RefactorGuardConfig,
   ArenaCandidateResult,
   ArtifactKind,
   CampaignDirection,
@@ -66,6 +67,7 @@ import type {
   WorkerEngineId,
   WorkerStreamEvent,
   WorkerTurnInput,
+  EngineHealthRecord,
 } from "./types.ts";
 
 export type RepoProbeExecutor = (req: ControlProbeRequest) => Promise<ControlProbeStep>;
@@ -203,7 +205,17 @@ export interface WorkerDriver {
 }
 
 export interface WorkspaceProvider {
+  snapshotRepoDirtyPaths?(rootRepoPath: string): Promise<string[]>;
+  quarantineRepoSpillover?(input: {
+    rootRepoPath: string;
+    preTurnDirtyPaths: string[];
+  }): Promise<{ quarantinedPaths: string[]; diffSummary: string }>;
   ensureBranch(rootRepoPath: string, branchName: string, startPoint: string): Promise<void>;
+  ensureBranchExists?(input: {
+    rootRepoPath: string;
+    branchName: string;
+    baseBranch: string;
+  }): Promise<void>;
   prepareWorkspace(
     ticket: Ticket,
     repo: RepoConfig,
@@ -221,6 +233,20 @@ export interface WorkspaceProvider {
     maxChars?: number;
   }): Promise<string | undefined>;
   scanCodeHotspots?(rootRepoPath: string, thresholdLines?: number): Promise<CodeHotspotItem[]>;
+  getDiffStat?(worktreePath: string, baseBranch: string): Promise<string>;
+  verifyHotspotRefactorParity?(input: {
+    worktreePath: string;
+    baseBranch: string;
+    targetHotspotPath: string;
+    maxLinesAfter: number;
+    enforceExportParity: boolean;
+  }): Promise<{
+    ok: boolean;
+    linesBefore: number;
+    linesAfter: number;
+    missingExports: string[];
+    summary: string;
+  }>;
   runVerificationCommands(
     worktreePath: string,
     commands: string[],
@@ -356,7 +382,16 @@ export interface WorkspaceProvider {
     createTag: boolean;
     pushRemote: boolean;
     releaseNotes?: string;
-  }): Promise<{ commitSha?: string; tag?: string; bumpedFiles: string[]; pushed: boolean }>;
+    stagingBranch?: string;
+    squashReleaseCommit?: boolean;
+    releaseCommitMessage?: string;
+  }): Promise<{
+    commitSha?: string;
+    tag?: string;
+    bumpedFiles: string[];
+    pushed: boolean;
+    squashed?: boolean;
+  }>;
   resetBranchRef?(rootRepoPath: string, branchName: string, targetCommitSha: string): Promise<void>;
   prepareSpeculativeMergeSlot?(input: {
     rootRepoPath: string;
@@ -422,6 +457,9 @@ export interface StateStore {
   checkpointWal?(): Promise<void> | void;
 
   // Flight Recorder (Direction D)
+  saveEngineHealth?(record: EngineHealthRecord): Promise<void>;
+  getEngineHealth?(engine: WorkerEngineId): Promise<EngineHealthRecord | null>;
+  listEngineHealth?(): Promise<EngineHealthRecord[]>;
   recordFlightEvent?(event: FlightEvent): Promise<void>;
   listFlightEvents?(filter?: {
     repoId?: string;
@@ -569,6 +607,7 @@ export interface DirectTicketInput {
   description: string;
   template?: RepoConfig["defaultTemplate"];
   tddMode?: boolean;
+  refactorGuard?: RefactorGuardConfig;
   pauseBeforeRun?: boolean;
   blueprintId?: string;
   deliveryGatePolicy?: DeliveryGatePolicy;

@@ -86,12 +86,17 @@ export function App() {
   const [setupOpen, setSetupOpen] = useState(false);
   const [setupInitialTab, setSetupInitialTab] = useState<"config" | "doctor">("config");
   const setupAutoCheckedRef = useRef(false);
+  const [trippedEngineCount, setTrippedEngineCount] = useState(0);
 
   const refreshAll = useCallback(async (repoFilter?: string) => {
     const [h, r, s] = await Promise.all([api.getHealth(), api.listRepos(), api.getSetupStatus()]);
     setHealth(h);
     setRepos(r.repos);
     setSetupStatus(s);
+    api
+      .listEngineHealth()
+      .then(({ engines }) => setTrippedEngineCount(engines.filter((e) => e.status === "tripped").length))
+      .catch(() => undefined);
     if (!setupAutoCheckedRef.current) {
       setupAutoCheckedRef.current = true;
       if (!s.initialized) {
@@ -319,6 +324,11 @@ export function App() {
           setSetupOpen(true);
         }}
         onOpenCommandPalette={() => setCommandPaletteOpen(true)}
+        trippedEngineCount={trippedEngineCount}
+        onOpenEngineHealth={() => {
+          setSetupInitialTab("doctor");
+          setSetupOpen(true);
+        }}
       />
 
       {/* Primary View Switcher */}

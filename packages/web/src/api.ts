@@ -61,7 +61,9 @@ import type {
   SpillArtifact,
   SubmitReviewCommentsInput,
   SymbolImpactReport,
+  EngineHealthRecord,
   SystemDoctorReport,
+  RefactorGuardConfig,
   TaskBlueprint,
   Ticket,
   TicketCheckpoint,
@@ -320,6 +322,7 @@ export const api = {
     modelOverride?: string;
     effortOverride?: ReasoningEffort;
     acceptanceCriteria?: string[];
+    refactorGuard?: RefactorGuardConfig;
   }) => request<{ ticket: Ticket }>("/api/tickets", { method: "POST", body: JSON.stringify(payload) }),
 
   listBlueprints: (repoId: string) =>
@@ -351,6 +354,19 @@ export const api = {
   runDoctor: (fix = false) =>
     request<SystemDoctorReport>(fix ? "/api/system/doctor/fix" : "/api/system/doctor", {
       method: fix ? "POST" : "GET",
+    }),
+
+  listEngineHealth: () => request<{ engines: EngineHealthRecord[] }>("/api/system/engines"),
+
+  resetEngineHealth: (engine: string) =>
+    request<{ engine: EngineHealthRecord }>(`/api/system/engines/${encodeURIComponent(engine)}/reset`, {
+      method: "POST",
+    }),
+
+  probeEngineHealth: (engine?: string) =>
+    request<{ probed: EngineHealthRecord[]; engines: EngineHealthRecord[] }>("/api/system/engines/probe", {
+      method: "POST",
+      body: JSON.stringify(engine ? { engine } : {}),
     }),
 
   listBackups: () => request<{ backups: BackupArchiveInfo[] }>("/api/system/backups"),
@@ -713,7 +729,13 @@ export const api = {
 
   releaseMilestone: (
     id: string,
-    options: { bumpVersion: boolean; createTag: boolean; pushRemote: boolean },
+    options: {
+      bumpVersion: boolean;
+      createTag: boolean;
+      pushRemote: boolean;
+      squashReleaseCommit?: boolean;
+      releaseCommitMessage?: string;
+    },
   ) =>
     request<{ milestone: Milestone }>(`/api/milestones/${encodeURIComponent(id)}/release`, {
       method: "POST",

@@ -20,7 +20,9 @@ export function resolveFallbackChain(input: {
   repo: RepoConfig;
   availableEngines: WorkerEngineId[];
   failedEngines?: WorkerEngineId[];
+  trippedEngines?: WorkerEngineId[];
 }): WorkerEngineId[] {
+  const tripped = new Set<WorkerEngineId>(input.trippedEngines ?? []);
   const failed = new Set<WorkerEngineId>([
     input.primaryEngine,
     ...(input.failedEngines ?? []),
@@ -29,8 +31,8 @@ export function resolveFallbackChain(input: {
   const allowMock =
     input.primaryEngine === "mock" || explicit.includes("mock");
 
-  const available = input.availableEngines.filter((e) =>
-    allowMock ? true : e !== "mock",
+  const available = input.availableEngines.filter(
+    (e) => (allowMock ? true : e !== "mock") && (e === "mock" || !tripped.has(e)),
   );
 
   const ordered: WorkerEngineId[] = [];
@@ -71,13 +73,18 @@ export function pickNextFallbackEngine(input: {
   failedEngines?: WorkerEngineId[];
   repo: RepoConfig;
   availableEngines: WorkerEngineId[];
+  trippedEngines?: WorkerEngineId[];
 }): WorkerEngineId | undefined {
-  return resolveFallbackChain({
-    primaryEngine: input.currentEngine,
-    repo: input.repo,
-    availableEngines: input.availableEngines,
-    failedEngines: input.failedEngines,
-  })[0];
+  const chain = (trippedEngines?: WorkerEngineId[]) =>
+    resolveFallbackChain({
+      primaryEngine: input.currentEngine,
+      repo: input.repo,
+      availableEngines: input.availableEngines,
+      failedEngines: input.failedEngines,
+      trippedEngines,
+    })[0];
+  // Prefer healthy engines; if every candidate is tripped, fall back to the unfiltered chain.
+  return chain(input.trippedEngines) ?? chain(undefined);
 }
 
 export type UnscoredArenaCandidate = Omit<ArenaCandidateResult, "score" | "recommended">;

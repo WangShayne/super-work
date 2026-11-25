@@ -422,7 +422,7 @@ describe("v1.4.0 Impact-Scoped Verification Gate", () => {
 
     it("empty diff, files outside packages/, and unresolvable base branch", async () => {
       await expectFullFallback(async () => {}, { reason: /no changed files/ });
-      await expectFullFallback((r) => put(r, "README.md", "# docs\n"), { reason: /outside known workspace/ });
+      await expectFullFallback((r) => put(r, "notes.txt", "outside\n"), { reason: /outside known workspace/ });
 
       const { repoDir, provider } = await newFixture();
       await put(repoDir, "packages/cli/src/index.ts", "export const name = 9;\n");
@@ -527,7 +527,21 @@ describe("v1.4.0 Impact-Scoped Verification Gate", () => {
       }
     });
 
-    it("falls back to the full commands when the planner declines, throws, or returns an empty plan", async () => {
+    it("runs nothing for a scoped empty plan (v1.5.0 docs-only fast-pass)", async () => {
+      const h = createGateHarness(async () => ({
+        useScoped: true,
+        commands: [],
+        estimatedSavedMs: 88_000,
+        reason: "docs-only changes; skipping code test/build on intermediate gate",
+      }));
+      const repo = makeRepo("/tmp/root", { verificationStrategy: "impact_scoped" });
+      const res = await runRepoVerificationGateOp(h.ctx, makeTicket(), repo, makeStageRun(), "/tmp/wt");
+      expect(h.executed).toEqual([[]]);
+      expect(res.result?.scopedVerification?.usedScoped).toBe(true);
+      expect(res.result?.scopedVerification?.commandsRun).toEqual([]);
+    });
+
+    it("falls back to the full commands when the planner declines or throws", async () => {
       const cases: Array<{ name: string; planner: ScopedPlanner; reason: RegExp }> = [
         {
           name: "declines",
@@ -540,11 +554,6 @@ describe("v1.4.0 Impact-Scoped Verification Gate", () => {
             throw new Error("boom");
           },
           reason: /scoped planner failed \(boom\)/,
-        },
-        {
-          name: "empty",
-          planner: async () => ({ useScoped: true, commands: [], estimatedSavedMs: 5, reason: "empty plan" }),
-          reason: /empty plan/,
         },
       ];
       for (const c of cases) {

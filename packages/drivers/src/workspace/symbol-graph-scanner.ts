@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
-import { dirname, extname, join, posix, resolve } from "node:path";
+import { extname, join, posix, resolve } from "node:path";
 import type { FileSymbolEntry, SymbolImpactReport } from "@super-work/core";
 import { matchesPathScope, normalizeRelPath } from "@super-work/core";
 
@@ -472,6 +472,172 @@ export async function scanRepoSymbolGraph(rootRepoPath: string): Promise<{
   }
 
   return { files, importersByFile, importsByFile, signaturesByFile, spansByFile, lineCountByFile };
+}
+
+// ---------- Hotspot refactor parity guard ----------
+
+export interface ModuleExportScan {
+  names: string[];
+  starSpecs: string[];
+  namedReExportSpecs: string[];
+}
+
+/** Extract exported symbol names (TS/JS) from one module's source text. */
+export function extractModuleExports(content: string): ModuleExportScan {
+  const src = content.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const names = new Set<string>();
+  const starSpecs: string[] = [];
+  const namedReExportSpecs: string[] = [];
+
+  const declRe =
+    /^\s*export\s+(default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(function\*?|class|interface|type|const|let|var|enum|namespace)\s+([A-Za-z0-9_$]+)/gm;
+  for (const m of src.matchAll(declRe)) {
+    if (m[3]) names.add(m[3]);
+    if (m[1]) names.add("default");
+  }
+  if (/^\s*export\s+default\s+(?!(?:async\s+)?(?:function|class|interface|abstract)\b)/m.test(src)) {
+    names.add("default");
+  }
+
+  const listRe = /^\s*export\s+(?:type\s+)?\{([^}]*)\}(?:\s*from\s*["']([^"']+)["'])?/gm;
+  for (const m of src.matchAll(listRe)) {
+    for (const rawItem of (m[1] ?? "").split(",")) {
+      const item = rawItem.trim().replace(/^type\s+/, "");
+      if (!item) continue;
+      const parts = item.split(/\s+as\s+/);
+      const exported = (parts[1] ?? parts[0])?.trim();
+      if (exported) names.add(exported);
+    }
+    if (m[2]) namedReExportSpecs.push(m[2]);
+  }
+
+  const starRe = /^\s*export\s+(?:type\s+)?\*(?:\s+as\s+([A-Za-z0-9_$]+))?\s*from\s*["']([^"']+)["']/gm;
+  for (const m of src.matchAll(starRe)) {
+    if (m[1]) names.add(m[1]);
+    else if (m[2]) starSpecs.push(m[2]);
+  }
+
+  return { names: Array.from(names), starSpecs, namedReExportSpecs };
+}
+
+function candidateModulePaths(fromRel: string, spec: string): string[] {
+  if (!spec.startsWith(".")) return [];
+  const dir = posix.dirname(fromRel);
+  const joined = normalizeRelPath(dir === "." ? spec : posix.join(dir, spec));
+  if (!joined) return [];
+  const stripped = joined.replace(/\.(?:js|mjs|jsx)$/i, "");
+  const out = [joined];
+  for (const ext of [".ts", ".tsx", ".mts", ".js"]) out.push(`${stripped}${ext}`);
+  for (const idx of ["index.ts", "index.tsx", "index.js"]) out.push(`${stripped}/${idx}`);
+  return Array.from(new Set(out));
+}
+
+/** Collect exported names of `entryRel`, following `export * from` recursively. */
+export async function collectExportedNames(
+  read: (rel: string) => Promise<string | null>,
+  entryRel: string,
+  maxDepth = 4,
+): Promise<Set<string>> {
+  const result = new Set<string>();
+  const visited = new Set<string>();
+
+  const walk = async (rel: string, depth: number): Promise<void> => {
+    if (visited.has(rel)) return;
+    visited.add(rel);
+    const content = await read(rel);
+    if (content === null) return;
+    const scan = extractModuleExports(content);
+    for (const n of scan.names) result.add(n);
+    if (depth >= maxDepth) return;
+    for (const spec of scan.starSpecs) {
+      for (const cand of candidateModulePaths(rel, spec)) {
+        const sub = await read(cand);
+        if (sub !== null) {
+          await walk(cand, depth + 1);
+          break;
+        }
+      }
+    }
+  };
+
+  await walk(normalizeRelPath(entryRel), 0);
+  return result;
+}
+
+function countLines(content: string | null): number {
+  if (!content) return 0;
+  const lines = content.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  return lines.length;
+}
+
+export interface HotspotParityResult {
+  ok: boolean;
+  linesBefore: number;
+  linesAfter: number;
+  missingExports: string[];
+  summary: string;
+}
+
+export async function verifyHotspotParityImpl(input: {
+  worktreePath: string;
+  baseBranch: string;
+  targetHotspotPath: string;
+  maxLinesAfter: number;
+  enforceExportParity: boolean;
+  readBase: (rel: string) => Promise<string | null>;
+}): Promise<HotspotParityResult> {
+  const target = normalizeRelPath(input.targetHotspotPath);
+  const readHead = async (rel: string): Promise<string | null> => {
+    const abs = resolve(input.worktreePath, rel);
+    if (!abs.startsWith(resolve(input.worktreePath))) return null;
+    try {
+      return await readFile(abs, "utf8");
+    } catch {
+      return null;
+    }
+  };
+
+  const baseContent = await input.readBase(target);
+  if (baseContent === null) {
+    return {
+      ok: true,
+      linesBefore: 0,
+      linesAfter: countLines(await readHead(target)),
+      missingExports: [],
+      summary: `Hotspot guard skipped: ${target} does not exist at ${input.baseBranch}.`,
+    };
+  }
+  const headContent = await readHead(target);
+  const linesBefore = countLines(baseContent);
+  const linesAfter = countLines(headContent);
+
+  const baseNames = await collectExportedNames(input.readBase, target);
+  const headNames = await collectExportedNames(readHead, target);
+  const missingExports = Array.from(baseNames)
+    .filter((n) => !headNames.has(n))
+    .sort();
+
+  const problems: string[] = [];
+  if (linesAfter > input.maxLinesAfter) {
+    problems.push(
+      `${target} still has ${linesAfter} lines (limit ${input.maxLinesAfter}); split it into smaller modules.`,
+    );
+  }
+  if (input.enforceExportParity && missingExports.length > 0) {
+    problems.push(
+      `Missing exports no longer reachable via ${target}: ${missingExports.join(", ")}. Restore them with \`export { ... } from "./..."\` or \`export * from "./..."\`.`,
+    );
+  }
+  const ok = problems.length === 0;
+  const stats = `lines ${linesBefore} -> ${linesAfter} (max ${input.maxLinesAfter}), exports preserved ${baseNames.size - missingExports.length}/${baseNames.size}`;
+  return {
+    ok,
+    linesBefore,
+    linesAfter,
+    missingExports,
+    summary: ok ? `Hotspot parity OK: ${stats}.` : `${problems.join(" ")} [${stats}]`,
+  };
 }
 
 export async function analyzeRepoSymbolImpact(

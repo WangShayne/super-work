@@ -10,6 +10,7 @@ export interface ImpactScopedVerificationInput {
   baseBranch: string;
   fullCommands: string[];
   sensitivePaths?: string[];
+  isFinalDeliveryGate?: boolean;
 }
 
 export interface ImpactScopedVerificationPlan {
@@ -44,6 +45,8 @@ export interface ImpactPlanInput {
   fullCommands: string[];
   changedFiles: string[];
   sensitivePaths?: string[];
+  /** Final delivery gates (rebase) never narrow or skip verification. */
+  isFinalDeliveryGate?: boolean;
   packages: WorkspacePackageInfo[];
   /** `null` when the symbol graph could not be computed. */
   symbolImpact: ImpactGraphSnapshot | null;
@@ -81,6 +84,13 @@ const TEST_FILE_RE = /\.test\.[cm]?[jt]sx?$/;
 
 function normalizeCommand(cmd: string): string {
   return cmd.trim().replace(/\s+/g, " ");
+}
+
+/** Pure documentation / non-code files, anywhere in the repo. */
+function isDocsOnlyFile(rel: string): boolean {
+  if (/\.(md|mdx)$/i.test(rel)) return true;
+  if (rel.startsWith("docs/") || /^packages\/[^/]+\/docs\//.test(rel)) return true;
+  return /^(LICENSE|CHANGELOG)[^/]*$/i.test(rel);
 }
 
 function isRootConfigOrScript(rel: string): boolean {
@@ -241,6 +251,24 @@ export function planImpactScopedVerification(input: ImpactPlanInput): ImpactScop
     return full("no changed files detected; running full verification");
   }
 
+  const sensitiveForDocs = input.sensitivePaths ?? [];
+  if (
+    input.isFinalDeliveryGate !== true &&
+    changed.every(isDocsOnlyFile) &&
+    !(sensitiveForDocs.length > 0 && changed.some((f) => matchesPathScope(f, sensitiveForDocs)))
+  ) {
+    return {
+      useScoped: true,
+      commands: [],
+      estimatedSavedMs: FULL_TEST_SAVED_MS + TYPECHECK_BUILD_SAVED_MS,
+      reason: "docs-only changes; skipping code test/build on intermediate gate",
+    };
+  }
+
+  if (input.isFinalDeliveryGate === true) {
+    return full("final delivery gate; running full verification");
+  }
+
   const rootHit = changed.find(isRootConfigOrScript);
   if (rootHit) {
     return full(`root config/script changed (${rootHit}); running full verification`);
@@ -296,19 +324,30 @@ export function planImpactScopedVerification(input: ImpactPlanInput): ImpactScop
   // --- Test targets -------------------------------------------------------------
   // Changed packages always run their whole test dir; downstream packages are
   // narrowed to impacted files only when the symbol graph is trustworthy.
+  const impactedTests = new Set<string>();
+  if (graphReliable && graph) {
+    for (const f of [...graph.targetFiles, ...graph.directDependents, ...graph.transitiveDependents]) {
+      if (TEST_FILE_RE.test(f)) impactedTests.add(f);
+    }
+  }
+  // 2-hop pruning: even when every package is affected, a trustworthy graph with a small set of
+  // impacted test files narrows `bun test` to exactly those files.
+  const pruneAll =
+    graphReliable &&
+    affected.size === input.packages.length &&
+    impactedTests.size > 0 &&
+    impactedTests.size <= MAX_TEST_FILE_TARGETS_PER_PACKAGE;
+
   const dirTargets = new Set<string>();
-  for (const dir of affectedSorted) {
-    const pkg = pkgByDir.get(dir);
-    if (!pkg || pkg.testFiles.length === 0) continue;
-    if (changedDirs.has(dir) || !graphReliable) dirTargets.add(`packages/${dir}/test`);
+  if (!pruneAll) {
+    for (const dir of affectedSorted) {
+      const pkg = pkgByDir.get(dir);
+      if (!pkg || pkg.testFiles.length === 0) continue;
+      if (changedDirs.has(dir) || !graphReliable) dirTargets.add(`packages/${dir}/test`);
+    }
   }
   const fileTargets = new Set<string>();
   if (graphReliable && graph) {
-    const impactedTests = new Set(
-      [...graph.targetFiles, ...graph.directDependents, ...graph.transitiveDependents].filter((f) =>
-        TEST_FILE_RE.test(f),
-      ),
-    );
     const byPackage = new Map<string, string[]>();
     for (const t of impactedTests) {
       if (Array.from(dirTargets).some((d) => t.startsWith(`${d}/`))) continue;
@@ -424,6 +463,7 @@ export async function resolveImpactScopedVerification(
     fullCommands: input.fullCommands,
     changedFiles: changed.files,
     sensitivePaths: input.sensitivePaths,
+    isFinalDeliveryGate: input.isFinalDeliveryGate,
     packages,
     symbolImpact,
   });

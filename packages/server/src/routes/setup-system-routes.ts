@@ -318,6 +318,36 @@ export function registerSetupSystemRoutes(ctx: ServerRouteContext): void {
     return c.json(report);
   });
 
+  // --- v1.5.0 Persistent Engine Circuit Breaker ---
+  const ENGINE_IDS = ["claude", "codex", "gemini", "opencode", "mock"] as const;
+  const parseEngine = (raw: string | undefined): (typeof ENGINE_IDS)[number] | undefined =>
+    ENGINE_IDS.find((e) => e === raw);
+
+  app.get("/api/system/engines", async (c) => {
+    const engines = await kernel.listEngineHealth();
+    return c.json({ engines });
+  });
+
+  app.post("/api/system/engines/probe", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { engine?: string };
+    const engine = body.engine ? parseEngine(body.engine) : undefined;
+    if (body.engine && !engine) {
+      return c.json({ error: `unknown engine '${body.engine}'` }, 400);
+    }
+    const probed = await kernel.reprobeEngineHealth(engine);
+    const engines = await kernel.listEngineHealth();
+    return c.json({ probed, engines });
+  });
+
+  app.post("/api/system/engines/:engine/reset", async (c) => {
+    const engine = parseEngine(c.req.param("engine"));
+    if (!engine) {
+      return c.json({ error: `unknown engine '${c.req.param("engine")}'` }, 400);
+    }
+    const record = await kernel.resetEngineHealth(engine);
+    return c.json({ engine: record });
+  });
+
   app.get("/api/system/backups", async (c) => {
     const backups = await kernel.listSystemBackups();
     return c.json({ backups });

@@ -129,6 +129,8 @@ describe("v1.4.0 buildRunDigestReport", () => {
       reloadsCompleted: 1,
       canaryRolledBack: 1,
       watchdogSwitches: 1,
+      engineTripped: 0,
+      spilloverQuarantined: 0,
     });
     expect(d.events.map((e) => e.id)).toEqual(["e6", "e5", "e4", "e3", "e2", "e1"]);
   });

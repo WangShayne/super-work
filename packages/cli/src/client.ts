@@ -1,4 +1,5 @@
 import type {
+  EngineHealthRecord,
   BackupArchiveInfo,
   BackupRestoreResult,
   BatchResolveInboxInput,
@@ -271,6 +272,23 @@ export class SuperWorkHttpClient {
   runDoctor(fix = false): Promise<SystemDoctorReport> {
     return this.request(fix ? "/api/system/doctor/fix" : "/api/system/doctor", {
       method: fix ? "POST" : "GET",
+    });
+  }
+
+  listEngineHealth(): Promise<{ engines: EngineHealthRecord[] }> {
+    return this.request("/api/system/engines");
+  }
+
+  resetEngineHealth(engine: string): Promise<{ engine: EngineHealthRecord }> {
+    return this.request(`/api/system/engines/${encodeURIComponent(engine)}/reset`, { method: "POST" });
+  }
+
+  probeEngineHealth(
+    engine?: string,
+  ): Promise<{ probed: EngineHealthRecord[]; engines: EngineHealthRecord[] }> {
+    return this.request("/api/system/engines/probe", {
+      method: "POST",
+      body: JSON.stringify(engine ? { engine } : {}),
     });
   }
 
@@ -646,6 +664,8 @@ export class SuperWorkHttpClient {
     preferredEngine?: EnginePreference;
     template?: PipelineTemplateId;
     maxBudgetUsdPerItem?: number;
+    integrationMode?: "direct_main" | "milestone_branch";
+    preferredRoute?: "auto" | "single_ticket";
   }): Promise<{ milestone: Milestone }> {
     return this.request<{ milestone: Milestone }>("/api/milestones", {
       method: "POST",
@@ -655,7 +675,13 @@ export class SuperWorkHttpClient {
 
   releaseMilestone(
     id: string,
-    options: { bumpVersion?: boolean; createTag?: boolean; pushRemote?: boolean },
+    options: {
+      bumpVersion?: boolean;
+      createTag?: boolean;
+      pushRemote?: boolean;
+      squashReleaseCommit?: boolean;
+      releaseCommitMessage?: string;
+    },
   ): Promise<{ milestone: Milestone }> {
     return this.request<{ milestone: Milestone }>(
       `/api/milestones/${encodeURIComponent(id)}/release`,

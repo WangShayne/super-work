@@ -24,6 +24,7 @@ import type {
   OutboxEntry,
   PlaybookEntry,
   RepoConfig,
+  ReviewEvidencePacket,
   RequirementIntakeInput,
   RequirementIntakePlan,
   SelfReloadState,
@@ -78,7 +79,7 @@ export interface KernelCoordinatorContext {
     ticket: Ticket,
     repo: RepoConfig,
     stage: StageKind,
-    options?: { skipHitTracking?: boolean },
+    options?: { skipHitTracking?: boolean; reviewEvidence?: ReviewEvidencePacket },
   ): Promise<string>;
   captureTicketCheckpoint(
     ticket: Ticket,

@@ -79,11 +79,33 @@ export function registerTicketRoutes(ctx: ServerRouteContext): void {
       modelOverride?: string;
       effortOverride?: ReasoningEffort;
       acceptanceCriteria?: string[];
+      refactorGuard?: {
+        targetHotspotPath?: unknown;
+        maxLinesAfter?: unknown;
+        enforceExportParity?: unknown;
+      };
     };
 
     if (!body.repoId || !body.title || !body.description) {
       return c.json({ error: "repoId, title, and description are required" }, 400);
     }
+
+    const rawGuard = body.refactorGuard;
+    const guardPath =
+      typeof rawGuard?.targetHotspotPath === "string" ? rawGuard.targetHotspotPath.trim() : "";
+    const refactorGuard = guardPath
+      ? {
+          targetHotspotPath: guardPath,
+          maxLinesAfter:
+            typeof rawGuard?.maxLinesAfter === "number" && rawGuard.maxLinesAfter > 0
+              ? Math.floor(rawGuard.maxLinesAfter)
+              : undefined,
+          enforceExportParity:
+            typeof rawGuard?.enforceExportParity === "boolean"
+              ? rawGuard.enforceExportParity
+              : undefined,
+        }
+      : undefined;
 
     try {
       const ticket = await kernel.createDirectTicket({
@@ -108,6 +130,7 @@ export function registerTicketRoutes(ctx: ServerRouteContext): void {
         modelOverride: body.modelOverride,
         effortOverride: body.effortOverride,
         acceptanceCriteria: body.acceptanceCriteria,
+        refactorGuard,
       });
 
       void kernel.tick();

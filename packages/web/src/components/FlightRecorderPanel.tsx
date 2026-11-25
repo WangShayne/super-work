@@ -26,6 +26,8 @@ const KIND_STYLES: Record<FlightEventKind, string> = {
   watchdog_switch: "bg-amber-500/15 text-amber-300",
   milestone_ready: "bg-zinc-500/15 text-zinc-300",
   milestone_released: "bg-zinc-500/15 text-zinc-300",
+  engine_tripped: "bg-amber-500/15 text-amber-300",
+  spillover_quarantined: "bg-rose-500/15 text-rose-300",
 };
 
 function formatSaved(ms: number): string {

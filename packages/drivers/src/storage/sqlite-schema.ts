@@ -270,6 +270,18 @@ export function initializeSqliteSchema(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_flight_events_created
       ON flight_events(created_at DESC);
 
+    CREATE TABLE IF NOT EXISTS engine_health (
+      engine TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      failure_kind TEXT,
+      reason TEXT,
+      tripped_at TEXT,
+      cooldown_until TEXT,
+      consecutive_failures INTEGER NOT NULL DEFAULT 0,
+      last_probed_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS milestones (
       id TEXT PRIMARY KEY,
       repo_id TEXT NOT NULL,
@@ -282,6 +294,8 @@ export function initializeSqliteSchema(db: Database): void {
       digest_summary TEXT,
       released_commit_sha TEXT,
       released_tag TEXT,
+      integration_mode TEXT,
+      staging_branch TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -499,6 +513,7 @@ export function initializeSqliteSchema(db: Database): void {
   ensureColumn(db, existingCols, "tickets", "pending_epic_replan_json", "TEXT");
   ensureColumn(db, existingCols, "tickets", "tdd_mode", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, existingCols, "tickets", "locked_test_paths_json", "TEXT");
+  ensureColumn(db, existingCols, "tickets", "refactor_guard_json", "TEXT");
   ensureColumn(db, existingCols, "tickets", "spec_test_commit_sha", "TEXT");
   ensureColumn(db, existingCols, "tickets", "spec_test_challenge_count", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, existingCols, "tickets", "task_category", "TEXT");
@@ -520,6 +535,11 @@ export function initializeSqliteSchema(db: Database): void {
   ensureColumn(db, existingCols, "tickets", "target_branch", "TEXT");
   ensureColumn(db, existingCols, "tickets", "barrier_group_id", "TEXT");
   ensureColumn(db, existingCols, "tickets", "base_head_at_rebase", "TEXT");
+
+  const milestoneCols = db.query("PRAGMA table_info(milestones)").all() as Array<{ name: string }>;
+  const existingMilestoneCols = new Set(milestoneCols.map((c) => c.name));
+  ensureColumn(db, existingMilestoneCols, "milestones", "integration_mode", "TEXT");
+  ensureColumn(db, existingMilestoneCols, "milestones", "staging_branch", "TEXT");
 
   const stageRunCols = db.query("PRAGMA table_info(stage_runs)").all() as Array<{ name: string }>;
   const existingStageRunCols = new Set(stageRunCols.map((c) => c.name));

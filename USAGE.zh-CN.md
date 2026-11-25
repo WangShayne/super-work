@@ -110,6 +110,13 @@ bun run setup -- --auto
 3. 全部交付后里程碑进入**待发布**：可在看板或收件箱「里程碑待发布」卡片中查看中英文发布说明。
 4. 显式发布：勾选「同步升级 package.json 版本」（默认勾选），按需勾选「创建 Git 标签」「推送到远端」（默认均关闭），再点击确认。同样可通过 `POST /api/milestones/:id/release`、`super-work milestone release <id> --bump` 或在收件箱批准（仅升级版本）完成。
 
+### 6. 里程碑暂存分支与 Squash 发布（`v1.5.0`）
+1. 在 **派单 → 里程碑批量编排** 中选择 **集成模式 = 里程碑暂存分支**（CLI：`super-work milestone create --name "v1.5.0 发布" --version 1.5.0 --integration milestone_branch --route auto "需求一" "需求二"`）。使用 `--route single_ticket` 可跳过 Epic/战役拆分。
+2. 各项自动合入 `super-work/milestone/<id>`（以「暂存分支」徽标显示），无需逐项签收；发布前基线分支保持不变。
+3. 全部交付后，批准唯一的**里程碑待发布**卡片，或显式发布：勾选「压缩为单个发布提交」即可得到文件树与合并结果一致的一个干净提交。CLI：`super-work milestone release <id> --bump --squash [-m "feat: release v1.5.0"]`；REST 请求体：`{"bumpVersion":true,"squashReleaseCommit":true,"createTag":false,"pushRemote":false}`。
+4. 已发布里程碑进入可折叠的**已发布里程碑**区域（版本、发布提交 SHA、中英文发布说明）。
+5. 引擎健康可通过 `GET /api/system/engines` 与 MCP `manage_engine_health`（`list|reset|probe`）查看。
+
 ## 四、 多任务并发最佳实践与常见问题（FAQ）
 
 1. **如何让多个 Worker 真正并发而不互相排队？**

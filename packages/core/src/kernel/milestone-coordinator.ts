@@ -10,8 +10,10 @@ import type {
   InboxItem,
   Milestone,
   MilestoneItem,
+  MilestoneIntegrationMode,
   PipelineTemplateId,
   RequirementIntakePlan,
+  RequirementRouteKind,
   Ticket,
 } from "../types.ts";
 import { newId, nowIso } from "../utils.ts";
@@ -27,12 +29,16 @@ export interface CreateMilestoneInput {
   preferredEngine?: EnginePreference;
   template?: PipelineTemplateId;
   maxBudgetUsdPerItem?: number;
+  preferredRoute?: "auto" | RequirementRouteKind;
+  integrationMode?: MilestoneIntegrationMode;
 }
 
 export interface ReleaseMilestoneOptions {
   bumpVersion?: boolean;
   createTag?: boolean;
   pushRemote?: boolean;
+  squashReleaseCommit?: boolean;
+  releaseCommitMessage?: string;
 }
 
 function requireMilestoneStore(ctx: KernelCoordinatorContext) {
@@ -81,6 +87,8 @@ async function dispatchItem(
     maxBudgetUsdPerItem?: number;
   },
 ): Promise<MilestoneItem> {
+  const stagingBranch =
+    milestone.integrationMode === "milestone_branch" ? milestone.stagingBranch : undefined;
   const deps = item.dependsOnIndices
     .map((i) => milestone.items[i])
     .map((d) => (d ? upstreamId(d) : undefined))
@@ -129,6 +137,9 @@ async function dispatchItem(
         milestoneId: milestone.id,
         dependsOn: mergedDeps,
         status: gated ? "waiting_deps" : sub.status,
+        ...(stagingBranch
+          ? { targetBranch: stagingBranch, deliveryGatePolicy: "always_auto" as const }
+          : {}),
         updatedAt: nowIso(),
       };
       await ctx.stateStore.saveTicket(patched);
@@ -150,6 +161,13 @@ async function dispatchItem(
     maxCostUsd: opts.maxBudgetUsdPerItem,
     dependsOn: deps,
     milestoneId: milestone.id,
+    ...(stagingBranch
+      ? {
+          targetBranch: stagingBranch,
+          startPoint: stagingBranch,
+          deliveryGatePolicy: "always_auto" as const,
+        }
+      : {}),
   });
   return { ...item, ticketId: ticket.id, title: plan.title, status: "pending" };
 }
@@ -184,6 +202,7 @@ export async function createMilestoneOp(
         template: input.template,
         preferredEngine: input.preferredEngine,
         maxBudgetUsd: input.maxBudgetUsdPerItem,
+        preferredRoute: input.preferredRoute,
         previewOnly: true,
       }),
     );
@@ -199,11 +218,29 @@ export async function createMilestoneOp(
   }));
 
   const ts = nowIso();
+  const milestoneId = newId("mst");
+  const integrationMode: MilestoneIntegrationMode =
+    input.integrationMode === "milestone_branch" ? "milestone_branch" : "direct_main";
+  const stagingBranch =
+    integrationMode === "milestone_branch" ? `super-work/milestone/${milestoneId}` : undefined;
+  if (stagingBranch) {
+    if (ctx.workspace.ensureBranchExists) {
+      await ctx.workspace.ensureBranchExists({
+        rootRepoPath: repo.rootPath,
+        branchName: stagingBranch,
+        baseBranch: repo.baseBranch,
+      });
+    } else {
+      await ctx.workspace.ensureBranch(repo.rootPath, stagingBranch, repo.baseBranch);
+    }
+  }
   let milestone: Milestone = {
-    id: newId("mst"),
+    id: milestoneId,
     repoId: input.repoId,
     name,
     targetVersion: input.targetVersion?.trim().replace(/^v/i, "") || undefined,
+    integrationMode,
+    stagingBranch,
     status: "active",
     items: planMilestoneWaves(planned),
     createdAt: ts,
@@ -414,6 +451,9 @@ export async function releaseMilestoneOp(
       createTag,
       pushRemote,
       releaseNotes: milestone.releaseNotesEn,
+      stagingBranch: milestone.stagingBranch,
+      squashReleaseCommit: options.squashReleaseCommit === true,
+      releaseCommitMessage: options.releaseCommitMessage?.trim() || undefined,
     }),
   );
 

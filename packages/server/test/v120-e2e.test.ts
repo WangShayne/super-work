@@ -589,7 +589,7 @@ describe("v1.2.0 End-to-End Capabilities (A Campaigns + B MergeTrain/Barrier + C
       expect(svcJson.status.dataDir).toBe(dir);
 
       const mcpInfo = (await (await fetch(`${baseUrl}/api/mcp`)).json()) as { version: string };
-      expect(mcpInfo.version).toBe("1.4.0");
+      expect(mcpInfo.version).toBe("1.5.0");
 
       const toolsList = (await (
         await fetch(`${baseUrl}/api/mcp`, {
@@ -598,7 +598,7 @@ describe("v1.2.0 End-to-End Capabilities (A Campaigns + B MergeTrain/Barrier + C
           body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
         })
       ).json()) as { result: { tools: Array<{ name: string }> } };
-      expect(toolsList.result.tools).toHaveLength(25);
+      expect(toolsList.result.tools).toHaveLength(26);
       expect(toolsList.result.tools.some((t) => t.name === "manage_campaigns")).toBe(true);
       expect(toolsList.result.tools.some((t) => t.name === "manage_merge_train")).toBe(true);
 

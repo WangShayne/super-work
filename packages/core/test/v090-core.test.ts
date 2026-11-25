@@ -286,7 +286,7 @@ describe("v0.9.0 Core Modules (A.1 TDD Guard + B.2 Bandit Router + D.1 DAG Cycle
   });
 
   it("MCP v1.3.0: exposes 23 tools and advertises version 1.3.0 on initialize", async () => {
-    expect(MCP_TOOL_DEFINITIONS.length).toBe(25);
+    expect(MCP_TOOL_DEFINITIONS.length).toBe(26);
     const toolNames = MCP_TOOL_DEFINITIONS.map((t) => t.name);
     expect(toolNames).toContain("analyze_impact");
     expect(toolNames).toContain("manage_checkpoints");
@@ -320,12 +320,12 @@ describe("v0.9.0 Core Modules (A.1 TDD Guard + B.2 Bandit Router + D.1 DAG Cycle
       { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
       host,
     )) as { result?: { serverInfo?: { version?: string } } };
-    expect(initResp.result?.serverInfo?.version).toBe("1.4.0");
+    expect(initResp.result?.serverInfo?.version).toBe("1.5.0");
 
     const listResp = (await handleMcpJsonRpcMessage(
       { jsonrpc: "2.0", id: 2, method: "tools/list" },
       host,
     )) as { result?: { tools?: Array<{ name: string }> } };
-    expect(listResp.result?.tools?.length).toBe(25);
+    expect(listResp.result?.tools?.length).toBe(26);
   });
 });
