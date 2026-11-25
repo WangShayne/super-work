@@ -1,4 +1,4 @@
-import { DEFAULT_ENGINE_COOLDOWN_MS, classifyEngineError, isEngineTripped } from "../engine-health.ts";
+import { classifyEngineError, getCooldownMsForFailureKind, isEngineTripped } from "../engine-health.ts";
 import type { RepoConfig, StageKind, StageRun, Ticket, WorkerEngineId } from "../types.ts";
 import type { KernelCoordinatorContext } from "./context.ts";
 
@@ -35,7 +35,7 @@ export async function tripEngineIfDeterministic(
       failureKind: cls.kind,
       reason: input.message.slice(0, 500),
       trippedAt: now,
-      cooldownUntil: new Date(nowMs + DEFAULT_ENGINE_COOLDOWN_MS).toISOString(),
+      cooldownUntil: new Date(nowMs + getCooldownMsForFailureKind(cls.kind)).toISOString(),
       consecutiveFailures: (prev?.consecutiveFailures ?? 0) + 1,
       lastProbedAt: prev?.lastProbedAt,
       updatedAt: now,

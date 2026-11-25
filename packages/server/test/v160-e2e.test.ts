@@ -33,7 +33,7 @@ async function initRepo(baseDir: string): Promise<string> {
   return repoDir;
 }
 
-describe("v1.6.0 Wave 2 End-to-End (playbook hygiene, GitHub release guardrails, MCP 1.6.0)", () => {
+describe("v1.6.0 Wave 2 End-to-End (playbook hygiene, GitHub release guardrails, MCP 1.7.0)", () => {
   const tempDirs: string[] = [];
 
   afterEach(async () => {
@@ -297,7 +297,7 @@ describe("v1.6.0 Wave 2 End-to-End (playbook hygiene, GitHub release guardrails,
     }
   }, 30_000);
 
-  it("exposes MCP 1.6.0 with 27 tools including manage_playbook_hygiene", async () => {
+  it("exposes MCP 1.7.0 with 27 tools including manage_playbook_hygiene", async () => {
     const { kernel, server, baseUrl } = await setup();
     try {
       await addRule(kernel, {
@@ -307,7 +307,7 @@ describe("v1.6.0 Wave 2 End-to-End (playbook hygiene, GitHub release guardrails,
         source: "human",
       });
       const info = (await (await fetch(`${baseUrl}/api/mcp`)).json()) as { version: string };
-      expect(info.version).toBe("1.6.0");
+      expect(info.version).toBe("1.7.0");
       expect(MCP_TOOL_DEFINITIONS).toHaveLength(27);
 
       const rpc = async (method: string, params?: Record<string, unknown>) =>
@@ -325,7 +325,7 @@ describe("v1.6.0 Wave 2 End-to-End (playbook hygiene, GitHub release guardrails,
           };
         };
       expect((await rpc("initialize", { protocolVersion: "2025-03-26" })).result.serverInfo?.version).toBe(
-        "1.6.0",
+        "1.7.0",
       );
       const tools = (await rpc("tools/list")).result.tools ?? [];
       expect(tools).toHaveLength(27);

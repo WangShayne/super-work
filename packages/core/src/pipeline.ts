@@ -1,3 +1,4 @@
+import { resolveAllowedEngineWhitelist } from "./arena.ts";
 import type {
   EnginePreference,
   PipelineTemplateId,
@@ -91,8 +92,9 @@ export function selectEngineForStage(
   const base = selectEngineForStageBase(repo, stage, explicitOverride);
   if (!trippedEngines?.includes(base) || base === "mock") return base;
   // Skip a tripped engine: prefer a healthy real engine in default order, else keep the original.
+  const whitelist = resolveAllowedEngineWhitelist(repo, { tripped: trippedEngines });
   const healthy = (["claude", "codex", "gemini", "opencode"] as WorkerEngineId[]).find(
-    (e) => e !== base && !trippedEngines.includes(e),
+    (e) => e !== base && !trippedEngines.includes(e) && (!whitelist || whitelist.includes(e)),
   );
   return healthy ?? base;
 }
@@ -132,7 +134,11 @@ export function selectReviewEngine(input: {
     return explicitWatchdogEngine;
   }
 
-  const realAvailable = availableEngines.filter((e) => e !== "mock");
+  // Strict whitelist: with explicit fallbackEngines, never review on unconfigured engines.
+  const whitelist = resolveAllowedEngineWhitelist(repo);
+  const realAvailable = availableEngines.filter(
+    (e) => e !== "mock" && (!whitelist || whitelist.includes(e)),
+  );
 
   if (implementEngine !== "mock") {
     if (
@@ -157,13 +163,23 @@ export function selectReviewEngine(input: {
   if (availableEngines.includes(repo.preferredReviewEngine)) {
     return repo.preferredReviewEngine;
   }
+  if (whitelist) {
+    // Never escape an explicit whitelist: prefer whitelisted/mock engines, else the configured preferences.
+    const scoped = availableEngines.filter((e) => e === "mock" || whitelist.includes(e));
+    return scoped[0] ?? repo.preferredReviewEngine;
+  }
   return availableEngines[0] ?? repo.preferredReviewEngine;
 }
 
 export function getAlternateEngine(
   current: WorkerEngineId,
-  available: WorkerEngineId[],
+  availableInput: WorkerEngineId[],
+  /** Optional explicit whitelist (see resolveAllowedEngineWhitelist); mock stays allowed. */
+  allowed?: WorkerEngineId[],
 ): WorkerEngineId | undefined {
+  const available = allowed
+    ? availableInput.filter((e) => e === "mock" || allowed.includes(e))
+    : availableInput;
   const preferenceOrder: WorkerEngineId[] =
     current === "claude"
       ? ["codex", "gemini", "opencode", "mock"]

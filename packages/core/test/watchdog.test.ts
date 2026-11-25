@@ -65,7 +65,7 @@ describe("TwoTierWatchdog L1 & L2 probes", () => {
     expect(dec.targetEngine).toBe("codex");
   });
 
-  it("detects A -> B -> A diff oscillation", () => {
+  it("detects A -> B -> A -> B diff oscillation (2-cycle)", () => {
     const wd = new TwoTierWatchdog(makeFakeLlm({ action: "INJECT_HINT", reason: "oscillating" }));
     const tracker = wd.createTracker(stageRun, mandate, 1000);
 
@@ -74,6 +74,8 @@ describe("TwoTierWatchdog L1 & L2 probes", () => {
     wd.recordDiffCheckpoint(tracker, "hashB", true);
     expect(wd.evaluateL1(tracker, 2000)).toBeNull();
     wd.recordDiffCheckpoint(tracker, "hashA", true);
+    expect(wd.evaluateL1(tracker, 2000)).toBeNull();
+    wd.recordDiffCheckpoint(tracker, "hashB", true);
 
     const sig = wd.evaluateL1(tracker, 2000);
     expect(sig?.kind).toBe("diff_oscillation");

@@ -158,6 +158,12 @@ stateDiagram-v2
 - **并行投机合并列车与跨仓释放屏障（[merge-train.ts](./packages/core/src/merge-train.ts)、[merge-train-coordinator.ts](./packages/core/src/kernel/merge-train-coordinator.ts)）**：当仓库仅有 1 笔 `local_merge` 且基线 HEAD 未变且无等待屏障时直接走 **Smart-Bypass 零开销快速通道**；并发入队时在 `train-worktrees/` 按序叠加最多 3 个 `--no-ff` 投机合并槽位并发跑校验，对连续通过的最长前缀执行一次 Fast-Forward 并完整保留各任务独立 `--no-ff` Merge SHA（**单任务 `git revert -m 1` 完整保留**），且通过 `evaluateSpeculativePrefix` 精确定位并驱逐首个失败槽位；跨仓库 Epic 默认开启 `barrierGroupId` 释放屏障并在进入 `barrier_waiting` 时提前物化 `HandoverDigest` 消除跨仓依赖死锁。
 - **确定性 Hooks、不可变 `super-work.json` 与 `ServiceManager`（[lifecycle-hooks.ts](./packages/core/src/kernel/lifecycle-hooks.ts)、[service-manager.ts](./packages/drivers/src/env/service-manager.ts)）**：将 `IMMUTABLE_REPO_PATHS`（`super-work.json`、`**/super-work.json`）纳入 OS 沙箱只读白名单（Worker 可读取、禁止修改并由 Mandate 强制回滚且 `canExpandMandate: false`）；交付与升级链路分别触发阻塞型 `pre_deliver` 与尽责异步 `post_deliver` / `on_escalate` Hook（全量使用脱敏环境变量并注入 `SUPER_WORK_HOOK_*`）；新增零外部依赖 `launchd` / `systemd --user` 守护进程管理、`127.0.0.1` 回环绑定守卫、`10 MB` 日志轮转与 **21 个 MCP 工具（`1.2.0`）**。
 
+### 3.13 `v1.7.0` 韧性与 Watchdog 2.0 可观测性（Wave 2）
+- **分级熔断**：`isPersistentEngineFailure` / `getCooldownMsForFailureKind`（[engine-health.ts](./packages/core/src/engine-health.ts)）——瞬时 15 分钟、持久 24 小时。Web 在 `DoctorBackupPanel.tsx` 内本地镜像该判定（不导入 core 运行时），渲染「持久熔断」与「临时冷却」徽标。
+- **Watchdog 2.0 / Flake 重试 KPI**：`buildRunDigestReport`（[digest.ts](./packages/core/src/digest.ts)）仅在非零时写入 `resilience.watchdogExtensions`（`watchdog_extended`）与 `resilience.flakeRetries`（`flake_retried`），不影响既有 `toEqual` 断言；中英文 Markdown 为每个非零计数追加一行。飞行记录器在 Watchdog 切换旁展示两项计数。
+- **仅类型子路径**：`@super-work/core` 导出 `./types`（`./src/types.ts`）；`@super-work/web` 以 `workspace:*` devDependency 声明 core（为 Wave 3 类型去重铺路）。影响面规划器仍通过 `workspace:*` 解析 `core → web`。
+- **v1.7.0 其他内容**：里程碑启动 Canary、Flake 重试、Safe-Refactor 并发调度 + 自动 RefactorGuard、自适应 Watchdog 2.0（Wave 1）。MCP `1.7.0`（27 个工具）、CLI `v1.7.0`、Web 徽标 `v1.7`。
+
 ### 3.12 `v1.6.0` Playbook 卫生、飞行记录器 KPI 与可选 GitHub Release（Wave 2）
 - **卫生评估器（[playbook-hygiene.ts](./packages/core/src/playbook-hygiene.ts)）**：零依赖的 `evaluatePlaybookRuleHygiene(rule, source?, { pinned? })` 识别一次性审批/续跑/工单运行笔记（不区分大小写的模式、工单 ID 正则、不含约束动词的简短状态汇报型审批），永不标记 `repo_contract` 与置顶规则；`auditPlaybookEntries` 生成 `PlaybookHygieneReport`。
 - **Inbox 显式勾选**：`resolveInboxItemOp` 仅在 `saveToPlaybook === true` **且**备注通过卫生检查时写入 Playbook；噪声备注被跳过，不影响 Inbox 处理。

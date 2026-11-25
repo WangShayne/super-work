@@ -1,4 +1,4 @@
-import { pickNextFallbackEngine } from "../arena.ts";
+import { pickNextFallbackEngine, resolveAllowedEngineWhitelist } from "../arena.ts";
 import { getAlternateEngine } from "../pipeline.ts";
 import type { buildStageToolProfile } from "../tool-profiler.ts";
 import type {
@@ -228,11 +228,14 @@ export async function handleWatchdogAbortOp(
 
   if (dec.action === "SWITCH_ENGINE") {
     const nextFailed = Array.from(new Set([...(ticket.failedEngines ?? []), driverEngine]));
+    // Explicit fallbackEngines whitelist (undefined when not configured).
+    const whitelist = resolveAllowedEngineWhitelist(repo);
     const altEngine =
       dec.targetEngine &&
       dec.targetEngine !== driverEngine &&
       !nextFailed.includes(dec.targetEngine) &&
-      availableEngines.includes(dec.targetEngine)
+      availableEngines.includes(dec.targetEngine) &&
+      (!whitelist || dec.targetEngine === "mock" || whitelist.includes(dec.targetEngine))
         ? dec.targetEngine
         : pickNextFallbackEngine({
             currentEngine: driverEngine,
@@ -240,7 +243,7 @@ export async function handleWatchdogAbortOp(
             repo,
             availableEngines,
             trippedEngines,
-          }) ?? getAlternateEngine(driverEngine, availableEngines);
+          }) ?? getAlternateEngine(driverEngine, availableEngines, whitelist);
     if (altEngine && altEngine !== driverEngine && !nextFailed.includes(altEngine)) {
       const nextTicket: Ticket = {
         ...ticket,

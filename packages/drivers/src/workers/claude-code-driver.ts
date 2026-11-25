@@ -62,7 +62,41 @@ export function buildClaudeCliArgs(input: WorkerTurnInput): string[] {
   return args;
 }
 
-export function parseClaudeStreamLine(line: string): WorkerStreamEvent[] {
+/** Running per-turn state shared across parseClaudeStreamLine calls. */
+export interface ClaudeStreamParseState {
+  cumulativeEstimatedCostUsd?: number;
+  cumulativeInputTokens?: number;
+  cumulativeOutputTokens?: number;
+  /** Assistant message ids already billed (one message may span several stream lines). */
+  seenMessageIds?: Set<string>;
+}
+
+// Conservative Sonnet-class USD per million tokens; the final result.total_cost_usd is authoritative.
+const EST_INPUT_USD_PER_MTOK = 3;
+const EST_OUTPUT_USD_PER_MTOK = 15;
+const EST_CACHE_READ_USD_PER_MTOK = 0.3;
+const EST_CACHE_WRITE_USD_PER_MTOK = 3.75;
+
+export function estimateClaudeUsageCostUsd(usage: {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}): number {
+  const n = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
+  return (
+    (n(usage.input_tokens) * EST_INPUT_USD_PER_MTOK +
+      n(usage.output_tokens) * EST_OUTPUT_USD_PER_MTOK +
+      n(usage.cache_read_input_tokens) * EST_CACHE_READ_USD_PER_MTOK +
+      n(usage.cache_creation_input_tokens) * EST_CACHE_WRITE_USD_PER_MTOK) /
+    1_000_000
+  );
+}
+
+export function parseClaudeStreamLine(
+  line: string,
+  state?: ClaudeStreamParseState,
+): WorkerStreamEvent[] {
   let obj: Record<string, unknown>;
   try {
     obj = JSON.parse(line) as Record<string, unknown>;
@@ -80,8 +114,40 @@ export function parseClaudeStreamLine(line: string): WorkerStreamEvent[] {
   }
 
   if (type === "assistant" && obj.message && typeof obj.message === "object") {
-    const msg = obj.message as { content?: Array<Record<string, unknown>> };
+    const msg = obj.message as {
+      id?: unknown;
+      content?: Array<Record<string, unknown>>;
+      usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+        cache_read_input_tokens?: number;
+        cache_creation_input_tokens?: number;
+      };
+    };
     const blocks = Array.isArray(msg.content) ? msg.content : [];
+    if (state && msg.usage && typeof msg.usage === "object") {
+      const msgId = typeof msg.id === "string" ? msg.id : undefined;
+      const seen = (state.seenMessageIds ??= new Set<string>());
+      if (!msgId || !seen.has(msgId)) {
+        if (msgId) seen.add(msgId);
+        const delta = estimateClaudeUsageCostUsd(msg.usage);
+        if (delta > 0) {
+          const u = msg.usage;
+          const inTok =
+            (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+          state.cumulativeEstimatedCostUsd = (state.cumulativeEstimatedCostUsd ?? 0) + delta;
+          state.cumulativeInputTokens = (state.cumulativeInputTokens ?? 0) + inTok;
+          state.cumulativeOutputTokens = (state.cumulativeOutputTokens ?? 0) + (u.output_tokens ?? 0);
+          events.push({
+            type: "usage",
+            costUsd: state.cumulativeEstimatedCostUsd,
+            inputTokens: state.cumulativeInputTokens,
+            outputTokens: state.cumulativeOutputTokens,
+            timestamp: ts,
+          });
+        }
+      }
+    }
     for (const block of blocks) {
       const bType = String(block.type ?? "");
       if (bType === "thinking" && typeof block.thinking === "string") {
@@ -122,8 +188,10 @@ export function parseClaudeStreamLine(line: string): WorkerStreamEvent[] {
   }
 
   if (type === "result") {
+    // result.total_cost_usd is authoritative and overrides the running estimate.
     const costUsd = typeof obj.total_cost_usd === "number" ? obj.total_cost_usd : undefined;
     if (typeof costUsd === "number") {
+      if (state) state.cumulativeEstimatedCostUsd = costUsd;
       events.push({ type: "usage", costUsd, timestamp: ts });
     }
     if (obj.is_error) {
@@ -186,12 +254,13 @@ export class ClaudeCodeDriver implements WorkerDriver {
     signal.addEventListener("abort", onAbort, { once: true });
 
     let sawCompletion = false;
+    const parseState: ClaudeStreamParseState = { cumulativeEstimatedCostUsd: 0 };
     const stderrPromise = new Response(proc.stderr).text();
 
     try {
       for await (const line of readLinesFromStream(proc.stdout)) {
         if (signal.aborted) break;
-        const parsed = parseClaudeStreamLine(line);
+        const parsed = parseClaudeStreamLine(line, parseState);
         for (const ev of parsed) {
           if (ev.type === "completed" || ev.type === "error") {
             sawCompletion = true;

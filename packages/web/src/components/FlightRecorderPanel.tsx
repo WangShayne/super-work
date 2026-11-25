@@ -29,6 +29,8 @@ const KIND_STYLES: Record<FlightEventKind, string> = {
   milestone_released: "bg-zinc-500/15 text-zinc-300",
   engine_tripped: "bg-amber-500/15 text-amber-300",
   spillover_quarantined: "bg-rose-500/15 text-rose-300",
+  flake_retried: "bg-violet-500/15 text-violet-300",
+  watchdog_extended: "bg-amber-500/15 text-amber-300",
 };
 
 function formatSaved(ms: number): string {
@@ -217,6 +219,10 @@ export default function FlightRecorderPanel({ repoId }: FlightRecorderPanelProps
               </div>
               <div className="text-2xl font-semibold font-mono text-zinc-100">
                 {digest.selfHost.watchdogSwitches}
+              </div>
+              <div className="text-[11px] font-mono text-zinc-500">
+                {t("flight.kpi.watchdogExtensions")}: {digest.resilience?.watchdogExtensions ?? 0} ·{" "}
+                {t("flight.kpi.flakeRetries")}: {digest.resilience?.flakeRetries ?? 0}
               </div>
             </div>
           </div>

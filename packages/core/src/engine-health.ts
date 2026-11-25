@@ -1,6 +1,23 @@
 import type { EngineHealthFailureKind, EngineHealthRecord } from "./types.ts";
 
 export const DEFAULT_ENGINE_COOLDOWN_MS = 30 * 60_000;
+/** Cooldown for transient failures (rate limits, timeouts). */
+export const TRANSIENT_ENGINE_COOLDOWN_MS = 15 * 60_000;
+/** Cooldown for persistent account/model failures that will not self-heal quickly. */
+export const PERSISTENT_ENGINE_COOLDOWN_MS = 24 * 60 * 60_000;
+
+export function isPersistentEngineFailure(kind?: EngineHealthFailureKind): boolean {
+  return (
+    kind === "model_unsupported" ||
+    kind === "tier_ineligible" ||
+    kind === "auth_invalid" ||
+    kind === "quota_exhausted"
+  );
+}
+
+export function getCooldownMsForFailureKind(kind?: EngineHealthFailureKind): number {
+  return isPersistentEngineFailure(kind) ? PERSISTENT_ENGINE_COOLDOWN_MS : TRANSIENT_ENGINE_COOLDOWN_MS;
+}
 
 const DETERMINISTIC_RULES: ReadonlyArray<{ kind: EngineHealthFailureKind; re: RegExp }> = [
   { kind: "model_unsupported", re: /model (is )?not supported|unsupported model|model_not_found/i },

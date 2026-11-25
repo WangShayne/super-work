@@ -97,7 +97,12 @@ bun run setup -- --auto
    - **链式召回**：沿 `Trigger → Thread → Inline 摘要 → Spill 溢出产物`（含结构化 JSON `review_report` 与 `test_log`）溯源，或用 FTS5 搜索历史经验。
 2. **Thread 订阅追问**：在抽屉底部输入框发送补充要求，消息直接注入活跃 `Thread`。
 
-### 4. 任务蓝图、黄金评测、原子恢复、知识包与安全回滚
+#### 8. 韧性与 Watchdog 2.0 可观测性（`v1.7.0`）
+1. 引擎熔断已分级：瞬时故障冷却 15 分钟；持久故障（`model_unsupported`、`tier_ineligible`、`auth_invalid`、`quota_exhausted`）冷却 24 小时。Web **Doctor** 页中持久熔断显示「持久熔断（需重置/探测）」，修复账号/模型后点击**重置**或**重新探测**；瞬时熔断显示临时冷却徽标及冷却时间。
+2. `super-work digest --hours 24` 在计数非零时会提及 **Watchdog 2.0 延长** 与 **Flake 重试**；飞行记录器面板在「Watchdog 引擎切换」下展示。
+3. MCP `1.7.0`（27 个工具）、CLI `v1.7.0`、Web 徽标 `v1.7`。
+
+## 4. 任务蓝图、黄金评测、原子恢复、知识包与安全回滚
 - **派发任务（Task Blueprints）与交付风险门禁（A.1 Risk Gate）**：派发弹窗支持一键选用 `tdd-bugfix`、`ui-visual-polish`、`safe-refactor`、`backend-feature`、`docs-chore` 或 `super-work.json` 自定义蓝图快速填充模板/TDD/路径与门禁策略；可在 **仓库偏好设置 → 运行时与策略** 配置 `deliveryGatePolicy`（`always_auto` / `risk_gated` / `always_signoff`）、风险阈值 `riskThreshold` 与高敏感路径 `sensitivePaths`。
 - **黄金基准回放、知识包迁移与 SQLite 原子恢复（D.1）**：可在抽屉保存已交付工单为黄金基准并在 **效能与预算 → 黄金基准回放评测台** 跨引擎隔离回放对比（`super-work eval`）；在 **仓库偏好设置 → 经验库** 一键导出/导入包含 Playbook + Casebook + Blueprints 的 **知识包**（`super-work bundle`）；在 **环境与模型设置 → 系统自检与热备份** 执行零锁 `VACUUM INTO` 热备份与带 `pre-restore` 保险快照的 **原子恢复**（`super-work backup restore`）。
 - 通过 `local_merge`（统一 `--no-ff` 生成单点 Merge Commit）本地合入主干后，抽屉顶部提供 **「一键安全回滚」** 按钮（或运行 `super-work revert <ticketId>`），执行非破坏性 `git revert -m 1` 生成反向提交。

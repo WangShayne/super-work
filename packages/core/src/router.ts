@@ -26,6 +26,7 @@ import type {
   KernelEvent,
   Mandate,
   PipelineTemplateId,
+  RefactorGuardConfig,
   RepoConfig,
   RepoProbeContextPack,
   RequirementIntakeInput,
@@ -574,7 +575,12 @@ export class EventIntakeRouter {
 
     const activeTickets = await this.stateStore.listActiveTickets(repo.id);
     const overlapDeps = this.computeOverlappingDependencies(mandate, activeTickets);
-    const semantic = await this.computeSemanticDependencies(repo, mandate, activeTickets);
+    const semantic = await this.computeSemanticDependencies(
+      repo,
+      mandate,
+      activeTickets,
+      effectiveInput.refactorGuard,
+    );
     if (overlapDeps.length > 0 || semantic.semanticDepIds.length > 0) {
       hasPendingDeps = true;
     }
@@ -1130,6 +1136,7 @@ export class EventIntakeRouter {
     repo: RepoConfig,
     mandate: Mandate,
     activeTickets: Ticket[],
+    refactorGuard?: RefactorGuardConfig,
   ): Promise<{
     semanticDepIds: string[];
     impactSummary?: TicketImpactSummary;
@@ -1154,6 +1161,10 @@ export class EventIntakeRouter {
     for (const active of activeTickets) {
       if (active.status === "proposed" || active.isEpic) continue;
       if (active.mandate.allowedPaths.includes("**")) continue;
+      // Export-preserving refactors on disjoint scopes run truly concurrently (no semantic serialization).
+      if (refactorGuard?.enforceExportParity === true && !mandateScopesOverlap(mandate, active.mandate)) {
+        continue;
+      }
 
       const matchesDirect =
         report.directDependents.some((f) => matchesPathScope(f, active.mandate.allowedPaths)) ||

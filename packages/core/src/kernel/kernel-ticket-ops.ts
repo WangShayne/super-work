@@ -213,6 +213,7 @@ export async function intakeRequirementOp(
     modelOverride: input.modelOverride,
     effortOverride: input.effortOverride,
     maxCostUsd: input.maxBudgetUsd,
+    ...(single.refactorGuard ? { refactorGuard: single.refactorGuard } : {}),
   });
   return { route: "single_ticket", plan, ticket };
 }

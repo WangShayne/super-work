@@ -237,6 +237,145 @@ export async function handleSelfHostPostMergeOp(
   });
 }
 
+/**
+ * Boot Canary + drain self-reload after a self-host milestone release.
+ * On canary failure, resets the base branch to the pre-release SHA and escalates to the Inbox.
+ * Never throws: a failure here must not crash the live daemon or the release flow.
+ */
+export async function maybeVerifyAndReloadSelfHostMilestoneOp(
+  ctx: KernelCoordinatorContext,
+  repo: RepoConfig,
+  input: {
+    milestoneId: string;
+    milestoneName: string;
+    commitSha?: string;
+    preReleaseSha?: string;
+    targetVersion?: string;
+  },
+): Promise<void> {
+  const runner = ctx.selfHostRunner;
+  if (!runner) return;
+  if (resolve(repo.rootPath) !== resolve(runner.selfRepoRoot)) return;
+  if (!input.commitSha) return;
+  const commitSha = input.commitSha;
+
+  try {
+    setAndEmitReloadState(ctx, {
+      phase: "building",
+      selfRepoRoot: runner.selfRepoRoot,
+      commitSha,
+      revertCommitSha: undefined,
+      error: undefined,
+      summary: `Building self-hosted milestone ${input.milestoneName} (${commitSha})...`,
+    });
+    setAndEmitReloadState(ctx, {
+      phase: "canary_probing",
+      summary: `Running build & Boot Canary health probe for milestone ${input.milestoneId} (${commitSha})...`,
+    });
+
+    const canary = await runner.verifyBuildAndCanaryBoot({ commitSha });
+    if (canary.ok) {
+      setAndEmitReloadState(ctx, {
+        phase: "draining",
+        canaryPort: canary.canaryPort,
+        canaryDurationMs: canary.durationMs,
+        activeRunsRemaining:
+          ctx.activeTicketRuns.size + ctx.activeRoutineRuns.size + ctx.finalizingEpics.size,
+        summary: `${canary.summary}. Draining active work before reload...`,
+      });
+      scheduleDrainAndReload(ctx, `Self-host milestone ${input.milestoneId} verified by Boot Canary`, {
+        repoId: repo.id,
+        commitSha,
+        canaryPort: canary.canaryPort,
+        canaryDurationMs: canary.durationMs,
+      });
+      return;
+    }
+
+    let resetOk = false;
+    let resetError: string | undefined;
+    if (input.preReleaseSha && ctx.workspace.resetBranchRef) {
+      try {
+        await ctx.workspace.resetBranchRef(repo.rootPath, repo.baseBranch, input.preReleaseSha);
+        resetOk = true;
+      } catch (err) {
+        resetError = err instanceof Error ? err.message : String(err);
+      }
+    } else {
+      resetError = "no preReleaseSha or resetBranchRef unavailable";
+    }
+
+    const ts = nowIso();
+    const detailText = [
+      canary.summary,
+      canary.errorOutput ? `\nBoot Canary output:\n${canary.errorOutput.slice(-1500)}` : "",
+      resetOk
+        ? `\nReset ${repo.baseBranch} ${commitSha} -> ${input.preReleaseSha}; live daemon stayed healthy.`
+        : `\nBranch reset failed: ${resetError}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    const inboxItem: InboxItem = {
+      id: newId("inb"),
+      repoId: repo.id,
+      ticketId: `milestone_${input.milestoneId}`,
+      kind: "watchdog_escalation",
+      status: "pending",
+      title: resetOk
+        ? `Self-Host Milestone Boot Canary Failed (Rolled Back): ${input.milestoneName}`
+        : `Self-Host Milestone Boot Canary Failed: ${input.milestoneName}`,
+      summary: detailText,
+      contextPayload: {
+        selfHostRollback: true,
+        milestoneId: input.milestoneId,
+        targetVersion: input.targetVersion,
+        failedCommitSha: commitSha,
+        preReleaseSha: input.preReleaseSha,
+        resetError,
+        canaryDurationMs: canary.durationMs,
+        buildOk: canary.buildOk,
+      },
+      createdAt: ts,
+    };
+    await ctx.stateStore.saveInboxItem(inboxItem);
+    ctx.emitEvent({ type: "inbox_created", item: inboxItem, timestamp: ts });
+
+    if (resetOk) {
+      await ctx.recordFlightEvent?.({
+        repoId: repo.id,
+        kind: "canary_rolled_back",
+        summary: `Milestone Boot Canary failed; reset ${repo.baseBranch} ${commitSha.slice(0, 8)} -> ${(input.preReleaseSha ?? "").slice(0, 8)}`,
+        metadata: {
+          milestoneId: input.milestoneId,
+          failedCommitSha: commitSha,
+          preReleaseSha: input.preReleaseSha,
+          canaryDurationMs: canary.durationMs,
+          buildOk: canary.buildOk,
+        },
+      });
+    }
+
+    setAndEmitReloadState(ctx, {
+      phase: resetOk ? "rolled_back" : "failed",
+      commitSha,
+      revertCommitSha: resetOk ? input.preReleaseSha : undefined,
+      canaryPort: canary.canaryPort,
+      canaryDurationMs: canary.durationMs,
+      error: canary.summary,
+      summary: resetOk
+        ? `Milestone canary failed; ${repo.baseBranch} reset to ${input.preReleaseSha}`
+        : `Milestone canary failed: ${canary.summary}`,
+    });
+  } catch (err) {
+    setAndEmitReloadState(ctx, {
+      phase: "failed",
+      error: err instanceof Error ? err.message : String(err),
+      summary: `Milestone Boot Canary errored for ${input.milestoneId}`,
+    });
+  }
+}
+
 export async function triggerManualSelfReloadOp(
   ctx: KernelCoordinatorContext,
   options?: { force?: boolean; skipCanary?: boolean },

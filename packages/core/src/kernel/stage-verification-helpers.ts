@@ -300,6 +300,32 @@ export async function canReuseImplementGate(
   }
 }
 
+const FLAKY_ENV_MARKERS = /chrome|chromium|cdp|browser|ECONNREFUSED|timed out|socket hang up|sandbox_init/i;
+const TEST_FILE_RE = /packages\/[^\s:()]+\.test\.[cm]?[jt]sx?/g;
+
+/**
+ * Returns the single failing test file when a `bun test` failure looks like an external-process
+ * flake (browser/network/sandbox) and the file was not touched by this ticket; otherwise null.
+ */
+export function extractSingleFlakyTestTarget(output: string, changedFiles: string[]): string | null {
+  if (!output) return null;
+  const failing = new Set<string>();
+  for (const line of output.split(/\r?\n/)) {
+    if (!/\(fail\)/.test(line)) continue;
+    for (const m of line.match(TEST_FILE_RE) ?? []) failing.add(m);
+  }
+  if (failing.size === 0) {
+    // Fall back to file headers (e.g. "packages/x/test/y.test.ts:" blocks) when no (fail) line names a file.
+    if (!/\(fail\)|\bfail\b/i.test(output)) return null;
+    for (const m of output.match(TEST_FILE_RE) ?? []) failing.add(m);
+  }
+  if (failing.size !== 1) return null;
+  const file = [...failing][0]!;
+  const norm = (p: string) => p.replace(/^\.\//, "");
+  if (changedFiles.some((f) => norm(f) === file)) return null;
+  return FLAKY_ENV_MARKERS.test(output) ? file : null;
+}
+
 export async function runRepoVerificationGateOp(
   ctx: KernelCoordinatorContext,
   ticket: Ticket,
@@ -345,6 +371,70 @@ export async function runRepoVerificationGateOp(
       },
     );
     staticResult = scopedVerification ? { ...rawResult, scopedVerification } : rawResult;
+
+    // Single-flake guard: one failing external-process test unrelated to this change gets one rerun.
+    if (!staticResult.ok && /\bbun test\b/.test(staticResult.failedCommand ?? "")) {
+      const failedOut = staticResult.results.find((r) => r.exitCode !== 0)?.output ?? "";
+      try {
+        const { effectiveBaseBranch } = await ctx.getEffectiveBaseInfo(ticket, repo);
+        const changedFiles = await ctx.workspace.getChangedFiles(worktreePath, effectiveBaseBranch);
+        const flakyFile = extractSingleFlakyTestTarget(failedOut, changedFiles);
+        // The runner stops at the first failing command, so commands after it have not run yet.
+        const failedIdx = commandsToRun.indexOf(staticResult.failedCommand ?? "");
+        if (flakyFile && failedIdx >= 0) {
+          const verifyOpts = {
+            sandboxMode: repo.sandboxMode ?? "balanced",
+            forbiddenPaths: ticket.mandate.forbiddenPaths,
+            readOnlyPaths: stageRun.stage === "implement" ? ticket.lockedTestPaths : undefined,
+            allowNetwork: ticket.mandate.allowNetwork,
+            rootRepoPath: repo.rootPath,
+          } as const;
+          const rerun = await ctx.workspace.runVerificationCommands(
+            worktreePath,
+            [`bun test ${flakyFile}`],
+            ticket.mandate.maxDurationSec,
+            verifyOpts,
+          );
+          if (rerun.ok) {
+            await ctx.recordFlightEvent?.({
+              repoId: repo.id,
+              ticketId: ticket.id,
+              kind: "flake_retried",
+              summary: `Single flaky test ${flakyFile} passed on one rerun`,
+              metadata: { testFile: flakyFile, stage: stageRun.stage },
+            });
+            const remaining = commandsToRun.slice(failedIdx + 1);
+            const remainingRes =
+              remaining.length > 0
+                ? await ctx.workspace.runVerificationCommands(
+                    worktreePath,
+                    remaining,
+                    ticket.mandate.maxDurationSec,
+                    verifyOpts,
+                  )
+                : undefined;
+            if (!remainingRes || remainingRes.ok) {
+              staticResult = {
+                ...staticResult,
+                ok: true,
+                failedCommand: undefined,
+                results: [...staticResult.results, ...rerun.results, ...(remainingRes?.results ?? [])],
+                summary: `${staticResult.summary} [flake-retried PASS: ${flakyFile}]`,
+              };
+            } else {
+              // A later gate command failed: report that failure, not the flake.
+              staticResult = {
+                ...remainingRes,
+                results: [...staticResult.results, ...rerun.results, ...remainingRes.results],
+                ...(scopedVerification ? { scopedVerification } : {}),
+              };
+            }
+          }
+        }
+      } catch {
+        // Flake detection is best-effort; fall through to the original failure.
+      }
+    }
     if (scopedVerification?.usedScoped) {
       await ctx.recordFlightEvent?.({
         repoId: repo.id,

@@ -122,6 +122,11 @@ bun run setup -- --auto
 3. The Flight Recorder panel now shows combined gate savings (scoped + rebase reuse) and engine-trip / spillover-quarantine counters.
 4. Optional GitHub Release: `super-work milestone release <id> --bump --tag --push --github-release` (REST `createGithubRelease: true`; Web checkbox is enabled only when *tag* and *push* are ticked). Requires a milestone target version and an authenticated `gh`; invalid combinations are rejected before git is touched. Off by default.
 
+### 8. Resilience & Watchdog 2.0 Observability (`v1.7.0`)
+1. Engine breaker is tiered: transient failures cool down for 15 min; persistent ones (`model_unsupported`, `tier_ineligible`, `auth_invalid`, `quota_exhausted`) for 24 h. In the Web **Doctor** tab a persistent trip shows *Persistent trip — manual reset/probe required*; use **Reset** or **Re-probe** after fixing the account/model. Transient trips show a temporary-cooldown badge with the cooldown time.
+2. `super-work digest --hours 24` now mentions **Watchdog 2.0 extensions** and **Flake retries** when non-zero; the Flight Recorder panel shows them under *Watchdog Switches*.
+3. MCP `1.7.0` (27 tools), CLI `v1.7.0`, Web badge `v1.7`.
+
 ## 4. Concurrency Best Practices & FAQ
 
 1. **How do multiple Workers run truly in parallel without blocking each other?**

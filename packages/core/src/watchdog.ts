@@ -14,10 +14,17 @@ import { normalizeErrorSignature } from "./utils.ts";
 export const DEFAULT_WATCHDOG_CONFIG: WatchdogConfig = {
   silenceTimeoutMs: 180_000,
   repeatedErrorThreshold: 3,
-  oscillationWindow: 3,
+  oscillationWindow: 4,
   budgetBurnWarningRatio: 0.8,
   pollIntervalMs: 5_000,
 };
+
+/** Max number of active-progress extensions of the stage duration ceiling. */
+export const MAX_ACTIVE_DURATION_EXTENSIONS = 2;
+/** Seconds added to the duration ceiling per extension. */
+export const ACTIVE_DURATION_EXTENSION_SEC = 300;
+/** Extensions are only granted while cost stays at or below this ratio of the budget. */
+export const EXTENSION_BUDGET_RATIO = 0.85;
 
 export interface WatchdogTracker {
   stageRunId: string;
@@ -33,6 +40,12 @@ export interface WatchdogTracker {
   toolCallCount: number;
   hasChangedFiles: boolean;
   recentEvents: WorkerStreamEvent[];
+  durationExtensionCount: number;
+  lastExtensionDiffCount: number;
+  /** Total diff checkpoints recorded (monotonic; diffHashes is capped at 8). */
+  diffCheckpointTotal: number;
+  lastExtensionCheckpointTotal: number;
+  effectiveMaxDurationSec: number;
 }
 
 export class TwoTierWatchdog {
@@ -64,6 +77,11 @@ export class TwoTierWatchdog {
       toolCallCount: 0,
       hasChangedFiles: false,
       recentEvents: [],
+      durationExtensionCount: 0,
+      lastExtensionDiffCount: 0,
+      diffCheckpointTotal: 0,
+      lastExtensionCheckpointTotal: 0,
+      effectiveMaxDurationSec: mandate.maxDurationSec,
     };
   }
 
@@ -110,6 +128,7 @@ export class TwoTierWatchdog {
     const prev = tracker.diffHashes[tracker.diffHashes.length - 1];
     if (prev !== diffHash) {
       tracker.diffHashes.push(diffHash);
+      tracker.diffCheckpointTotal += 1;
       if (tracker.diffHashes.length > 8) {
         tracker.diffHashes.shift();
       }
@@ -140,13 +159,19 @@ export class TwoTierWatchdog {
       detectedAt: new Date(nowMs).toISOString(),
     });
 
-    if (
-      tracker.costUsd > tracker.mandate.maxCostUsd ||
-      elapsedSec > tracker.mandate.maxDurationSec
-    ) {
+    const costExceeded = tracker.costUsd > tracker.mandate.maxCostUsd;
+    let timeExceeded = elapsedSec > tracker.effectiveMaxDurationSec;
+    if (timeExceeded && !costExceeded && this.canExtendDuration(tracker)) {
+      tracker.durationExtensionCount += 1;
+      tracker.effectiveMaxDurationSec += ACTIVE_DURATION_EXTENSION_SEC;
+      tracker.lastExtensionDiffCount = tracker.diffHashes.length;
+      tracker.lastExtensionCheckpointTotal = tracker.diffCheckpointTotal;
+      timeExceeded = elapsedSec > tracker.effectiveMaxDurationSec;
+    }
+    if (costExceeded || timeExceeded) {
       return makeSignal(
         "hard_budget_exceeded",
-        `Budget or time ceiling exceeded (cost=$${tracker.costUsd.toFixed(3)}/$${tracker.mandate.maxCostUsd}, elapsed=${elapsedSec.toFixed(0)}s/${tracker.mandate.maxDurationSec}s)`,
+        `Budget or time ceiling exceeded (cost=$${tracker.costUsd.toFixed(3)}/$${tracker.mandate.maxCostUsd}, elapsed=${elapsedSec.toFixed(0)}s/${tracker.effectiveMaxDurationSec}s)`,
       );
     }
 
@@ -231,10 +256,23 @@ export class TwoTierWatchdog {
     }
   }
 
+  private canExtendDuration(tracker: WatchdogTracker): boolean {
+    const { maxCostUsd } = tracker.mandate;
+    if (maxCostUsd > 0 && tracker.costUsd > maxCostUsd * EXTENSION_BUDGET_RATIO) return false;
+    if (tracker.consecutiveErrorCount !== 0) return false;
+    if (tracker.durationExtensionCount >= MAX_ACTIVE_DURATION_EXTENSIONS) return false;
+    // Forward progress: a new diff checkpoint since the last extension (diffHashes is capped, so use the total).
+    return tracker.diffCheckpointTotal > tracker.lastExtensionCheckpointTotal;
+  }
+
   private hasOscillation(hashes: string[]): boolean {
-    if (hashes.length < this.config.oscillationWindow) return false;
-    const len = hashes.length;
-    // A -> B -> A pattern
-    return hashes[len - 1] === hashes[len - 3] && hashes[len - 1] !== hashes[len - 2];
+    if (hashes.length < Math.max(4, this.config.oscillationWindow)) return false;
+    const n = hashes.length;
+    // Full 2-cycle (A -> B -> A -> B); a single exploratory revert A -> B -> A is tolerated.
+    return (
+      hashes[n - 1] === hashes[n - 3] &&
+      hashes[n - 2] === hashes[n - 4] &&
+      hashes[n - 1] !== hashes[n - 2]
+    );
   }
 }

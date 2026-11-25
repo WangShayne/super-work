@@ -19,8 +19,19 @@ import type {
   PlaybookHygieneReport,
   SelfReloadState,
   ServiceStatusResponse,
+  EngineHealthFailureKind,
   SystemDoctorReport,
 } from "../types.ts";
+
+/** Mirrors core `isPersistentEngineFailure` (kept local: web must not bundle core runtime). */
+function isPersistentEngineFailure(kind?: EngineHealthFailureKind): boolean {
+  return (
+    kind === "model_unsupported" ||
+    kind === "tier_ineligible" ||
+    kind === "auth_invalid" ||
+    kind === "quota_exhausted"
+  );
+}
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -265,6 +276,17 @@ export function DoctorBackupPanel() {
                     </span>
                     {e.failureKind && (
                       <span className="text-zinc-400">{t(`engines.kind.${e.failureKind}`)}</span>
+                    )}
+                    {e.status === "tripped" && isPersistentEngineFailure(e.failureKind) && (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] border border-rose-500/40 bg-rose-500/10 text-rose-200">
+                        {t("engines.persistentTrip")}
+                      </span>
+                    )}
+                    {e.status === "tripped" && e.failureKind === "transient" && (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] border border-sky-500/30 bg-sky-500/10 text-sky-200">
+                        {t("engines.transientCooldown")}
+                        {e.cooldownUntil ? ` · ${e.cooldownUntil}` : ""}
+                      </span>
                     )}
                   </div>
                   <div className="text-zinc-500 truncate">

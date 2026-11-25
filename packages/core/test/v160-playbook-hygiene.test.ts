@@ -146,7 +146,7 @@ describe("v1.6.0 digest gate reuse & resilience", () => {
 });
 
 describe("v1.6.0 MCP surface", () => {
-  it("advertises manage_playbook_hygiene as the 27th tool at version 1.6.0", async () => {
+  it("advertises manage_playbook_hygiene as the 27th tool at version 1.7.0", async () => {
     expect(MCP_TOOL_DEFINITIONS).toHaveLength(27);
     const tool = MCP_TOOL_DEFINITIONS.find((t) => t.name === "manage_playbook_hygiene");
     expect(tool).toBeDefined();
@@ -162,7 +162,7 @@ describe("v1.6.0 MCP surface", () => {
       { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26" } },
       host as never,
     )) as { result: { serverInfo: { version: string } } };
-    expect(init.result.serverInfo.version).toBe("1.6.0");
+    expect(init.result.serverInfo.version).toBe("1.7.0");
 
     await handleMcpJsonRpcMessage(
       {

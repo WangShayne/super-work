@@ -1,4 +1,10 @@
-import type { Milestone, MilestoneItem, RunDigestReport, Ticket } from "./types.ts";
+import type {
+  Milestone,
+  MilestoneItem,
+  RefactorGuardConfig,
+  RunDigestReport,
+  Ticket,
+} from "./types.ts";
 
 export interface PlannedMilestoneItem {
   id: string;
@@ -7,6 +13,8 @@ export interface PlannedMilestoneItem {
   title: string;
   route: MilestoneItem["route"];
   allowedPaths: string[];
+  /** Export-preserving refactor guard; disjoint guarded items never serialize (they only wave-split on real path overlap). */
+  refactorGuard?: RefactorGuardConfig;
 }
 
 function stripGlobTail(pattern: string): string {

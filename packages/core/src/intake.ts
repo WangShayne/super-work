@@ -9,6 +9,7 @@ import type {
   EpicDeliveryMode,
   PipelineTemplateId,
   RepoConfig,
+  RefactorGuardConfig,
   RepoProbeContextPack,
   RequirementIntakePlan,
   RequirementRouteKind,
@@ -50,10 +51,34 @@ export function synthesizeRequirementTitle(requirement: string, explicitTitle?: 
   return `${firstClause.slice(0, 69).trimEnd()}...`;
 }
 
+/** Explicit `scope:<glob>` tokens, with trailing prose punctuation removed. */
+function extractScopeTags(text: string): string[] {
+  return Array.from(text.matchAll(/scope:([^\s,;]+)/gi))
+    .map((m) => m[1]!.replace(/[),.;:\]]+$/, ""))
+    .filter(Boolean)
+    .map((p) => normalizeScopePattern(p));
+}
+
+/**
+ * Infers a RefactorGuard for hotspot / behavior-preserving refactor requirements that name a
+ * primary (non-test) source file.
+ */
+export function inferRefactorGuardFromRequirement(requirement: string): RefactorGuardConfig | undefined {
+  if (!/\b(safe-refactor|refactor hotspot|split hotspot)\b/i.test(requirement)) return undefined;
+  const target = Array.from(requirement.matchAll(/(packages\/[^\s),;:"`']+\.[cm]?[jt]sx?)/gi))
+    .map((m) => m[1]!)
+    .find((p) => !/\.(test|spec)\.[cm]?[jt]sx?$/i.test(p) && !/(^|\/)(test|tests|__tests__)\//i.test(p));
+  if (!target) return undefined;
+  const limitMatch = requirement.match(/(?:under|<|<=|to)\s*(\d{3,4})\s*lines?/i);
+  return {
+    targetHotspotPath: target,
+    maxLinesAfter: limitMatch ? Number(limitMatch[1]) : 1200,
+    enforceExportParity: true,
+  };
+}
+
 function extractExplicitScopedPaths(text: string): string[] {
-  const scopeTags = Array.from(text.matchAll(/scope:([^\s,;]+)/gi)).map((m) =>
-    normalizeScopePattern(m[1]!),
-  );
+  const scopeTags = extractScopeTags(text);
   const pathLiterals = Array.from(
     text.matchAll(
       /\b((?:packages|apps|src|services|scripts|docs|test|tests)\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.*-]+)*)/g,
@@ -73,6 +98,10 @@ function inferModuleScopedPaths(
   requirement: string,
   probeContext?: RepoProbeContextPack,
 ): string[] {
+  // Explicit `scope:` tags take priority: no sweeping in path literals or package-wide expansion.
+  const scopeTags = extractScopeTags(requirement);
+  if (scopeTags.length > 0) return Array.from(new Set(scopeTags));
+
   const explicit = extractExplicitScopedPaths(requirement);
   if (explicit.length > 0) {
     // Expand file-level mentions to cover sibling test files when pointing into a package dir
@@ -289,6 +318,7 @@ export function heuristicPlanRequirementIntake(
   }
 
   const allowedPaths = inferModuleScopedPaths(reqText, input.probeContext);
+  const refactorGuard = inferRefactorGuardFromRequirement(reqText);
   const acceptanceCriteria = extractAcceptanceCriteria(reqText, input.repo);
   const looksTinyDocs =
     allowedPaths.every((p) => /\.(md|txt)$/i.test(p) || p.startsWith("docs/")) ||
@@ -319,6 +349,7 @@ export function heuristicPlanRequirementIntake(
       allowedPaths,
       acceptanceCriteria,
       priority: 1,
+      ...(refactorGuard ? { refactorGuard } : {}),
     },
     ...(input.probeContext?.probeSteps.length
       ? { probeSteps: input.probeContext.probeSteps }
@@ -486,6 +517,8 @@ export function normalizeRequirementIntakePlan(
         typeof rawSingle?.priority === "number" && Number.isFinite(rawSingle.priority)
           ? rawSingle.priority
           : fallbackSingle.priority,
+      // Deterministic inference from the requirement text wins over LLM-provided guards.
+      ...(fallbackSingle.refactorGuard ? { refactorGuard: fallbackSingle.refactorGuard } : {}),
     },
     ...(probeSteps?.length ? { probeSteps } : {}),
   };

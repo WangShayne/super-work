@@ -231,7 +231,9 @@ export function normalizeEpicDecompositionPlan(
 }
 
 function extractScopedPaths(text: string): string[] {
-  const explicit = Array.from(text.matchAll(/scope:([^\s,;]+)/gi)).map((m) => m[1]!);
+  const explicit = Array.from(text.matchAll(/scope:([^\s,;]+)/gi))
+    .map((m) => m[1]!.replace(/[),.;:\]]+$/, ""))
+    .filter(Boolean);
   if (explicit.length > 0) return Array.from(new Set(explicit));
 
   const pkgMatches = Array.from(

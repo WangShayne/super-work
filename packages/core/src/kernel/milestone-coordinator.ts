@@ -18,6 +18,7 @@ import type {
 } from "../types.ts";
 import { newId, nowIso } from "../utils.ts";
 import type { KernelCoordinatorContext } from "./context.ts";
+import { maybeVerifyAndReloadSelfHostMilestoneOp } from "./self-host-coordinator.ts";
 
 const MAX_MILESTONE_ITEMS = 20;
 
@@ -163,6 +164,7 @@ async function dispatchItem(
     maxCostUsd: opts.maxBudgetUsdPerItem,
     dependsOn: deps,
     milestoneId: milestone.id,
+    ...(single.refactorGuard ? { refactorGuard: single.refactorGuard } : {}),
     ...(stagingBranch
       ? {
           targetBranch: stagingBranch,
@@ -217,6 +219,9 @@ export async function createMilestoneOp(
     title: plans[index]!.title,
     route: plans[index]!.route,
     allowedPaths: planAllowedPaths(plans[index]!),
+    ...(plans[index]!.singleSpec?.refactorGuard
+      ? { refactorGuard: plans[index]!.singleSpec!.refactorGuard }
+      : {}),
   }));
 
   const ts = nowIso();
@@ -444,6 +449,9 @@ export async function releaseMilestoneOp(
   const bumpVersion = Boolean(options.bumpVersion && milestone.targetVersion);
   const createTag = options.createTag === true;
   const pushRemote = options.pushRemote === true;
+  const preReleaseSha: string | undefined = ctx.workspace.getHeadCommitSha
+    ? await ctx.workspace.getHeadCommitSha(repo.rootPath, repo.baseBranch).catch(() => undefined)
+    : undefined;
   const result = await ctx.runWithRepoWorkspaceLock(repo.id, () =>
     ctx.workspace.executeMilestoneRelease!({
       rootRepoPath: repo.rootPath,
@@ -494,6 +502,17 @@ export async function releaseMilestoneOp(
       await ctx.stateStore.saveInboxItem(resolved);
       ctx.emitEvent({ type: "inbox_resolved", item: resolved, timestamp: ts });
     }
+  }
+
+  // Self-host: build + Boot Canary the released commit, then drain & reload (or roll back on failure).
+  if (result.commitSha && result.commitSha !== preReleaseSha) {
+    await maybeVerifyAndReloadSelfHostMilestoneOp(ctx, repo, {
+      milestoneId: released.id,
+      milestoneName: released.name,
+      commitSha: result.commitSha,
+      preReleaseSha,
+      targetVersion: released.targetVersion,
+    });
   }
   return result.githubReleaseUrl ? { ...released, githubReleaseUrl: result.githubReleaseUrl } : released;
 }

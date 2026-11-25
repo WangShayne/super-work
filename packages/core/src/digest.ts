@@ -58,6 +58,8 @@ interface DigestLabels {
   cost: string;
   gate: (runs: number, saved: string) => string;
   gateReuse: (n: number, s: string) => string;
+  watchdogExtensions: (n: number) => string;
+  flakeRetries: (n: number) => string;
   selfHost: (c: RunDigestReport["selfHost"]) => string;
   engineHeader: string[];
   events: string;
@@ -75,6 +77,8 @@ const LABELS_EN: DigestLabels = {
   cost: "Cost (USD)",
   gate: (n, s) => `Impact-scoped gate: ${n} run(s), saved ${s}`,
   gateReuse: (n, s) => `Rebase gate reuse: ${n} run(s), saved ${s}`,
+  watchdogExtensions: (n) => `Watchdog 2.0 extensions: ${n}`,
+  flakeRetries: (n) => `Flake retries: ${n}`,
   selfHost: (c) =>
     `Self-host: ${c.canaryPassed} canary passed, ${c.reloadsCompleted} reloads, ${c.canaryRolledBack} rollbacks, ${c.watchdogSwitches} watchdog switches, ${c.engineTripped ?? 0} engine trips, ${c.spilloverQuarantined ?? 0} spillover quarantines`,
   engineHeader: ["Engine", "Tickets", "Delivered", "Failed/Reverted", "Pass rate", "Cost (USD)", "Avg duration"],
@@ -93,6 +97,8 @@ const LABELS_ZH: DigestLabels = {
   cost: "花费 (USD)",
   gate: (n, s) => `影响范围校验门：${n} 次运行，节省 ${s}`,
   gateReuse: (n, s) => `Rebase 校验门复用：${n} 次，节省 ${s}`,
+  watchdogExtensions: (n) => `Watchdog 2.0 自适应延长：${n} 次`,
+  flakeRetries: (n) => `Flake 单次重试：${n} 次`,
   selfHost: (c) =>
     `自举：Canary 通过 ${c.canaryPassed} 次，重载 ${c.reloadsCompleted} 次，回滚 ${c.canaryRolledBack} 次，Watchdog 切换 ${c.watchdogSwitches} 次，引擎熔断 ${c.engineTripped ?? 0} 次，溢出隔离 ${c.spilloverQuarantined ?? 0} 次`,
   engineHeader: ["引擎", "工单", "已交付", "失败/回滚", "通过率", "花费 (USD)", "平均耗时"],
@@ -112,6 +118,12 @@ function renderMarkdown(report: Omit<RunDigestReport, "markdownZh" | "markdownEn
     `- ${L.gate(report.gateSavings.scopedRuns, formatDigestDuration(report.gateSavings.totalSavedMs))}`,
     ...(report.gateReuse && report.gateReuse.reusedRuns > 0
       ? [`- ${L.gateReuse(report.gateReuse.reusedRuns, formatDigestDuration(report.gateReuse.totalSavedMs))}`]
+      : []),
+    ...((report.resilience?.watchdogExtensions ?? 0) > 0
+      ? [`- ${L.watchdogExtensions(report.resilience!.watchdogExtensions!)}`]
+      : []),
+    ...((report.resilience?.flakeRetries ?? 0) > 0
+      ? [`- ${L.flakeRetries(report.resilience!.flakeRetries!)}`]
       : []),
     `- ${L.selfHost(report.selfHost)}`,
     "",
@@ -192,6 +204,8 @@ export function buildRunDigestReport(input: BuildRunDigestInput): RunDigestRepor
   const count = (kind: FlightEvent["kind"]): number => events.filter((e) => e.kind === kind).length;
   const scoped = events.filter((e) => e.kind === "scoped_gate_run");
   const reused = events.filter((e) => e.kind === "gate_reused");
+  const watchdogExtensions = count("watchdog_extended");
+  const flakeRetries = count("flake_retried");
 
   const base: Omit<RunDigestReport, "markdownZh" | "markdownEn"> = {
     generatedAt,
@@ -209,6 +223,8 @@ export function buildRunDigestReport(input: BuildRunDigestInput): RunDigestRepor
     resilience: {
       engineTrips: count("engine_tripped"),
       spilloverQuarantines: count("spillover_quarantined"),
+      ...(watchdogExtensions > 0 ? { watchdogExtensions } : {}),
+      ...(flakeRetries > 0 ? { flakeRetries } : {}),
     },
     selfHost: {
       canaryPassed: count("canary_passed"),

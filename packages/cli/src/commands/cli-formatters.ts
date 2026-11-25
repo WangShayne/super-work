@@ -121,7 +121,7 @@ export function formatTranscriptLines(rawJsonl: string, limit = 40): string[] {
 }
 
 export function printHelp(stdout: (line: string) => void): void {
-  stdout(`super-work v1.6.0 CLI
+  stdout(`super-work v1.7.0 CLI
 
 Usage:
   super-work up [-d|--detach] [--host 127.0.0.1] [--port 4318] [--data-dir path] [--token <token>]

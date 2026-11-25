@@ -352,10 +352,28 @@ export async function runTicketStageOp(
   let watchdogSignal: WatchdogSignal | null = null;
   let discoveredSessionId = existingSessionId;
   let stageCostUsd = 0;
+  let recordedExtensions = 0;
 
   const triggerWatchdogCheck = async (): Promise<boolean> => {
     if (abortController.signal.aborted || watchdogDecision) return false;
     const sig = ctx.watchdog.evaluateL1(tracker);
+    if (tracker.durationExtensionCount > recordedExtensions) {
+      recordedExtensions = tracker.durationExtensionCount;
+      void Promise.resolve(
+        ctx.recordFlightEvent?.({
+          repoId: repo.id,
+          ticketId: ticket.id,
+          kind: "watchdog_extended",
+          engine: driver.engine,
+          summary: `Watchdog extended stage duration ceiling to ${tracker.effectiveMaxDurationSec}s (extension ${recordedExtensions}) after active diff progress`,
+          metadata: {
+            extensionNumber: recordedExtensions,
+            effectiveMaxDurationSec: tracker.effectiveMaxDurationSec,
+            diffHashesCount: tracker.diffHashes.length,
+          },
+        }),
+      ).catch(() => undefined);
+    }
     if (!sig) return false;
 
     watchdogSignal = sig;

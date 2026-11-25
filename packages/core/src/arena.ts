@@ -15,6 +15,25 @@ export function countDiffLines(diffText: string): { addedLines: number; deletedL
   return { addedLines, deletedLines };
 }
 
+/**
+ * Explicit real-engine whitelist. Only active when `repo.fallbackEngines` is non-empty;
+ * returns undefined otherwise (legacy unrestricted behavior).
+ */
+export function resolveAllowedEngineWhitelist(
+  repo: RepoConfig,
+  opts: { tripped?: WorkerEngineId[]; failed?: WorkerEngineId[] } = {},
+): WorkerEngineId[] | undefined {
+  if (!repo.fallbackEngines || repo.fallbackEngines.length === 0) return undefined;
+  const excluded = new Set<WorkerEngineId>([...(opts.tripped ?? []), ...(opts.failed ?? [])]);
+  const out: WorkerEngineId[] = [];
+  for (const e of [repo.preferredImplementEngine, repo.preferredReviewEngine, ...repo.fallbackEngines]) {
+    if (e === "auto" || e === "mock") continue;
+    if (excluded.has(e) || out.includes(e)) continue;
+    out.push(e);
+  }
+  return out;
+}
+
 export function resolveFallbackChain(input: {
   primaryEngine: WorkerEngineId;
   repo: RepoConfig;
@@ -53,14 +72,23 @@ export function resolveFallbackChain(input: {
             ? ["claude", "codex", "gemini", "mock"]
             : ["claude", "codex", "gemini", "opencode"];
 
+  // With an explicit fallbackEngines list, never cross outside it + the preferred engines.
+  const whitelist = resolveAllowedEngineWhitelist(input.repo);
+  const inWhitelist = (e: WorkerEngineId): boolean => !whitelist || whitelist.includes(e);
+
   for (const candidate of defaultOrder) {
-    if (!failed.has(candidate) && available.includes(candidate) && !ordered.includes(candidate)) {
+    if (
+      inWhitelist(candidate) &&
+      !failed.has(candidate) &&
+      available.includes(candidate) &&
+      !ordered.includes(candidate)
+    ) {
       ordered.push(candidate);
     }
   }
 
   for (const candidate of available) {
-    if (!failed.has(candidate) && !ordered.includes(candidate)) {
+    if (inWhitelist(candidate) && !failed.has(candidate) && !ordered.includes(candidate)) {
       ordered.push(candidate);
     }
   }
