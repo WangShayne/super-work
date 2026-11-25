@@ -25,9 +25,21 @@ export interface WorkerPromptOptions {
   upstreamHandovers?: HandoverDigest[];
   surgicalContextPack?: string;
   reviewEvidence?: ReviewEvidencePacket;
+  worktreePath?: string;
 }
 
-const REVIEW_EVIDENCE_MAX_CHARS = 2800;
+const REVIEW_EVIDENCE_BASE_MAX_CHARS = 2800;
+const REVIEW_EVIDENCE_PARITY_MAX_CHARS = 3200;
+
+function formatRefactorParity(p: NonNullable<ReviewEvidencePacket["refactorParity"]>): string {
+  const lines = [
+    `### Safe-Refactor Symbol Migration Summary`,
+    `Target: ${p.targetFile}; lines ${p.lineCountBefore ?? "?"} -> ${p.lineCountAfter} (max ${p.maxLines}); exports preserved: ${p.exportsPreserved ? "yes" : "no"}; migrated symbols: ${p.migratedSymbolsCount}`,
+    `New modules (${p.newModuleFiles.length}): ${p.newModuleFiles.slice(0, 8).join(", ") || "(none)"}${p.newModuleFiles.length > 8 ? " …" : ""}`,
+  ];
+  if (p.symbolMigrationSummary) lines.push(p.symbolMigrationSummary.slice(0, 500));
+  return lines.join("\n");
+}
 
 export function formatReviewEvidence(packet: ReviewEvidencePacket): string {
   const base = packet.baseBranch;
@@ -43,8 +55,12 @@ export function formatReviewEvidence(packet: ReviewEvidencePacket): string {
     `Gate summary: ${packet.gateSummary.replace(/\s+/g, " ").trim().slice(0, 400)}`,
   ].join("\n");
 
-  const budgetFor = (used: number) => Math.max(0, REVIEW_EVIDENCE_MAX_CHARS - used);
-  const fixed = head.length + gateLines.length + 80;
+  const parityBlock = packet.refactorParity ? formatRefactorParity(packet.refactorParity) : "";
+  const maxChars = packet.refactorParity
+    ? REVIEW_EVIDENCE_PARITY_MAX_CHARS
+    : REVIEW_EVIDENCE_BASE_MAX_CHARS;
+  const budgetFor = (used: number) => Math.max(0, maxChars - used);
+  const fixed = head.length + gateLines.length + parityBlock.length + 80;
   const filesBudget = Math.min(900, budgetFor(fixed));
   let filesBlock = "";
   const shown: string[] = [];
@@ -62,7 +78,9 @@ export function formatReviewEvidence(packet: ReviewEvidencePacket): string {
     ? `Diff stat:\n${stat.length > statBudget ? `${stat.slice(0, statBudget)}\n…(truncated)` : stat}`
     : `Diff stat: (unavailable)`;
 
-  return [head, filesBlock, statBlock, gateLines].join("\n").slice(0, REVIEW_EVIDENCE_MAX_CHARS);
+  return [head, filesBlock, statBlock, gateLines, ...(parityBlock ? [parityBlock] : [])]
+    .join("\n")
+    .slice(0, maxChars);
 }
 
 export class MemoryManager {
@@ -117,6 +135,12 @@ export class MemoryManager {
 
     if (opts.repoConventions?.trim()) {
       sections.push(`\n## Repository Engineering Conventions\n${opts.repoConventions.trim()}`);
+    }
+
+    if (opts.worktreePath?.trim() && (stage === "plan" || stage === "review")) {
+      sections.push(
+        `\n## WORKTREE_CWD\nWORKTREE_CWD=${opts.worktreePath.trim()}\nUse relative paths inside the worktree, or this exact WORKTREE_CWD value. Never re-type or guess host user directory prefixes (e.g. /Users/<name>/...) manually.`,
+      );
     }
 
     if (opts.surgicalContextPack?.trim()) {
@@ -186,6 +210,11 @@ export class MemoryManager {
 
     sections.push(`\n## Stage Instructions (${stage})`);
     sections.push(stageInstructionFor(stage));
+    if (stage === "review" && opts.reviewEvidence?.refactorParity?.exportsPreserved && opts.reviewEvidence.gatePassed) {
+      sections.push(
+        `SAFE-REFACTOR FAST REVIEW: AST export parity and the verification gate already passed. Treat purely moved declarations as pre-verified; do a focused spot-check (<180s) on behavioral equivalence, edge-case error handling, circular imports, and missing re-exports instead of reading every moved file line by line.`,
+      );
+    }
     if ((ticket.clarificationCount ?? 0) < 1 && (stage === "plan" || stage === "implement")) {
       sections.push(
         `If blocked by a critical specification ambiguity with >=2 distinct design choices (limit 1 per ticket), output [ASK_HUMAN]: {"question":"...","options":["Option A","Option B"],"recommendedOption":"Option A"}.`,
@@ -317,6 +346,7 @@ function stageInstructionFor(stage: StageKind): string {
         "Inspect the repository within the allowed paths in read-only mode.",
         "Produce a concise, actionable implementation plan covering files to modify, edge cases, and verification commands.",
         "Do NOT edit files or run destructive commands in this stage.",
+        "Do NOT invoke Write or create files such as ~/.claude/plans/*.md; output the full structured plan directly in your response text (stdout).",
       ].join("\n");
     case "spec_test":
       return [

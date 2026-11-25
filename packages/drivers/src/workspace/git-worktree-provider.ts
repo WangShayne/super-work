@@ -1,114 +1,25 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { access, lstat, mkdir, readdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
-import { tmpdir } from "node:os";
+import { access, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
-import type {
-  BrowserCheckConfig,
-  ConflictFileHunk,
-  ControlProbeRequest,
-  CodeHotspotItem,
-  ControlProbeStep,
-  RepoConfig,
-  RepoContractFile,
-  RepoProbeContextPack,
-  RevertResult,
-  SandboxMode,
-  SmokeCheckConfig,
-  SmokeCheckResult,
-  SymbolImpactReport,
-  Ticket,
-  VerificationCommandOutput,
-  VerificationRunResult,
-  WorkspaceProvider,
-} from "@super-work/core";
-import { runCdpBrowserCheck, type BrowserCheckExecutionResult } from "../browser/cdp-browser-check.ts";
-import { comparePngVisualDiff } from "../browser/png-visual-diff.ts";
-import { wrapCommandWithOsSandbox, buildSanitizedWorkerEnv } from "../sandbox/os-sandbox.ts";
-import {
-  resolveImpactScopedVerification,
-  type ImpactScopedVerificationInput,
-  type ImpactScopedVerificationPlan,
-} from "./impact-verification-planner.ts";
-import {
-  executeReadOnlyProbeTool,
-  runDeterministicRepoPreProbe,
-} from "./readonly-repo-prober.ts";
+import type { ControlProbeRequest, CodeHotspotItem, ControlProbeStep, RepoConfig, RepoContractFile, RepoProbeContextPack, SandboxMode, SymbolImpactReport, Ticket, VerificationCommandOutput, VerificationRunResult, WorkspaceProvider } from "@super-work/core";
+import { runCdpBrowserCheck } from "../browser/cdp-browser-check.ts";
+import { buildSanitizedWorkerEnv } from "../sandbox/os-sandbox.ts";
+import { resolveImpactScopedVerification, type ImpactScopedVerificationInput, type ImpactScopedVerificationPlan } from "./impact-verification-planner.ts";
+import { executeReadOnlyProbeTool, runDeterministicRepoPreProbe } from "./readonly-repo-prober.ts";
 import { scanRepoStructureSummary } from "./repo-structure-scanner.ts";
 import { analyzeRepoSymbolImpact, verifyHotspotParityImpl } from "./symbol-graph-scanner.ts";
 import { buildSurgicalContextPackImpl, scanCodeHotspotsImpl } from "./surgical-context-builder.ts";
+import { runGit, readPorcelainEntries, type GitCommandResult } from "./git-command-runner.ts";
+import type { GitWorkspaceContext, ImplArgs, BrowserCheckRunner } from "./git-workspace-context.ts";
+import { linkRepoNodeModulesImpl } from "./git-node-modules-links.ts";
+import { runVerificationCommandsImpl, runSmokeCheckImpl } from "./git-verification-runner.ts";
+import { prepareThreeWayConflictWorkspaceImpl, mergeBranchToBaseImpl, revertMergedCommitImpl } from "./git-pr-merge-ops.ts";
+import { getChangedFilesSinceImpl, revertPathsToCommitImpl, captureWorktreeCheckpointImpl, restoreWorktreeCheckpointImpl, cleanupTicketCheckpointsImpl, listCheckpointRefsImpl, deleteGitRefImpl } from "./git-conflict-checkpoints.ts";
+import { executeMilestoneReleaseImpl } from "./git-milestone-release.ts";
 
-export async function allocateFreeLocalPort(): Promise<number> {
-  return new Promise<number>((resolvePort, rejectPort) => {
-    const srv = createServer();
-    srv.unref();
-    srv.on("error", rejectPort);
-    srv.listen(0, "127.0.0.1", () => {
-      const addr = srv.address();
-      if (!addr || typeof addr === "string") {
-        srv.close(() => rejectPort(new Error("Failed to allocate ephemeral TCP port")));
-        return;
-      }
-      const { port } = addr;
-      srv.close((err) => {
-        if (err) rejectPort(err);
-        else resolvePort(port);
-      });
-    });
-  });
-}
-
-export interface GitCommandResult {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-}
-
-export async function runGit(
-  args: string[],
-  cwd: string,
-  extraEnv?: NodeJS.ProcessEnv,
-): Promise<GitCommandResult> {
-  const proc = Bun.spawn(["git", ...args], {
-    cwd,
-    env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
-    stdout: "pipe",
-    stderr: "pipe",
-    stdin: "ignore",
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { exitCode, stdout, stderr };
-}
-
-interface PorcelainEntry {
-  xy: string;
-  path: string;
-}
-
-async function readPorcelainEntries(cwd: string): Promise<PorcelainEntry[]> {
-  const res = await runGit(["status", "--porcelain", "-uall", "-z"], cwd);
-  if (res.exitCode !== 0) return [];
-  const tokens = res.stdout.split("\0");
-  const out: PorcelainEntry[] = [];
-  for (let i = 0; i < tokens.length; i++) {
-    const t = tokens[i];
-    if (!t || t.length < 4) continue;
-    const xy = t.slice(0, 2);
-    out.push({ xy, path: t.slice(3) });
-    if (xy.includes("R") || xy.includes("C")) i++; // skip the rename/copy origin token
-  }
-  return out;
-}
-
-export type BrowserCheckRunner = (
-  baseUrl: string,
-  config: BrowserCheckConfig,
-) => Promise<BrowserCheckExecutionResult>;
+export { allocateFreeLocalPort, runGit, type GitCommandResult } from "./git-command-runner.ts";
+export type { BrowserCheckRunner } from "./git-workspace-context.ts";
 
 export class GitWorktreeProvider implements WorkspaceProvider {
   private readonly worktreesDir: string;
@@ -122,6 +33,18 @@ export class GitWorktreeProvider implements WorkspaceProvider {
   ) {
     this.worktreesDir = resolve(worktreesDir);
     this.browserRunner = options?.browserRunner ?? ((url, cfg) => runCdpBrowserCheck(url, cfg));
+  }
+
+  private ctx(): GitWorkspaceContext {
+    return {
+      worktreesDir: this.worktreesDir,
+      browserRunner: this.browserRunner,
+      cleanupWorkspace: (worktreePath, rootRepoPath) => this.cleanupWorkspace(worktreePath, rootRepoPath),
+      getHeadCommitSha: (repoOrWorktreePath, rev) => this.getHeadCommitSha(repoOrWorktreePath, rev),
+      linkRepoNodeModules: (repoRoot, worktreePath) => this.linkRepoNodeModules(repoRoot, worktreePath),
+      runVerificationCommands: (...args) => this.runVerificationCommands(...args),
+      worktreeBaseRef: (worktreePath) => this.worktreeBaseRef(worktreePath),
+    };
   }
 
   async ensureBranch(rootRepoPath: string, branchName: string, startPoint: string): Promise<void> {
@@ -266,153 +189,10 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     return { worktreePath, branchName };
   }
 
-  private async linkRepoNodeModules(repoRoot: string, worktreePath: string): Promise<void> {
-    const repoAbs = resolve(repoRoot);
-    const worktreeAbs = resolve(worktreePath);
-    if (repoAbs === worktreeAbs) return;
-
-    const candidates: string[] = ["node_modules"];
-    for (const container of ["packages", "apps"]) {
-      const containerDir = join(repoAbs, container);
-      if (!existsSync(containerDir)) continue;
-      let entries: string[] = [];
-      try {
-        entries = await readdir(containerDir);
-      } catch {
-        continue;
-      }
-      for (const entry of entries) {
-        const relNm = join(container, entry, "node_modules");
-        if (existsSync(join(repoAbs, relNm)) && existsSync(join(worktreeAbs, container, entry))) {
-          candidates.push(relNm);
-        }
-      }
-    }
-
-    const rootNmPrefix = `${join(repoAbs, "node_modules")}/`;
-    const linkEntry = async (srcEntry: string, dstEntry: string): Promise<void> => {
-      try {
-        await lstat(dstEntry);
-        return; // Already present in worktree
-      } catch {
-        // Proceed to create symlink
-      }
-
-      const st = await lstat(srcEntry);
-      if (st.isSymbolicLink()) {
-        const rawTarget = await readlink(srcEntry);
-        const absTarget = resolve(dirname(srcEntry), rawTarget);
-        const isWorkspaceLink =
-          (absTarget === repoAbs || absTarget.startsWith(`${repoAbs}/`)) &&
-          !absTarget.startsWith(rootNmPrefix);
-        await symlink(isWorkspaceLink ? rawTarget : absTarget, dstEntry);
-        return;
-      }
-
-      await symlink(srcEntry, dstEntry, st.isDirectory() ? "dir" : "file");
-    };
-
-    for (const relNm of candidates) {
-      const srcNm = join(repoAbs, relNm);
-      if (!existsSync(srcNm)) continue;
-
-      const ignoredRes = await runGit(["check-ignore", "--no-index", "-q", `${relNm}/`], worktreeAbs);
-      if (ignoredRes.exitCode !== 0) {
-        // Never inject untracked node_modules if not gitignored in target repository
-        continue;
-      }
-
-      const dstNm = join(worktreeAbs, relNm);
-      await mkdir(dstNm, { recursive: true });
-
-      let items: string[] = [];
-      try {
-        items = await readdir(srcNm);
-      } catch {
-        continue;
-      }
-
-      for (const name of items) {
-        const srcEntry = join(srcNm, name);
-        const dstEntry = join(dstNm, name);
-        const st = await lstat(srcEntry);
-        if (name.startsWith("@") && !st.isSymbolicLink() && st.isDirectory()) {
-          await mkdir(dstEntry, { recursive: true });
-          const scopedItems = await readdir(srcEntry);
-          for (const scopedName of scopedItems) {
-            await linkEntry(join(srcEntry, scopedName), join(dstEntry, scopedName));
-          }
-        } else {
-          await linkEntry(srcEntry, dstEntry);
-        }
-      }
-    }
-
-    await this.syncWorkspacePackageLinks(worktreeAbs);
+  private async linkRepoNodeModules(...args: Parameters<typeof linkRepoNodeModulesImpl>): ReturnType<typeof linkRepoNodeModulesImpl> {
+    return linkRepoNodeModulesImpl(...args);
   }
 
-  /**
-   * Ensure all local monorepo workspace packages under `packages/*` and `apps/*` inside a
-   * worktree (including newly added packages/workspace:* dependencies) are symlinked cleanly
-   * into `node_modules/` without needing `bun install`.
-   */
-  private async syncWorkspacePackageLinks(worktreeAbs: string): Promise<void> {
-    if (
-      !existsSync(join(worktreeAbs, "packages")) &&
-      !existsSync(join(worktreeAbs, "apps"))
-    ) {
-      return;
-    }
-
-    const ignoredRes = await runGit(["check-ignore", "--no-index", "-q", "node_modules/"], worktreeAbs);
-    if (ignoredRes.exitCode !== 0) return;
-
-    const rootNm = join(worktreeAbs, "node_modules");
-    await mkdir(rootNm, { recursive: true });
-
-    for (const container of ["packages", "apps"]) {
-      const containerDir = join(worktreeAbs, container);
-      if (!existsSync(containerDir)) continue;
-      let entries: string[] = [];
-      try {
-        entries = await readdir(containerDir);
-      } catch {
-        continue;
-      }
-
-      for (const entry of entries) {
-        const pkgDir = join(containerDir, entry);
-        const pkgJsonPath = join(pkgDir, "package.json");
-        if (!existsSync(pkgJsonPath)) continue;
-        let pkgName = "";
-        try {
-          const parsed = JSON.parse(await readFile(pkgJsonPath, "utf8")) as { name?: unknown };
-          if (typeof parsed.name === "string") pkgName = parsed.name.trim();
-        } catch {
-          continue;
-        }
-        if (!pkgName || pkgName.includes("..")) continue;
-
-        const targetLink = join(rootNm, ...pkgName.split("/"));
-        try {
-          const st = await lstat(targetLink);
-          if (st.isSymbolicLink()) {
-            const existingRaw = await readlink(targetLink);
-            const existingAbs = resolve(dirname(targetLink), existingRaw);
-            if (existingAbs === pkgDir) continue;
-            await rm(targetLink, { recursive: true, force: true });
-          } else {
-            continue;
-          }
-        } catch {
-          // Missing symlink -> create below
-        }
-
-        await mkdir(dirname(targetLink), { recursive: true });
-        await symlink(pkgDir, targetLink, "dir").catch(() => {});
-      }
-    }
-  }
 
   async integrateDependencyBranches(worktreePath: string, branchNames: string[]): Promise<void> {
     const userCheck = await runGit(["config", "user.name"], worktreePath);
@@ -563,366 +343,12 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     return res.exitCode === 0 ? res.stdout : "";
   }
 
-  async runVerificationCommands(
-    worktreePath: string,
-    commands: string[],
-    timeoutSec = 120,
-    options?: {
-      env?: NodeJS.ProcessEnv;
-      sandboxMode?: SandboxMode;
-      forbiddenPaths?: string[];
-      readOnlyPaths?: string[];
-      allowNetwork?: boolean;
-      rootRepoPath?: string;
-    },
-  ): Promise<VerificationRunResult> {
-    const cleanCmds = commands.map((c) => c.trim()).filter(Boolean);
-    if (cleanCmds.length === 0) {
-      return {
-        ok: true,
-        results: [],
-        summary: "No verification commands configured",
-      };
-    }
-
-    const timeoutMs = Math.max(5, Math.min(timeoutSec, 300)) * 1_000;
-    const results: VerificationCommandOutput[] = [];
-    const sandboxMode: SandboxMode = options?.sandboxMode ?? "off";
-
-    for (const command of cleanCmds) {
-      const started = Date.now();
-      const baseArgv = ["sh", "-lc", command];
-      const wrapped =
-        sandboxMode !== "off"
-          ? wrapCommandWithOsSandbox({
-              commandArgv: baseArgv,
-              worktreePath,
-              rootRepoPath: options?.rootRepoPath,
-              mode: sandboxMode,
-              forbiddenPaths: options?.forbiddenPaths,
-              readOnlyPaths: options?.readOnlyPaths,
-              allowNetwork: options?.allowNetwork,
-              engine: "verification",
-              baseEnv: options?.env ?? process.env,
-              // Balanced: keep env secret scrubbing but skip the outer sandbox-exec so test suites that
-              // launch headless Chrome (own sandbox_init) are not denied by a nested Seatbelt.
-              skipOuterSandbox: sandboxMode === "balanced" ? true : undefined,
-            })
-          : {
-              argv: baseArgv,
-              env: options?.env ?? process.env,
-              appliedBackend: "off" as const,
-            };
-
-      const proc = Bun.spawn(wrapped.argv, {
-        cwd: worktreePath,
-        env: wrapped.env,
-        stdout: "pipe",
-        stderr: "pipe",
-        stdin: "ignore",
-      });
-
-      let timedOut = false;
-      const timer = setTimeout(() => {
-        timedOut = true;
-        try {
-          proc.kill();
-        } catch {
-          // Ignore already exited
-        }
-      }, timeoutMs);
-
-      const [stdout, stderr, exitCode] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-        proc.exited,
-      ]);
-      clearTimeout(timer);
-
-      const durationMs = Date.now() - started;
-      const combined = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
-      const finalExit = timedOut ? 124 : exitCode;
-      results.push({
-        command,
-        exitCode: finalExit,
-        durationMs,
-        output: timedOut ? `${combined}\n[timed out after ${timeoutMs}ms]`.trim() : combined,
-      });
-
-      if (finalExit !== 0) {
-        return {
-          ok: false,
-          results,
-          failedCommand: command,
-          summary: `Verification failed on command: ${command} (exit ${finalExit})\n${combined.slice(-1500)}`,
-        };
-      }
-    }
-
-    return {
-      ok: true,
-      results,
-      summary: `All ${results.length} verification command(s) passed (${cleanCmds.join(", ")})`,
-    };
+  async runVerificationCommands(...args: Parameters<typeof runVerificationCommandsImpl>): ReturnType<typeof runVerificationCommandsImpl> {
+    return runVerificationCommandsImpl(...args);
   }
 
-  async runSmokeCheck(
-    worktreePath: string,
-    config: SmokeCheckConfig,
-    options?: {
-      baselineScreenshotsDir?: string;
-      resolveBaselineScreenshotsDir?: () => Promise<string | undefined>;
-    },
-  ): Promise<SmokeCheckResult> {
-    const startCommand = config.startCommand.trim();
-    if (!startCommand) {
-      return {
-        ok: true,
-        port: 0,
-        readyUrl: "",
-        startupDurationMs: 0,
-        checkResults: [],
-        serverOutputTail: "",
-        summary: "No smoke startCommand configured",
-      };
-    }
-
-    const port = await allocateFreeLocalPort();
-    const smokeUrl = `http://127.0.0.1:${port}`;
-    const rawReadyUrl = config.readyUrl?.trim() || smokeUrl;
-    const normalizedRawReadyUrl = rawReadyUrl.startsWith("/")
-      ? `${smokeUrl}${rawReadyUrl}`
-      : rawReadyUrl;
-    const readyUrl = normalizedRawReadyUrl
-      .replace(/\$\{SUPER_WORK_SMOKE_URL\}|\$SUPER_WORK_SMOKE_URL/g, smokeUrl)
-      .replace(/\$\{SUPER_WORK_SMOKE_PORT\}|\$SUPER_WORK_SMOKE_PORT/g, String(port))
-      .replace(/\$\{PORT\}|\$PORT/g, String(port));
-
-    const smokeEnv: NodeJS.ProcessEnv = {
-      ...process.env,
-      PORT: String(port),
-      SUPER_WORK_SMOKE_PORT: String(port),
-      SUPER_WORK_SMOKE_URL: smokeUrl,
-    };
-
-    const timeoutMs = Math.max(2, Math.min(120, config.startupTimeoutSec ?? 20)) * 1_000;
-    const startedAt = Date.now();
-    let outputTail = "";
-    const appendOutput = (chunk: Buffer | string) => {
-      outputTail = `${outputTail}${String(chunk)}`;
-      if (outputTail.length > 4000) {
-        outputTail = outputTail.slice(-4000);
-      }
-    };
-
-    const child = spawn("sh", ["-lc", startCommand], {
-      cwd: worktreePath,
-      env: smokeEnv,
-      detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    child.stdout?.on("data", appendOutput);
-    child.stderr?.on("data", appendOutput);
-
-    let exited = false;
-    let earlyExit: { code: number | null; signal: string | null } | null = null;
-    const exitedPromise = new Promise<void>((res) => {
-      const finish = (code: number | null, signal: string | null) => {
-        if (!exited) {
-          exited = true;
-          earlyExit = { code, signal };
-        }
-        res();
-      };
-      child.once("exit", finish);
-      child.once("error", (err) => {
-        appendOutput(`\n[spawn error] ${err.message}`);
-        finish(1, null);
-      });
-    });
-
-    const killProcessGroup = async () => {
-      const pid = child.pid;
-      if (!pid || exited) return;
-      try {
-        process.kill(-pid, "SIGTERM");
-      } catch {
-        try {
-          child.kill("SIGTERM");
-        } catch {
-          // Ignore already exited
-        }
-      }
-      await Promise.race([exitedPromise, new Promise((r) => setTimeout(r, 1_200))]);
-      if (!exited) {
-        try {
-          process.kill(-pid, "SIGKILL");
-        } catch {
-          try {
-            child.kill("SIGKILL");
-          } catch {
-            // Ignore already exited
-          }
-        }
-        await Promise.race([exitedPromise, new Promise((r) => setTimeout(r, 400))]);
-      }
-    };
-
-    try {
-      const deadline = startedAt + timeoutMs;
-      let ready = false;
-      let probeStatus: number | undefined;
-      let lastProbeErr = "";
-
-      while (Date.now() < deadline) {
-        if (earlyExit) {
-          await new Promise((r) => setTimeout(r, 25));
-          break;
-        }
-        try {
-          const res = await fetch(readyUrl, {
-            signal: AbortSignal.timeout(Math.min(1_500, Math.max(250, deadline - Date.now()))),
-          });
-          probeStatus = res.status;
-          if (res.status >= 200 && res.status < 300) {
-            ready = true;
-            break;
-          }
-          lastProbeErr = `HTTP ${res.status}`;
-        } catch (err) {
-          lastProbeErr = err instanceof Error ? err.message : String(err);
-        }
-        if (earlyExit) break;
-        await new Promise((r) => setTimeout(r, 150));
-      }
-
-      const startupDurationMs = Date.now() - startedAt;
-      if (!ready) {
-        const tail = outputTail.trim();
-        const reason = earlyExit
-          ? `Smoke server exited early (code=${(earlyExit as { code: number | null }).code ?? "null"})`
-          : `Timed out waiting ${timeoutMs}ms for HTTP 2xx from ${readyUrl} (${lastProbeErr || "unreachable"})`;
-        return {
-          ok: false,
-          port,
-          readyUrl,
-          startupDurationMs,
-          probeStatus,
-          checkResults: [],
-          serverOutputTail: tail,
-          failedStep: earlyExit ? "smoke:server_exited_early" : `smoke:readyUrl(${readyUrl})`,
-          summary: tail ? `${reason}\n${tail.slice(-1000)}` : reason,
-        };
-      }
-
-      const checkCmds = (config.checkCommands ?? []).map((c) => c.trim()).filter(Boolean);
-      const checkRes = await this.runVerificationCommands(worktreePath, checkCmds, 60, {
-        env: smokeEnv,
-      });
-      if (!checkRes.ok) {
-        const tail = outputTail.trim();
-        return {
-          ok: false,
-          port,
-          readyUrl,
-          startupDurationMs,
-          probeStatus,
-          checkResults: checkRes.results,
-          serverOutputTail: tail,
-          failedStep: checkRes.failedCommand ? `smoke:${checkRes.failedCommand}` : "smoke:checkCommands",
-          summary: tail ? `${checkRes.summary}\nServer tail:\n${tail.slice(-800)}` : checkRes.summary,
-        };
-      }
-
-      let browserExec: BrowserCheckExecutionResult | undefined;
-      let rawVisualDiffs: SmokeCheckResult["rawVisualDiffs"];
-      if (config.browserCheck?.enabled) {
-        let browserBaseUrl = smokeUrl;
-        try {
-          browserBaseUrl = new URL(readyUrl).origin;
-        } catch {
-          browserBaseUrl = smokeUrl;
-        }
-        browserExec = await this.browserRunner(browserBaseUrl, config.browserCheck);
-
-        if (browserExec.summary.executed && !browserExec.summary.ok) {
-          const tail = outputTail.trim();
-          return {
-            ok: false,
-            port,
-            readyUrl,
-            startupDurationMs,
-            probeStatus,
-            checkResults: checkRes.results,
-            serverOutputTail: tail,
-            failedStep: "smoke:browserCheck",
-            summary: `${browserExec.summary.summary}${tail ? `\nServer tail:\n${tail.slice(-600)}` : ""}`,
-            browserResult: browserExec.summary,
-            rawScreenshots: browserExec.rawScreenshots,
-          };
-        }
-
-        const baselineDir =
-          options?.baselineScreenshotsDir ??
-          (browserExec.rawScreenshots.length > 0 && options?.resolveBaselineScreenshotsDir
-            ? await options.resolveBaselineScreenshotsDir()
-            : undefined);
-        if (baselineDir && existsSync(baselineDir) && browserExec.rawScreenshots.length > 0) {
-          const diffs: NonNullable<SmokeCheckResult["rawVisualDiffs"]> = [];
-          for (const shot of browserExec.rawScreenshots) {
-            const baseFile = join(baselineDir, `route_${shot.routeIndex}.png`);
-            if (!existsSync(baseFile)) continue;
-            try {
-              const baseBytes = new Uint8Array(await readFile(baseFile));
-              const diff = comparePngVisualDiff(baseBytes, shot.bytes);
-              const routeObj = browserExec.summary.routes[shot.routeIndex];
-              if (routeObj) {
-                routeObj.diffRatio = Number(diff.diffRatio.toFixed(6));
-                routeObj.baselineMatched = true;
-              }
-              diffs.push({
-                routeIndex: shot.routeIndex,
-                path: shot.path,
-                diffRatio: diff.diffRatio,
-                bytes: diff.diffPngBytes,
-              });
-            } catch {
-              // Ignore non-PNG or decode failures gracefully
-            }
-          }
-          if (diffs.length > 0) {
-            rawVisualDiffs = diffs;
-          }
-        }
-      }
-
-      return {
-        ok: true,
-        port,
-        readyUrl,
-        startupDurationMs,
-        probeStatus,
-        checkResults: checkRes.results,
-        serverOutputTail: outputTail.trim(),
-        summary: [
-          `Smoke check passed (${readyUrl} ready in ${startupDurationMs}ms${
-            checkRes.results.length > 0 ? `, ${checkRes.results.length} check(s) ok` : ""
-          })`,
-          browserExec ? browserExec.summary.summary : "",
-        ]
-          .filter(Boolean)
-          .join(" · "),
-        ...(browserExec
-          ? {
-              browserResult: browserExec.summary,
-              rawScreenshots: browserExec.rawScreenshots,
-              ...(rawVisualDiffs ? { rawVisualDiffs } : {}),
-            }
-          : {}),
-      };
-    } finally {
-      await killProcessGroup();
-    }
+  async runSmokeCheck(...args: ImplArgs<typeof runSmokeCheckImpl>): ReturnType<typeof runSmokeCheckImpl> {
+    return runSmokeCheckImpl(this.ctx(), ...args);
   }
 
   async commitAll(worktreePath: string, message: string): Promise<boolean> {
@@ -984,300 +410,16 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     };
   }
 
-  async prepareThreeWayConflictWorkspace(input: {
-    worktreePath: string;
-    rootRepoPath: string;
-    baseBranch: string;
-  }): Promise<{
-    mergeBaseSha: string;
-    upstreamCommitSummaries: string[];
-    conflictFiles: string[];
-    fileHunks: ConflictFileHunk[];
-  }> {
-    const { worktreePath, baseBranch } = input;
-    const theirsHead = await this.getHeadCommitSha(worktreePath, "HEAD");
-    const mbRes = await runGit(["merge-base", theirsHead, baseBranch], worktreePath);
-    const mergeBaseSha = mbRes.stdout.trim() || theirsHead;
-
-    const logRes = await runGit(
-      ["log", "--oneline", "-n", "8", `${mergeBaseSha}..${baseBranch}`],
-      worktreePath,
-    );
-    const upstreamCommitSummaries = logRes.stdout
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    // Move worktree HEAD onto updated baseBranch so worker sees latest upstream code
-    await runGit(["reset", "--hard", baseBranch], worktreePath);
-    await runGit(["update-ref", this.worktreeBaseRef(worktreePath), "HEAD"], worktreePath);
-
-    // Perform 3-way merge without committing to populate conflict markers + auto-merge clean files
-    await runGit(["merge", "--no-commit", "--no-ff", theirsHead], worktreePath);
-    const conflictListRes = await runGit(
-      ["diff", "--name-only", "--diff-filter=U"],
-      worktreePath,
-    );
-    const conflictFiles = conflictListRes.stdout
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    // Clear MERGE_HEAD & unmerged index stages while preserving working tree files & conflict markers
-    await runGit(["merge", "--quit"], worktreePath);
-    await runGit(["reset", "HEAD"], worktreePath);
-
-    const fileHunks: ConflictFileHunk[] = [];
-    for (const filePath of conflictFiles.slice(0, 8)) {
-      const oursRes = await runGit(
-        ["diff", mergeBaseSha, baseBranch, "--", filePath],
-        worktreePath,
-      );
-      const theirsRes = await runGit(
-        ["diff", mergeBaseSha, theirsHead, "--", filePath],
-        worktreePath,
-      );
-      fileHunks.push({
-        filePath,
-        oursSummary: oursRes.stdout.trim().slice(0, 1200),
-        theirsSummary: theirsRes.stdout.trim().slice(0, 1200),
-      });
-    }
-
-    return {
-      mergeBaseSha,
-      upstreamCommitSummaries,
-      conflictFiles,
-      fileHunks,
-    };
+  async prepareThreeWayConflictWorkspace(...args: ImplArgs<typeof prepareThreeWayConflictWorkspaceImpl>): ReturnType<typeof prepareThreeWayConflictWorkspaceImpl> {
+    return prepareThreeWayConflictWorkspaceImpl(this.ctx(), ...args);
   }
 
-  async mergeBranchToBase(input: {
-    rootRepoPath: string;
-    baseBranch: string;
-    branchName: string;
-    worktreePath?: string;
-    commitMessage: string;
-    deleteBranch?: boolean;
-    noFf?: boolean;
-  }): Promise<{ commitSha: string; beforeSha?: string; isMergeCommit?: boolean; branchCleaned: boolean }> {
-    const branchVerify = await runGit(["rev-parse", "--verify", input.branchName], input.rootRepoPath);
-    if (branchVerify.exitCode !== 0) {
-      throw new Error(`Branch not found: ${input.branchName}`);
-    }
-
-    const beforeRes = await runGit(["rev-parse", "--short", input.baseBranch], input.rootRepoPath);
-    const beforeSha = beforeRes.exitCode === 0 ? beforeRes.stdout.trim() : undefined;
-
-    if (input.worktreePath) {
-      await this.cleanupWorkspace(input.worktreePath, input.rootRepoPath);
-    }
-
-    // Ensure no leftover linked worktree still checks out input.branchName before branch deletion
-    const wtList = await runGit(["worktree", "list", "--porcelain"], input.rootRepoPath);
-    if (wtList.exitCode === 0) {
-      let currentWt: string | undefined;
-      for (const rawLine of wtList.stdout.split("\n")) {
-        const line = rawLine.trim();
-        if (line.startsWith("worktree ")) {
-          currentWt = line.slice("worktree ".length);
-        } else if (line.startsWith("branch ") && currentWt) {
-          const ref = line.slice("branch ".length);
-          if (
-            ref === `refs/heads/${input.branchName}` &&
-            resolve(currentWt) !== resolve(input.rootRepoPath)
-          ) {
-            await this.cleanupWorkspace(currentWt, input.rootRepoPath);
-          }
-        }
-      }
-    }
-
-    const headRes = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], input.rootRepoPath);
-    const currentBranch = headRes.stdout.trim();
-    const forceNoFf = Boolean(input.noFf);
-
-    if (currentBranch === input.baseBranch) {
-      const dirty = await runGit(
-        ["status", "--porcelain", "--untracked-files=no"],
-        input.rootRepoPath,
-      );
-      if (dirty.stdout.trim()) {
-        throw new Error(
-          `Base repository (${input.baseBranch}) has uncommitted tracked changes; commit or stash them before local merge.`,
-        );
-      }
-
-      let mergeRes = forceNoFf
-        ? { exitCode: 1, stdout: "", stderr: "" }
-        : await runGit(["merge", "--ff-only", input.branchName], input.rootRepoPath);
-      if (mergeRes.exitCode !== 0) {
-        const userCheck = await runGit(["config", "user.name"], input.rootRepoPath);
-        const mergeArgs = userCheck.stdout.trim()
-          ? ["merge", "--no-ff", "-m", input.commitMessage, input.branchName]
-          : [
-              "-c",
-              "user.name=super-work",
-              "-c",
-              "user.email=super-work@local",
-              "merge",
-              "--no-ff",
-              "-m",
-              input.commitMessage,
-              input.branchName,
-            ];
-        mergeRes = await runGit(mergeArgs, input.rootRepoPath);
-        if (mergeRes.exitCode !== 0) {
-          await runGit(["merge", "--abort"], input.rootRepoPath);
-          throw new Error(
-            `git merge failed: ${mergeRes.stderr.trim() || mergeRes.stdout.trim()}`,
-          );
-        }
-      }
-    } else {
-      const ffRes = forceNoFf
-        ? { exitCode: 1, stdout: "", stderr: "" }
-        : await runGit(["fetch", ".", `${input.branchName}:${input.baseBranch}`], input.rootRepoPath);
-      if (ffRes.exitCode !== 0) {
-        // Merge into an un-checked-out target branch (e.g. Epic staging branch or force --no-ff atomic commit)
-        await mkdir(this.worktreesDir, { recursive: true });
-        const mergeWt = join(
-          this.worktreesDir,
-          `_merge_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        );
-        const wtAdd = await runGit(
-          ["worktree", "add", mergeWt, input.baseBranch],
-          input.rootRepoPath,
-        );
-        if (wtAdd.exitCode !== 0) {
-          throw new Error(
-            `Repository HEAD is on '${currentBranch}' and temporary merge worktree for '${input.baseBranch}' failed: ${wtAdd.stderr.trim() || wtAdd.stdout.trim()}`,
-          );
-        }
-        try {
-          const userCheck = await runGit(["config", "user.name"], mergeWt);
-          const mergeArgs = userCheck.stdout.trim()
-            ? ["merge", "--no-ff", "-m", input.commitMessage, input.branchName]
-            : [
-                "-c",
-                "user.name=super-work",
-                "-c",
-                "user.email=super-work@local",
-                "merge",
-                "--no-ff",
-                "-m",
-                input.commitMessage,
-                input.branchName,
-              ];
-          const wtMerge = await runGit(mergeArgs, mergeWt);
-          if (wtMerge.exitCode !== 0) {
-            await runGit(["merge", "--abort"], mergeWt);
-            throw new Error(
-              `git merge into '${input.baseBranch}' failed: ${wtMerge.stderr.trim() || wtMerge.stdout.trim()}`,
-            );
-          }
-        } finally {
-          await this.cleanupWorkspace(mergeWt, input.rootRepoPath);
-        }
-      }
-    }
-
-    const shaRes = await runGit(["rev-parse", "--short", input.baseBranch], input.rootRepoPath);
-    const commitSha = shaRes.stdout.trim();
-
-    let branchCleaned = false;
-    if (input.deleteBranch !== false) {
-      const delRes = await runGit(["branch", "-D", input.branchName], input.rootRepoPath);
-      branchCleaned = delRes.exitCode === 0;
-    }
-
-    return { commitSha, beforeSha, isMergeCommit: forceNoFf, branchCleaned };
+  async mergeBranchToBase(...args: ImplArgs<typeof mergeBranchToBaseImpl>): ReturnType<typeof mergeBranchToBaseImpl> {
+    return mergeBranchToBaseImpl(this.ctx(), ...args);
   }
 
-  async revertMergedCommit(input: {
-    rootRepoPath: string;
-    baseBranch: string;
-    commitSha: string;
-  }): Promise<RevertResult> {
-    const parentsRes = await runGit(
-      ["rev-list", "--parents", "-n", "1", input.commitSha],
-      input.rootRepoPath,
-    );
-    if (parentsRes.exitCode !== 0 || !parentsRes.stdout.trim()) {
-      return {
-        ok: false,
-        error: `Commit '${input.commitSha}' not found in repository.`,
-      };
-    }
-
-    const parentTokens = parentsRes.stdout.trim().split(/\s+/);
-    const isMergeCommit = parentTokens.length >= 3;
-
-    const executeRevertInDir = async (cwd: string): Promise<RevertResult> => {
-      const userCheck = await runGit(["config", "user.name"], cwd);
-      const baseArgs = isMergeCommit
-        ? ["revert", "--no-edit", "-m", "1", input.commitSha]
-        : ["revert", "--no-edit", input.commitSha];
-      const args = userCheck.stdout.trim()
-        ? baseArgs
-        : ["-c", "user.name=super-work", "-c", "user.email=super-work@local", ...baseArgs];
-
-      const revRes = await runGit(args, cwd);
-      if (revRes.exitCode !== 0) {
-        const conflictsRes = await runGit(["diff", "--name-only", "--diff-filter=U"], cwd);
-        const conflictFiles = conflictsRes.stdout
-          .split("\n")
-          .map((s) => s.trim())
-          .filter(Boolean);
-        await runGit(["revert", "--abort"], cwd);
-        return {
-          ok: false,
-          conflictFiles: conflictFiles.length > 0 ? conflictFiles : undefined,
-          error: revRes.stderr.trim() || revRes.stdout.trim() || "git revert failed",
-        };
-      }
-
-      const newShaRes = await runGit(["rev-parse", "--short", "HEAD"], cwd);
-      return {
-        ok: true,
-        revertCommitSha: newShaRes.stdout.trim() || undefined,
-      };
-    };
-
-    const headRes = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], input.rootRepoPath);
-    const currentBranch = headRes.stdout.trim();
-
-    if (currentBranch === input.baseBranch) {
-      const dirty = await runGit(
-        ["status", "--porcelain", "--untracked-files=no"],
-        input.rootRepoPath,
-      );
-      if (dirty.stdout.trim()) {
-        return {
-          ok: false,
-          error: `Base repository (${input.baseBranch}) has uncommitted tracked changes; commit or stash before reverting.`,
-        };
-      }
-      return executeRevertInDir(input.rootRepoPath);
-    }
-
-    await mkdir(this.worktreesDir, { recursive: true });
-    const revertWt = join(
-      this.worktreesDir,
-      `_revert_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    );
-    const wtAdd = await runGit(["worktree", "add", revertWt, input.baseBranch], input.rootRepoPath);
-    if (wtAdd.exitCode !== 0) {
-      return {
-        ok: false,
-        error: `Failed to checkout '${input.baseBranch}' in temporary worktree for revert: ${wtAdd.stderr.trim() || wtAdd.stdout.trim()}`,
-      };
-    }
-    try {
-      return await executeRevertInDir(revertWt);
-    } finally {
-      await this.cleanupWorkspace(revertWt, input.rootRepoPath);
-    }
+  async revertMergedCommit(...args: ImplArgs<typeof revertMergedCommitImpl>): ReturnType<typeof revertMergedCommitImpl> {
+    return revertMergedCommitImpl(this.ctx(), ...args);
   }
 
   async revertPaths(worktreePath: string, paths: string[]): Promise<void> {
@@ -1337,7 +479,17 @@ export class GitWorktreeProvider implements WorkspaceProvider {
       const res = await runGit(["show", `${input.baseBranch}:${rel}`], input.worktreePath);
       return res.exitCode === 0 ? res.stdout : null;
     };
-    return verifyHotspotParityImpl({ ...input, readBase });
+    const listChangedFiles = async (): Promise<string[]> => {
+      const [diff, untracked] = await Promise.all([
+        runGit(["diff", "--name-only", `${input.baseBranch}...HEAD`], input.worktreePath),
+        runGit(["ls-files", "--others", "--exclude-standard"], input.worktreePath),
+      ]);
+      return [diff.stdout, untracked.stdout]
+        .flatMap((o) => o.split("\n"))
+        .map((l) => l.trim())
+        .filter(Boolean);
+    };
+    return verifyHotspotParityImpl({ ...input, readBase, listChangedFiles });
   }
 
   async buildSurgicalContextPack(input: {
@@ -1367,105 +519,28 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     return res.stdout.trim();
   }
 
-  async getChangedFilesSince(worktreePath: string, refOrSha: string): Promise<string[]> {
-    const [trackedRes, untrackedRes] = await Promise.all([
-      runGit(["diff", "--name-only", refOrSha], worktreePath),
-      runGit(["ls-files", "--others", "--exclude-standard"], worktreePath),
-    ]);
-    const files = new Set<string>();
-    for (const out of [trackedRes.stdout, untrackedRes.stdout]) {
-      for (const line of out.split("\n")) {
-        const clean = line.trim();
-        if (clean) files.add(clean);
-      }
+  async getTreeSha(worktreePath: string, rev = "HEAD^{tree}"): Promise<string> {
+    const res = await runGit(["rev-parse", "--verify", rev], worktreePath);
+    if (res.exitCode !== 0 || !res.stdout.trim()) {
+      throw new Error(`Unable to resolve git tree '${rev}': ${res.stderr.trim() || res.stdout.trim()}`);
     }
-    return Array.from(files).sort();
+    return res.stdout.trim();
   }
 
-  async revertPathsToCommit(
-    worktreePath: string,
-    commitSha: string,
-    paths: string[],
-  ): Promise<void> {
-    for (const rel of paths) {
-      const check = await runGit(["ls-tree", "-r", "--name-only", commitSha, "--", rel], worktreePath);
-      if (check.exitCode === 0 && check.stdout.trim()) {
-        await runGit(["checkout", commitSha, "--", rel], worktreePath);
-      } else {
-        await rm(join(worktreePath, rel), { recursive: true, force: true });
-      }
-    }
+  async getChangedFilesSince(...args: ImplArgs<typeof getChangedFilesSinceImpl>): ReturnType<typeof getChangedFilesSinceImpl> {
+    return getChangedFilesSinceImpl(this.ctx(), ...args);
   }
 
-  async captureWorktreeCheckpoint(input: {
-    worktreePath: string;
-    ticketId: string;
-    checkpointId: string;
-    label: string;
-  }): Promise<{ gitRef: string; commitSha: string }> {
-    const headSha = await this.getHeadCommitSha(input.worktreePath, "HEAD");
-    const tmpIdx = join(
-      tmpdir(),
-      `sw-cp-${input.checkpointId.replace(/[^a-zA-Z0-9_-]/g, "_")}-${Date.now()}.idx`,
-    );
-    const idxEnv: NodeJS.ProcessEnv = {
-      GIT_INDEX_FILE: tmpIdx,
-      GIT_AUTHOR_NAME: "super-work",
-      GIT_AUTHOR_EMAIL: "super-work@local",
-      GIT_COMMITTER_NAME: "super-work",
-      GIT_COMMITTER_EMAIL: "super-work@local",
-    };
-
-    try {
-      const readRes = await runGit(["read-tree", headSha], input.worktreePath, idxEnv);
-      if (readRes.exitCode !== 0) {
-        throw new Error(`git read-tree failed: ${readRes.stderr.trim()}`);
-      }
-      const addRes = await runGit(["add", "-A"], input.worktreePath, idxEnv);
-      if (addRes.exitCode !== 0) {
-        throw new Error(`git add checkpoint failed: ${addRes.stderr.trim()}`);
-      }
-      const treeRes = await runGit(["write-tree"], input.worktreePath, idxEnv);
-      const treeSha = treeRes.stdout.trim();
-      if (treeRes.exitCode !== 0 || !treeSha) {
-        throw new Error(`git write-tree failed: ${treeRes.stderr.trim()}`);
-      }
-
-      const commitRes = await runGit(
-        ["commit-tree", treeSha, "-p", headSha, "-m", input.label],
-        input.worktreePath,
-        idxEnv,
-      );
-      const commitSha = commitRes.stdout.trim();
-      if (commitRes.exitCode !== 0 || !commitSha) {
-        throw new Error(`git commit-tree failed: ${commitRes.stderr.trim()}`);
-      }
-
-      const gitRef = `refs/super-work/checkpoints/${input.ticketId}/${input.checkpointId}`;
-      const updRes = await runGit(["update-ref", gitRef, commitSha], input.worktreePath);
-      if (updRes.exitCode !== 0) {
-        throw new Error(`git update-ref checkpoint failed: ${updRes.stderr.trim()}`);
-      }
-      return { gitRef, commitSha };
-    } finally {
-      await rm(tmpIdx, { force: true }).catch(() => {});
-    }
+  async revertPathsToCommit(...args: ImplArgs<typeof revertPathsToCommitImpl>): ReturnType<typeof revertPathsToCommitImpl> {
+    return revertPathsToCommitImpl(this.ctx(), ...args);
   }
 
-  async restoreWorktreeCheckpoint(input: {
-    worktreePath: string;
-    rootRepoPath: string;
-    commitSha: string;
-  }): Promise<void> {
-    const resetRes = await runGit(["reset", "--hard", input.commitSha], input.worktreePath);
-    if (resetRes.exitCode !== 0) {
-      throw new Error(`git reset checkpoint failed: ${resetRes.stderr.trim() || resetRes.stdout.trim()}`);
-    }
-    await runGit(
-      ["clean", "-fd", "-e", "node_modules", "-e", "**/node_modules"],
-      input.worktreePath,
-    );
-    await this.linkRepoNodeModules(input.rootRepoPath, input.worktreePath);
+  async captureWorktreeCheckpoint(...args: ImplArgs<typeof captureWorktreeCheckpointImpl>): ReturnType<typeof captureWorktreeCheckpointImpl> {
+    return captureWorktreeCheckpointImpl(this.ctx(), ...args);
+  }
+
+  async restoreWorktreeCheckpoint(...args: ImplArgs<typeof restoreWorktreeCheckpointImpl>): ReturnType<typeof restoreWorktreeCheckpointImpl> {
+    return restoreWorktreeCheckpointImpl(this.ctx(), ...args);
   }
 
   async getCommitDiff(repoOrWorktreePath: string, fromSha: string, toSha: string): Promise<string> {
@@ -1473,44 +548,16 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     return res.exitCode === 0 ? res.stdout : "";
   }
 
-  async cleanupTicketCheckpoints(rootRepoPath: string, ticketId: string): Promise<number> {
-    const prefix = `refs/super-work/checkpoints/${ticketId}/`;
-    const listRes = await runGit(["for-each-ref", "--format=%(refname)", prefix], rootRepoPath);
-    if (listRes.exitCode !== 0 || !listRes.stdout.trim()) {
-      return 0;
-    }
-    let count = 0;
-    for (const rawRef of listRes.stdout.split("\n")) {
-      const ref = rawRef.trim();
-      if (!ref) continue;
-      const del = await runGit(["update-ref", "-d", ref], rootRepoPath);
-      if (del.exitCode === 0) count += 1;
-    }
-    return count;
+  async cleanupTicketCheckpoints(...args: ImplArgs<typeof cleanupTicketCheckpointsImpl>): ReturnType<typeof cleanupTicketCheckpointsImpl> {
+    return cleanupTicketCheckpointsImpl(this.ctx(), ...args);
   }
 
-  async listCheckpointRefs(rootRepoPath: string): Promise<Array<{ ref: string; ticketId: string }>> {
-    const prefix = "refs/super-work/checkpoints/";
-    const listRes = await runGit(["for-each-ref", "--format=%(refname)", prefix], rootRepoPath);
-    if (listRes.exitCode !== 0 || !listRes.stdout.trim()) {
-      return [];
-    }
-    const items: Array<{ ref: string; ticketId: string }> = [];
-    for (const raw of listRes.stdout.split("\n")) {
-      const ref = raw.trim();
-      if (!ref || !ref.startsWith(prefix)) continue;
-      const rest = ref.slice(prefix.length);
-      const ticketId = rest.split("/")[0]?.trim() ?? "";
-      if (ticketId) {
-        items.push({ ref, ticketId });
-      }
-    }
-    return items;
+  async listCheckpointRefs(...args: ImplArgs<typeof listCheckpointRefsImpl>): ReturnType<typeof listCheckpointRefsImpl> {
+    return listCheckpointRefsImpl(this.ctx(), ...args);
   }
 
-  async deleteGitRef(rootRepoPath: string, ref: string): Promise<boolean> {
-    const res = await runGit(["update-ref", "-d", ref], rootRepoPath);
-    return res.exitCode === 0;
+  async deleteGitRef(...args: ImplArgs<typeof deleteGitRefImpl>): ReturnType<typeof deleteGitRefImpl> {
+    return deleteGitRefImpl(this.ctx(), ...args);
   }
 
   async runRepoPreProbe(
@@ -1683,187 +730,8 @@ export class GitWorktreeProvider implements WorkspaceProvider {
     }
   }
 
-  /**
-   * Controlled Milestone release on the base branch. Version bump, tag and push are each
-   * independently opt-in; nothing is tagged or pushed unless explicitly requested.
-   */
-  async executeMilestoneRelease(input: {
-    rootRepoPath: string;
-    baseBranch: string;
-    targetVersion?: string;
-    bumpVersion: boolean;
-    createTag: boolean;
-    pushRemote: boolean;
-    releaseNotes?: string;
-    stagingBranch?: string;
-    squashReleaseCommit?: boolean;
-    releaseCommitMessage?: string;
-  }): Promise<{
-    commitSha?: string;
-    tag?: string;
-    bumpedFiles: string[];
-    pushed: boolean;
-    squashed?: boolean;
-  }> {
-    const { rootRepoPath, baseBranch } = input;
-    const version = input.targetVersion?.trim().replace(/^v/i, "");
-    const doBump = input.bumpVersion && Boolean(version);
-    const doTag = input.createTag === true && Boolean(version);
-    const doPush = input.pushRemote === true;
-    const doSquash = input.squashReleaseCommit === true;
-    const stagingBranch = input.stagingBranch?.trim() || undefined;
-    const result: {
-      commitSha?: string;
-      tag?: string;
-      bumpedFiles: string[];
-      pushed: boolean;
-      squashed?: boolean;
-    } = {
-      bumpedFiles: [],
-      pushed: false,
-    };
-    if (!doBump && !doTag && !doPush && !doSquash && !stagingBranch) return result;
-
-    const must = async (args: string[], what: string): Promise<GitCommandResult> => {
-      const res = await runGit(args, rootRepoPath);
-      if (res.exitCode !== 0) {
-        throw new Error(`${what} failed: ${(res.stderr || res.stdout).trim()}`);
-      }
-      return res;
-    };
-
-    const head = await must(["rev-parse", "--abbrev-ref", "HEAD"], "Resolve HEAD");
-    if (head.stdout.trim() !== baseBranch) {
-      await must(["checkout", baseBranch], `Checkout ${baseBranch}`);
-    }
-    const dirty = await must(["status", "--porcelain", "--untracked-files=no"], "Git status");
-    if (dirty.stdout.trim()) {
-      throw new Error(`Refusing milestone release: '${baseBranch}' has uncommitted tracked changes`);
-    }
-
-    const identity = ["-c", "user.name=super-work", "-c", "user.email=super-work@localhost"];
-    const preReleaseSha = (await must(["rev-parse", "HEAD"], "Resolve pre-release HEAD")).stdout.trim();
-
-    if (stagingBranch) {
-      const exists = await runGit(
-        ["show-ref", "--verify", "--quiet", `refs/heads/${stagingBranch}`],
-        rootRepoPath,
-      );
-      if (exists.exitCode === 0) {
-        const merged = await runGit(
-          [
-            ...identity,
-            "merge",
-            "--no-ff",
-            "-m",
-            `Merge milestone staging branch ${stagingBranch}`,
-            stagingBranch,
-          ],
-          rootRepoPath,
-        );
-        if (merged.exitCode !== 0) {
-          await runGit(["merge", "--abort"], rootRepoPath).catch(() => undefined);
-          throw new Error(
-            `Merge ${stagingBranch} into ${baseBranch} failed: ${(merged.stderr || merged.stdout).trim()}`,
-          );
-        }
-        await runGit(["branch", "-D", stagingBranch], rootRepoPath);
-      }
-    }
-
-    if (doBump && version) {
-      const candidates = ["package.json"];
-      const pkgDir = join(rootRepoPath, "packages");
-      if (existsSync(pkgDir)) {
-        const entries = await readdir(pkgDir, { withFileTypes: true });
-        for (const e of entries.filter((d) => d.isDirectory()).sort((a, b) => a.name.localeCompare(b.name))) {
-          candidates.push(`packages/${e.name}/package.json`);
-        }
-      }
-      const versionRe = /("version"\s*:\s*")[^"]*(")/;
-      for (const rel of candidates) {
-        const abs = join(rootRepoPath, rel);
-        if (!existsSync(abs)) continue;
-        const raw = await readFile(abs, "utf8");
-        if (!versionRe.test(raw)) continue;
-        const next = raw.replace(versionRe, `$1${version}$2`);
-        if (next === raw) continue;
-        await writeFile(abs, next, "utf8");
-        result.bumpedFiles.push(rel);
-      }
-      if (result.bumpedFiles.length > 0) {
-        await must(["add", "--", ...result.bumpedFiles], "Stage version bump");
-        await must(
-          [
-            "-c",
-            "user.name=super-work",
-            "-c",
-            "user.email=super-work@localhost",
-            "commit",
-            "-m",
-            `chore(release): bump version to v${version}`,
-          ],
-          "Commit version bump",
-        );
-      }
-    }
-
-    if (doSquash) {
-      const preSquashHead = (await must(["rev-parse", "HEAD"], "Resolve HEAD")).stdout.trim();
-      if (preSquashHead !== preReleaseSha) {
-        const preTree = (await must(["rev-parse", "HEAD^{tree}"], "Resolve tree")).stdout.trim();
-        await must(["reset", "--soft", preReleaseSha], "Soft reset for squash");
-        await must(
-          [
-            ...identity,
-            "commit",
-            "--allow-empty",
-            "-m",
-            input.releaseCommitMessage?.trim() || `feat: release v${version ?? "milestone"}`,
-          ],
-          "Commit squashed release",
-        );
-        const postTree = (await must(["rev-parse", "HEAD^{tree}"], "Resolve tree")).stdout.trim();
-        if (postTree !== preTree) {
-          await runGit(["reset", "--hard", preSquashHead], rootRepoPath);
-          throw new Error(
-            `Squash release tree mismatch (${postTree} != ${preTree}); restored ${preSquashHead}`,
-          );
-        }
-        result.squashed = true;
-      } else {
-        result.squashed = false;
-      }
-    }
-
-    const sha = await runGit(["rev-parse", "HEAD"], rootRepoPath);
-    if (sha.exitCode === 0) result.commitSha = sha.stdout.trim();
-
-    if (doTag && version) {
-      const tag = `v${version}`;
-      await must(
-        [
-          "-c",
-          "user.name=super-work",
-          "-c",
-          "user.email=super-work@localhost",
-          "tag",
-          "-a",
-          tag,
-          "-m",
-          input.releaseNotes?.trim() ? input.releaseNotes.trim().slice(0, 4000) : `Release ${tag}`,
-        ],
-        `Create tag ${tag}`,
-      );
-      result.tag = tag;
-    }
-
-    if (doPush) {
-      await must(["push", "origin", baseBranch], `Push ${baseBranch}`);
-      if (result.tag) await must(["push", "origin", result.tag], `Push ${result.tag}`);
-      result.pushed = true;
-    }
-    return result;
+  async executeMilestoneRelease(...args: Parameters<typeof executeMilestoneReleaseImpl>): ReturnType<typeof executeMilestoneReleaseImpl> {
+    return executeMilestoneReleaseImpl(...args);
   }
 
   async resetBranchRef(

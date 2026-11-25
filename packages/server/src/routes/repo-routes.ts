@@ -352,6 +352,37 @@ export function registerRepoRoutes(ctx: ServerRouteContext): void {
     }
   });
 
+  app.get("/api/playbooks/hygiene", async (c) => {
+    const repoId = c.req.query("repoId")?.trim() || undefined;
+    try {
+      return c.json(await kernel.auditPlaybookHygiene(repoId));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("Repository not found") ? 404 : 400);
+    }
+  });
+
+  app.post("/api/playbooks/hygiene/prune", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      repoId?: string;
+      dryRun?: boolean;
+      mode?: string;
+    };
+    if (body.mode !== undefined && body.mode !== "disable" && body.mode !== "delete") {
+      return c.json({ error: 'mode must be "disable" or "delete"' }, 400);
+    }
+    try {
+      const result = await kernel.pruneNoisyPlaybooks(
+        typeof body.repoId === "string" && body.repoId.trim() ? body.repoId.trim() : undefined,
+        { dryRun: body.dryRun === true, mode: body.mode === "delete" ? "delete" : "disable" },
+      );
+      return c.json(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, msg.includes("Repository not found") ? 404 : 400);
+    }
+  });
+
   app.get("/api/repos/:id/casebook", async (c) => {
     const id = c.req.param("id");
     const repo = await stateStore.getRepo(id);

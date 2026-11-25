@@ -184,7 +184,11 @@ export class OpenCodeDriver implements WorkerDriver {
     const proc = Bun.spawn(wrapped.argv, {
       cwd: input.worktreePath,
       env: wrapped.env,
-      stdin: new TextEncoder().encode(input.prompt),
+      stdin: new TextEncoder().encode(
+        input.stage === "plan" || input.stage === "review"
+          ? `WORKTREE_CWD=${input.worktreePath}\nUse relative paths inside the worktree or this exact WORKTREE_CWD; never re-type host user directory prefixes manually.\n\n${input.prompt}`
+          : input.prompt,
+      ),
       stdout: "pipe",
       stderr: "pipe",
     });

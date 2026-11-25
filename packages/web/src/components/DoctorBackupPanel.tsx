@@ -16,6 +16,7 @@ import type {
   BackupArchiveInfo,
   CodeHotspotItem,
   EngineHealthRecord,
+  PlaybookHygieneReport,
   SelfReloadState,
   ServiceStatusResponse,
   SystemDoctorReport,
@@ -43,6 +44,8 @@ export function DoctorBackupPanel() {
   const [spawningHotspot, setSpawningHotspot] = useState(false);
   const [engines, setEngines] = useState<EngineHealthRecord[]>([]);
   const [enginesBusy, setEnginesBusy] = useState(false);
+  const [hygiene, setHygiene] = useState<PlaybookHygieneReport | null>(null);
+  const [pruningNoisy, setPruningNoisy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -50,14 +53,16 @@ export function DoctorBackupPanel() {
     setLoadingDoctor(true);
     setError(null);
     try {
-      const [doc, bk, svc, rel, eng] = await Promise.all([
+      const [doc, bk, svc, rel, eng, hyg] = await Promise.all([
         api.runDoctor(false),
         api.listBackups(),
         api.getSystemService(20).catch(() => null),
         api.getSelfReloadStatus().catch(() => null),
         api.listEngineHealth().catch(() => null),
+        api.getPlaybookHygiene().catch(() => null),
       ]);
       if (eng) setEngines(eng.engines);
+      setHygiene(hyg);
       setReport(doc);
       setBackups(bk.backups);
       if (svc) setServiceInfo(svc);
@@ -72,6 +77,23 @@ export function DoctorBackupPanel() {
   useEffect(() => {
     void loadAll();
   }, [loadAll]);
+
+  const activeNoisyCount = hygiene ? hygiene.noisyEntries.filter((e) => e.enabled).length : 0;
+
+  const handlePruneNoisy = async () => {
+    setPruningNoisy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await api.prunePlaybookHygiene({ mode: "disable" });
+      setNotice(t("doctor.playbook.disabledNotice").replace("{n}", String(res.affectedIds.length)));
+      setHygiene(await api.getPlaybookHygiene());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPruningNoisy(false);
+    }
+  };
 
   const handleFix = async () => {
     setFixingDoctor(true);
@@ -263,6 +285,59 @@ export function DoctorBackupPanel() {
               </li>
             ))}
           </ul>
+        )}
+      </section>
+
+      {/* Playbook Hygiene */}
+      <section className="space-y-2 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 font-semibold text-zinc-100">
+            <Sparkles className="w-4 h-4 text-violet-400" />
+            <span>{t("doctor.playbook.title")}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => void handlePruneNoisy()}
+            disabled={pruningNoisy || activeNoisyCount === 0}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-violet-500/40 bg-violet-500/10 hover:bg-violet-500/20 text-violet-200 text-[11px] disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3 h-3 ${pruningNoisy ? "animate-spin" : ""}`} />
+            {t("doctor.playbook.disableBtn")}
+          </button>
+        </div>
+        {hygiene ? (
+          <>
+            <div className="flex flex-wrap gap-4 text-xs font-mono text-zinc-300">
+              <span>
+                {t("doctor.playbook.clean")}: <span className="text-emerald-300">{hygiene.healthy}</span>
+              </span>
+              <span>
+                {t("doctor.playbook.noisy")}:{" "}
+                <span className={activeNoisyCount > 0 ? "text-amber-300" : "text-zinc-400"}>
+                  {activeNoisyCount}
+                </span>
+              </span>
+              <span className="text-zinc-500">
+                {t("doctor.playbook.total")}: {hygiene.total}
+              </span>
+            </div>
+            {activeNoisyCount === 0 ? (
+              <div className="text-[11px] text-zinc-500">{t("doctor.playbook.allClean")}</div>
+            ) : (
+              <ul className="space-y-1 text-[11px] text-zinc-400 max-h-32 overflow-y-auto">
+                {hygiene.noisyEntries
+                  .filter((e) => e.enabled)
+                  .slice(0, 5)
+                  .map((e) => (
+                    <li key={e.id} className="truncate" title={e.reasons.join("; ")}>
+                      {e.rule}
+                    </li>
+                  ))}
+              </ul>
+            )}
+          </>
+        ) : (
+          <div className="text-[11px] text-zinc-500">{t("doctor.playbook.unavailable")}</div>
         )}
       </section>
 

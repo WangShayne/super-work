@@ -6,7 +6,7 @@ const DETERMINISTIC_RULES: ReadonlyArray<{ kind: EngineHealthFailureKind; re: Re
   { kind: "model_unsupported", re: /model (is )?not supported|unsupported model|model_not_found/i },
   { kind: "tier_ineligible", re: /IneligibleTierError|ineligible tier|not eligible for/i },
   { kind: "auth_invalid", re: /invalid_api_key|invalid api key|unauthorized|not authenticated|authentication (failed|required)|\b401\b/i },
-  { kind: "quota_exhausted", re: /quota (exceeded|exhausted)|exceeded your (current )?quota|billing|insufficient_quota|credit balance/i },
+  { kind: "quota_exhausted", re: /quota (exceeded|exhausted)|exceeded your (current )?quota|billing|insufficient_quota|credit balance|free usage limit|subscribe to opencode/i },
 ];
 
 const TRANSIENT_RE =

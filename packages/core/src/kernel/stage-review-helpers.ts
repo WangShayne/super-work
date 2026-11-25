@@ -36,15 +36,49 @@ export async function buildReviewEvidencePacketOp(
       implRun?.startedAt && implRun.completedAt
         ? Math.max(0, Date.parse(implRun.completedAt) - Date.parse(implRun.startedAt))
         : undefined;
-    return {
+    const gatePassed = implNote?.verificationPassed ?? implRun?.status === "completed";
+    const packet: ReviewEvidencePacket = {
       baseBranch,
       diffStat,
       changedFiles,
-      gatePassed: implNote?.verificationPassed ?? implRun?.status === "completed",
+      gatePassed,
       gateCommands: (repo.verificationCommands ?? []).map((c) => c.trim()).filter(Boolean),
       gateDurationMs: Number.isFinite(durationMs) ? durationMs : undefined,
       gateSummary: implRun?.summary ?? implNote?.summary ?? "No preceding implement gate record",
     };
+    const guard = ticket.refactorGuard;
+    if (gatePassed && guard?.targetHotspotPath && ctx.workspace.verifyHotspotRefactorParity) {
+      try {
+        const parity = await ctx.workspace.verifyHotspotRefactorParity({
+          worktreePath,
+          baseBranch,
+          targetHotspotPath: guard.targetHotspotPath,
+          maxLinesAfter: guard.maxLinesAfter ?? 1200,
+          enforceExportParity: guard.enforceExportParity ?? true,
+        });
+        if (parity.ok && parity.missingExports.length === 0) {
+          const map = parity.symbolMigrationMap ?? [];
+          packet.refactorParity = {
+            targetFile: guard.targetHotspotPath,
+            lineCountBefore: parity.linesBefore,
+            lineCountAfter: parity.linesAfter,
+            maxLines: guard.maxLinesAfter ?? 1200,
+            exportsPreserved: true,
+            migratedSymbolsCount: map.length,
+            newModuleFiles: parity.newModuleFiles ?? [],
+            symbolMigrationSummary: map.length
+              ? `Moved: ${map
+                  .slice(0, 12)
+                  .map((m) => `${m.symbol}→${m.targetFile.split("/").pop()}`)
+                  .join(", ")}${map.length > 12 ? ` (+${map.length - 12} more)` : ""}`
+              : undefined,
+          };
+        }
+      } catch {
+        // parity evidence is advisory; fall back to the plain packet
+      }
+    }
+    return packet;
   } catch {
     return undefined;
   }

@@ -2,7 +2,6 @@ import { pickNextFallbackEngine, resolveFallbackChain } from "../arena.ts";
 import { computeEngineRoutingDecision, parseSpecTestChallenge } from "../engine-router.ts";
 import { validateChangedFilesAgainstMandate } from "../mandate.ts";
 import {
-  getAlternateEngine,
   getFirstStage,
   getNextStage,
   getPipelineTemplate,
@@ -42,13 +41,20 @@ import { failCampaignWaveTicket, mergeWaveToTargetStagingBranch } from "./stage-
 import {
   collectTrippedEngines,
   quarantineSpilloverAfterTurn,
-  tripEngineIfDeterministic,
   utcTodayString,
 } from "./stage-engine-helpers.ts";
+import { handleImplementGateFailureOp } from "./stage-post-gate-helpers.ts";
+import {
+  handleCancelledOrStoppedOp,
+  handleFatalWorkerErrorOp,
+  handleLiveSteerOp,
+  handleWatchdogAbortOp,
+  type StagePostTurnState,
+} from "./stage-post-turn-helpers.ts";
 import { handleRebaseStageOp } from "./stage-rebase-helpers.ts";
 import { buildReviewEvidencePacketOp } from "./stage-review-helpers.ts";
 import { handleSpecTestPostTurnOp } from "./stage-spec-test-helpers.ts";
-import { runRepoVerificationGateOp } from "./stage-verification-helpers.ts";
+import { captureLastFullVerification, runRepoVerificationGateOp } from "./stage-verification-helpers.ts";
 
 export async function runTicketStageOp(
   ctx: KernelCoordinatorContext,
@@ -311,7 +317,7 @@ export async function runTicketStageOp(
     ticket,
     repo,
     stage,
-    reviewEvidence ? { reviewEvidence } : undefined,
+    { ...(reviewEvidence ? { reviewEvidence } : {}), worktreePath: ws.worktreePath },
   );
 
   const setupConfig = await ctx.stateStore.getSystemSetting<SystemSetupConfig>("setup_config");
@@ -493,299 +499,33 @@ export async function runTicketStageOp(
           : "ok";
   spans.end(workerSpan, turnSpanStatus, `$${stageCostUsd.toFixed(3)}`);
 
-  const latestTicket = await ctx.stateStore.getTicket(ticket.id);
-  if (latestTicket && latestTicket.status === "cancelled") {
-    ctx.pendingSteers.delete(ticket.id);
-    await ctx.stateStore.saveStageRun({
-      ...stageRun,
-      status: "aborted",
-      nativeSessionId: discoveredSessionId,
-      costUsd: stageCostUsd,
-      spans: spans.toArray(),
-      toolProfile,
-      completedAt: nowIso(),
-      summary: "Cancelled by user",
-    });
-    return;
-  }
-
-  if (ctx.isStopped()) {
-    ctx.pendingSteers.delete(ticket.id);
-    await ctx.stateStore.saveStageRun({
-      ...stageRun,
-      status: "aborted",
-      nativeSessionId: discoveredSessionId,
-      costUsd: stageCostUsd,
-      spans: spans.toArray(),
-      toolProfile,
-      completedAt: nowIso(),
-      summary: "Aborted on kernel shutdown",
-    });
-    await ctx.stateStore.saveTicket({
-      ...ticket,
-      status: "queued",
-      costUsd: ticket.costUsd + stageCostUsd,
-      updatedAt: nowIso(),
-    });
-    return;
-  }
-
-  const pendingSteer = ctx.pendingSteers.get(ticket.id);
-  if (pendingSteer && abortController.signal.aborted) {
-    ctx.pendingSteers.delete(ticket.id);
-    const ts = nowIso();
-    const steeredRun: StageRun = {
-      ...stageRun,
-      status: "aborted",
-      nativeSessionId: discoveredSessionId,
-      costUsd: stageCostUsd,
-      spans: spans.toArray(),
-      toolProfile,
-      steered: true,
-      completedAt: ts,
-      summary: `Live steer applied: ${pendingSteer.instruction.slice(0, 140)}`,
-    };
-    const { note: steerNote } = await ctx.memory.recordStageSpillAndNote({
-      ticket,
-      stageRun: steeredRun,
-      events: collectedEvents,
-      changedFiles: [],
-      summary: steeredRun.summary!,
-      verificationPassed: false,
-    });
-    steeredRun.spillTranscriptId = steerNote.spillArtifactIds[0];
-    await ctx.stateStore.saveStageRun(steeredRun);
-    ctx.emitEvent({
-      type: "stage_completed",
-      ticketId: ticket.id,
-      stageRun: steeredRun,
-      note: steerNote,
-      timestamp: ts,
-    });
-
-    const preservedSessions =
-      discoveredSessionId && stage !== "review"
-        ? { ...ticket.nativeSessions, [driver.engine]: discoveredSessionId }
-        : ticket.nativeSessions;
-    const switchedEngine =
-      pendingSteer.preferredEngine && pendingSteer.preferredEngine !== "auto"
-        ? pendingSteer.preferredEngine
-        : driver.engine;
-
-    const steeredTicket: Ticket = {
-      ...ticket,
-      status: "queued",
-      steerCount: (ticket.steerCount ?? 0) + 1,
-      costUsd: ticket.costUsd + stageCostUsd,
-      nativeSessions: preservedSessions,
-      preferredEngine: pendingSteer.preferredEngine ?? ticket.preferredEngine,
-      activeEngine: switchedEngine,
-      inlineMemory: {
-        ...ticket.inlineMemory,
-        stageNotes: [...ticket.inlineMemory.stageNotes, steerNote],
-        threadUpdates: [
-          ...ticket.inlineMemory.threadUpdates,
-          {
-            triggerId: newId("str"),
-            message: `[Live Steer]: ${pendingSteer.instruction}`,
-            createdAt: ts,
-          },
-        ],
-        activeHint: `[LIVE STEER]: ${pendingSteer.instruction}`,
-      },
-      updatedAt: ts,
-    };
-    await ctx.stateStore.saveTicket(steeredTicket);
-    ctx.emitEvent({ type: "ticket_updated", ticket: steeredTicket, timestamp: ts });
-    return;
-  }
+  const postTurn: StagePostTurnState = {
+    ticket,
+    repo,
+    stage,
+    stageRun,
+    driverEngine: driver.engine,
+    spans,
+    toolProfile,
+    collectedEvents,
+    discoveredSessionId,
+    stageCostUsd,
+    availableEngines,
+    trippedEngines,
+  };
+  if (await handleCancelledOrStoppedOp(ctx, postTurn)) return;
+  if (await handleLiveSteerOp(ctx, postTurn, abortController.signal)) return;
 
   if (watchdogDecision) {
     const dec: WatchdogDecision = watchdogDecision;
     const sig: WatchdogSignal | null = watchdogSignal;
-    const abortedRun: StageRun = {
-      ...stageRun,
-      status: "aborted",
-      nativeSessionId: discoveredSessionId,
-      costUsd: stageCostUsd,
-      spans: spans.toArray(),
-      toolProfile,
-      completedAt: nowIso(),
-      summary: `Watchdog ${dec.action}: ${dec.reason}`,
-    };
-    await ctx.memory.recordStageSpillAndNote({
-      ticket,
-      stageRun: abortedRun,
-      events: collectedEvents,
-      changedFiles: [],
-      summary: abortedRun.summary!,
-      verificationPassed: false,
-    });
-
-    if (dec.action === "INJECT_HINT") {
-      const nextTicket: Ticket = {
-        ...ticket,
-        status: "queued",
-        stageRetries: ticket.stageRetries + 1,
-        costUsd: ticket.costUsd + stageCostUsd,
-        nativeSessions: discoveredSessionId
-          ? { ...ticket.nativeSessions, [driver.engine]: discoveredSessionId }
-          : ticket.nativeSessions,
-        inlineMemory: {
-          ...ticket.inlineMemory,
-          activeHint: dec.hint ?? dec.reason,
-        },
-        updatedAt: nowIso(),
-      };
-      await ctx.stateStore.saveStageRun(abortedRun);
-      await ctx.stateStore.saveTicket(nextTicket);
-      ctx.emitEvent({ type: "ticket_updated", ticket: nextTicket, timestamp: nextTicket.updatedAt });
-      return;
-    }
-
-    if (dec.action === "SWITCH_ENGINE") {
-      const nextFailed = Array.from(new Set([...(ticket.failedEngines ?? []), driver.engine]));
-      const altEngine =
-        dec.targetEngine &&
-        dec.targetEngine !== driver.engine &&
-        !nextFailed.includes(dec.targetEngine) &&
-        availableEngines.includes(dec.targetEngine)
-          ? dec.targetEngine
-          : pickNextFallbackEngine({
-              currentEngine: driver.engine,
-              failedEngines: nextFailed,
-              repo,
-              availableEngines,
-              trippedEngines,
-            }) ?? getAlternateEngine(driver.engine, availableEngines);
-      if (altEngine && altEngine !== driver.engine && !nextFailed.includes(altEngine)) {
-        const nextTicket: Ticket = {
-          ...ticket,
-          status: "queued",
-          activeEngine: altEngine,
-          failedEngines: nextFailed,
-          stageRetries: ticket.stageRetries + 1,
-          costUsd: ticket.costUsd + stageCostUsd,
-          inlineMemory: {
-            ...ticket.inlineMemory,
-            activeHint:
-              dec.hint ??
-              `[Fallback Engine: ${driver.engine} -> ${altEngine}] Switched due to: ${dec.reason}`,
-          },
-          updatedAt: nowIso(),
-        };
-        await ctx.stateStore.saveStageRun(abortedRun);
-        await ctx.stateStore.saveTicket(nextTicket);
-        await ctx.recordFlightEvent?.({
-          repoId: repo.id,
-          ticketId: ticket.id,
-          kind: "watchdog_switch",
-          engine: altEngine,
-          summary: `Watchdog switched engine ${driver.engine} -> ${altEngine}: ${dec.reason}`,
-          metadata: { fromEngine: driver.engine, toEngine: altEngine, stage: stageRun.stage },
-        });
-        ctx.emitEvent({ type: "ticket_updated", ticket: nextTicket, timestamp: nextTicket.updatedAt });
-        return;
-      }
-    }
-
-    await ctx.stateStore.saveStageRun(abortedRun);
-    if (ticket.campaignId) {
-      await failCampaignWaveTicket(ctx, { ...ticket, costUsd: ticket.costUsd + stageCostUsd }, repo, dec.reason);
-    } else {
-      await ctx.escalateTicket(
-        { ...ticket, costUsd: ticket.costUsd + stageCostUsd },
-        "watchdog_escalation",
-        dec.reason,
-        { signal: sig, decision: dec },
-      );
-    }
+    await handleWatchdogAbortOp(ctx, postTurn, dec, sig);
     return;
   }
 
   const lastErrorEvent = [...collectedEvents].reverse().find((e) => e.type === "error");
   if (!completedEvent && lastErrorEvent && lastErrorEvent.type === "error") {
-    const failedRun: StageRun = {
-      ...stageRun,
-      status: "failed",
-      nativeSessionId: discoveredSessionId,
-      costUsd: stageCostUsd,
-      spans: spans.toArray(),
-      toolProfile,
-      completedAt: nowIso(),
-      summary: lastErrorEvent.message,
-    };
-    await ctx.stateStore.saveStageRun(failedRun);
-    await ctx.memory.recordStageSpillAndNote({
-      ticket,
-      stageRun: failedRun,
-      events: collectedEvents,
-      changedFiles: [],
-      summary: lastErrorEvent.message,
-      verificationPassed: false,
-    });
-
-    const nextFailed = Array.from(new Set([...(ticket.failedEngines ?? []), driver.engine]));
-    const newlyTripped = await tripEngineIfDeterministic(ctx, {
-      engine: driver.engine,
-      message: lastErrorEvent.message,
-      repoId: repo.id,
-      ticketId: ticket.id,
-      stage,
-    });
-    const fallbackEngine = pickNextFallbackEngine({
-      currentEngine: driver.engine,
-      failedEngines: nextFailed,
-      repo,
-      availableEngines,
-      trippedEngines: newlyTripped ? [...trippedEngines, driver.engine] : trippedEngines,
-    });
-
-    if (fallbackEngine) {
-      const handedOff: Ticket = {
-        ...ticket,
-        status: "queued",
-        activeEngine: fallbackEngine,
-        failedEngines: nextFailed,
-        stageRetries: 0,
-        costUsd: ticket.costUsd + stageCostUsd,
-        inlineMemory: {
-          ...ticket.inlineMemory,
-          activeHint: `[Engine Fallback: ${driver.engine} -> ${fallbackEngine}] Previous engine errored (${lastErrorEvent.message}). Existing worktree state is preserved; continue and finish cleanly.`,
-        },
-        updatedAt: nowIso(),
-      };
-      await ctx.stateStore.saveTicket(handedOff);
-      ctx.emitEvent({ type: "ticket_updated", ticket: handedOff, timestamp: handedOff.updatedAt });
-    } else if (ticket.stageRetries < ticket.mandate.maxStageRetries) {
-      const retried: Ticket = {
-        ...ticket,
-        status: "queued",
-        stageRetries: ticket.stageRetries + 1,
-        costUsd: ticket.costUsd + stageCostUsd,
-        inlineMemory: {
-          ...ticket.inlineMemory,
-          activeHint: `Previous ${stage} attempt errored (${lastErrorEvent.message}). Fix and retry.`,
-        },
-        updatedAt: nowIso(),
-      };
-      await ctx.stateStore.saveTicket(retried);
-      ctx.emitEvent({ type: "ticket_updated", ticket: retried, timestamp: retried.updatedAt });
-    } else if (ticket.campaignId) {
-      await failCampaignWaveTicket(
-        ctx,
-        { ...ticket, costUsd: ticket.costUsd + stageCostUsd },
-        repo,
-        `Stage ${stage} failed: ${lastErrorEvent.message}`,
-      );
-    } else {
-      await ctx.escalateTicket(
-        { ...ticket, costUsd: ticket.costUsd + stageCostUsd },
-        "watchdog_escalation",
-        `Stage ${stage} failed: ${lastErrorEvent.message}`,
-        { stageRunId: stageRun.id, failedEngines: nextFailed },
-      );
-    }
+    await handleFatalWorkerErrorOp(ctx, postTurn, lastErrorEvent.message);
     return;
   }
 
@@ -1180,129 +920,23 @@ export async function runTicketStageOp(
 
   let verificationArtifacts: SpillArtifact[] = [];
   let verificationPassed = completedEvent?.structuredOutput?.verificationPassed ?? true;
+  let implementGate: Awaited<ReturnType<typeof runRepoVerificationGateOp>> | undefined;
   if (stage === "implement") {
     const gate = await runRepoVerificationGateOp(ctx, ticket, repo, stageRun, ws.worktreePath, {
       isFinalDeliveryGate: false,
     });
+    implementGate = gate;
     spans.addExisting(gate.spans);
     verificationArtifacts = gate.artifacts;
     verificationPassed = gate.passed;
     if (!gate.passed) {
-      const failedSummary = gate.result?.summary ?? "Deterministic verification gate failed";
-      const failedRun: StageRun = {
-        ...stageRun,
-        status: "failed",
-        nativeSessionId: discoveredSessionId,
-        costUsd: stageCostUsd,
-        spans: spans.toArray(),
-        toolProfile,
-        completedAt: nowIso(),
-        summary: failedSummary,
-      };
-      const { note: failNote } = await ctx.memory.recordStageSpillAndNote({
-        ticket,
-        stageRun: failedRun,
-        events: collectedEvents,
+      await handleImplementGateFailureOp(ctx, postTurn, {
+        gate,
+        worktreePath: ws.worktreePath,
         changedFiles,
         diffText,
-        summary: failedSummary,
-        verificationPassed: false,
-        extraArtifacts: verificationArtifacts.length > 0 ? verificationArtifacts : undefined,
+        verificationArtifacts,
       });
-      failedRun.spillTranscriptId = failNote.spillArtifactIds[0];
-      await ctx.stateStore.saveStageRun(failedRun);
-      await ctx.captureTicketCheckpoint(ticket, repo, ws.worktreePath, {
-        stage: "implement",
-        stageRunId: failedRun.id,
-        engine: driver.engine,
-        label: `Implement attempt #${ticket.stageRetries + 1} (failed gate)`,
-        changedFiles,
-        verificationPassed: false,
-      });
-      ctx.emitEvent({
-        type: "stage_completed",
-        ticketId: ticket.id,
-        stageRun: failedRun,
-        note: failNote,
-        timestamp: failedRun.completedAt!,
-      });
-
-      const updatedFailSessions = discoveredSessionId
-        ? { ...ticket.nativeSessions, [driver.engine]: discoveredSessionId }
-        : ticket.nativeSessions;
-      const updatedFailMemory = {
-        ...ticket.inlineMemory,
-        stageNotes: [...ticket.inlineMemory.stageNotes, failNote],
-        activeHint: `Deterministic verification failed (${gate.result?.failedCommand ?? "checks"}). Fix the errors and verify locally:\n${failedSummary}`,
-      };
-
-      if (ticket.stageRetries < ticket.mandate.maxStageRetries) {
-        const retrying: Ticket = {
-          ...ticket,
-          status: "queued",
-          stageRetries: ticket.stageRetries + 1,
-          costUsd: ticket.costUsd + stageCostUsd,
-          nativeSessions: updatedFailSessions,
-          activeEngine: driver.engine,
-          inlineMemory: updatedFailMemory,
-          updatedAt: nowIso(),
-        };
-        await ctx.stateStore.saveTicket(retrying);
-        ctx.emitEvent({ type: "ticket_updated", ticket: retrying, timestamp: retrying.updatedAt });
-      } else {
-        const nextFailed = Array.from(new Set([...(ticket.failedEngines ?? []), driver.engine]));
-        const fallbackEngine = pickNextFallbackEngine({
-          currentEngine: driver.engine,
-          failedEngines: nextFailed,
-          repo,
-          availableEngines,
-          trippedEngines,
-        });
-        if (fallbackEngine) {
-          const handedOff: Ticket = {
-            ...ticket,
-            status: "queued",
-            stageRetries: 0,
-            costUsd: ticket.costUsd + stageCostUsd,
-            nativeSessions: updatedFailSessions,
-            failedEngines: nextFailed,
-            activeEngine: fallbackEngine,
-            inlineMemory: {
-              ...updatedFailMemory,
-              activeHint: `[Engine Fallback: ${driver.engine} -> ${fallbackEngine}] ${driver.engine} exhausted retries on verification gate (${gate.result?.failedCommand ?? "checks"}). Preserved worktree changes; fix and pass verification:\n${failedSummary}`,
-            },
-            updatedAt: nowIso(),
-          };
-          await ctx.stateStore.saveTicket(handedOff);
-          ctx.emitEvent({ type: "ticket_updated", ticket: handedOff, timestamp: handedOff.updatedAt });
-        } else if (ticket.campaignId) {
-          await failCampaignWaveTicket(
-            ctx,
-            {
-              ...ticket,
-              costUsd: ticket.costUsd + stageCostUsd,
-              nativeSessions: updatedFailSessions,
-              failedEngines: nextFailed,
-              inlineMemory: updatedFailMemory,
-            },
-            repo,
-            `Verification failed: ${gate.result?.failedCommand ?? failedSummary}`,
-          );
-        } else {
-          await ctx.escalateTicket(
-            {
-              ...ticket,
-              costUsd: ticket.costUsd + stageCostUsd,
-              nativeSessions: updatedFailSessions,
-              failedEngines: nextFailed,
-              inlineMemory: updatedFailMemory,
-            },
-            "watchdog_escalation",
-            `Deterministic verification failed after ${ticket.mandate.maxStageRetries} retries: ${gate.result?.failedCommand ?? failedSummary}`,
-            { stageRunId: failedRun.id, failedCommand: gate.result?.failedCommand, failedEngines: nextFailed },
-          );
-        }
-      }
       return;
     }
   }
@@ -1362,6 +996,8 @@ export async function runTicketStageOp(
         : ticket.inlineMemory.planSummary,
     stageNotes: [...ticket.inlineMemory.stageNotes, note],
     activeHint: undefined,
+    // Any file-modifying stage other than implement (which re-captures below) invalidates the snapshot.
+    lastFullVerification: stage === "implement" ? undefined : ticket.inlineMemory.lastFullVerification,
   };
 
   const template = getPipelineTemplate(ticket.template);
@@ -1400,6 +1036,17 @@ export async function runTicketStageOp(
   if (stage === "implement") {
     await autoResolveModifiedReviewComments(ctx, ticket.id, changedFiles);
     await ctx.workspace.commitAll(ws.worktreePath, `super-work(${ticket.id}): ${ticket.title}`);
+    // Capture AFTER commit so treeSha == HEAD^{tree}; undefined (scoped/unavailable) clears any stale snapshot.
+    updatedMemory.lastFullVerification = implementGate
+      ? await captureLastFullVerification(
+          ctx,
+          repo,
+          finishedRun,
+          implementGate,
+          ws.worktreePath,
+          effectiveBaseBranch,
+        )
+      : undefined;
     await ctx.captureTicketCheckpoint(ticket, repo, ws.worktreePath, {
       stage: "implement",
       stageRunId: finishedRun.id,

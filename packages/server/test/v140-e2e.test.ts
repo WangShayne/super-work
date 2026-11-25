@@ -251,8 +251,8 @@ describe("v1.4.0 End-to-End Milestones (Waves, Controlled Release, Run Digest, M
       expect(digest.markdownZh.length).toBeGreaterThan(0);
 
       const mcpInfo = (await (await fetch(`${baseUrl}/api/mcp`)).json()) as { version: string };
-      expect(mcpInfo.version).toBe("1.5.0");
-      expect(MCP_TOOL_DEFINITIONS).toHaveLength(26);
+      expect(mcpInfo.version).toBe("1.6.0");
+      expect(MCP_TOOL_DEFINITIONS).toHaveLength(27);
 
       const rpc = async (method: string, params?: Record<string, unknown>) =>
         (await (
@@ -269,10 +269,10 @@ describe("v1.4.0 End-to-End Milestones (Waves, Controlled Release, Run Digest, M
           };
         };
       expect((await rpc("initialize", { protocolVersion: "2025-03-26" })).result.serverInfo?.version).toBe(
-        "1.5.0",
+        "1.6.0",
       );
       const tools = (await rpc("tools/list")).result.tools ?? [];
-      expect(tools).toHaveLength(26);
+      expect(tools).toHaveLength(27);
       expect(tools.some((t) => t.name === "manage_milestones")).toBe(true);
       expect(tools.some((t) => t.name === "get_run_digest")).toBe(true);
       const listed = await rpc("tools/call", {

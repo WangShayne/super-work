@@ -221,6 +221,7 @@ describe("v0.5.0 End-to-End Capabilities", () => {
         ingest.inboxItem.id,
         "approved",
         "Always check empty input arrays before slicing",
+        { saveToPlaybook: true },
       );
     }
 

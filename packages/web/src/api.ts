@@ -62,6 +62,8 @@ import type {
   SubmitReviewCommentsInput,
   SymbolImpactReport,
   EngineHealthRecord,
+  PlaybookHygieneReport,
+  PlaybookHygienePruneResult,
   SystemDoctorReport,
   RefactorGuardConfig,
   TaskBlueprint,
@@ -354,6 +356,17 @@ export const api = {
   runDoctor: (fix = false) =>
     request<SystemDoctorReport>(fix ? "/api/system/doctor/fix" : "/api/system/doctor", {
       method: fix ? "POST" : "GET",
+    }),
+
+  getPlaybookHygiene: (repoId?: string) =>
+    request<PlaybookHygieneReport>(
+      `/api/playbooks/hygiene${repoId ? `?repoId=${encodeURIComponent(repoId)}` : ""}`,
+    ),
+
+  prunePlaybookHygiene: (body: { repoId?: string; dryRun?: boolean; mode?: "disable" | "delete" } = {}) =>
+    request<PlaybookHygienePruneResult>("/api/playbooks/hygiene/prune", {
+      method: "POST",
+      body: JSON.stringify(body),
     }),
 
   listEngineHealth: () => request<{ engines: EngineHealthRecord[] }>("/api/system/engines"),
@@ -735,6 +748,7 @@ export const api = {
       pushRemote: boolean;
       squashReleaseCommit?: boolean;
       releaseCommitMessage?: string;
+      createGithubRelease?: boolean;
     },
   ) =>
     request<{ milestone: Milestone }>(`/api/milestones/${encodeURIComponent(id)}/release`, {

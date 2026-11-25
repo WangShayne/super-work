@@ -577,7 +577,11 @@ export interface HotspotParityResult {
   linesAfter: number;
   missingExports: string[];
   summary: string;
+  symbolMigrationMap?: Array<{ symbol: string; targetFile: string }>;
+  newModuleFiles?: string[];
 }
+
+const MAX_MIGRATION_ENTRIES = 40;
 
 export async function verifyHotspotParityImpl(input: {
   worktreePath: string;
@@ -586,6 +590,8 @@ export async function verifyHotspotParityImpl(input: {
   maxLinesAfter: number;
   enforceExportParity: boolean;
   readBase: (rel: string) => Promise<string | null>;
+  /** Repo-relative files changed/added vs base; used to locate where moved symbols live now. */
+  listChangedFiles?: () => Promise<string[]>;
 }): Promise<HotspotParityResult> {
   const target = normalizeRelPath(input.targetHotspotPath);
   const readHead = async (rel: string): Promise<string | null> => {
@@ -630,6 +636,36 @@ export async function verifyHotspotParityImpl(input: {
     );
   }
   const ok = problems.length === 0;
+  let symbolMigrationMap: Array<{ symbol: string; targetFile: string }> | undefined;
+  let newModuleFiles: string[] | undefined;
+  if (ok && input.listChangedFiles) {
+    try {
+      const dir = posix.dirname(target);
+      const candidates = (await input.listChangedFiles())
+        .map((f) => normalizeRelPath(f))
+        .filter((f): f is string => Boolean(f))
+        .filter((f) => /\.tsx?$/.test(f) && f !== target && posix.dirname(f) === dir)
+        .sort();
+      const newFiles: string[] = [];
+      const located = new Map<string, string>();
+      for (const rel of candidates) {
+        const content = await readHead(rel);
+        if (content === null) continue;
+        if ((await input.readBase(rel)) === null) newFiles.push(rel);
+        const own = new Set(extractModuleExports(content).names);
+        for (const name of baseNames) {
+          if (own.has(name) && !located.has(name)) located.set(name, rel);
+        }
+      }
+      newModuleFiles = newFiles;
+      symbolMigrationMap = Array.from(located, ([symbol, targetFile]) => ({ symbol, targetFile }))
+        .sort((a, b) => a.symbol.localeCompare(b.symbol))
+        .slice(0, MAX_MIGRATION_ENTRIES);
+    } catch {
+      symbolMigrationMap = undefined;
+      newModuleFiles = undefined;
+    }
+  }
   const stats = `lines ${linesBefore} -> ${linesAfter} (max ${input.maxLinesAfter}), exports preserved ${baseNames.size - missingExports.length}/${baseNames.size}`;
   return {
     ok,
@@ -637,6 +673,8 @@ export async function verifyHotspotParityImpl(input: {
     linesAfter,
     missingExports,
     summary: ok ? `Hotspot parity OK: ${stats}.` : `${problems.join(" ")} [${stats}]`,
+    ...(symbolMigrationMap ? { symbolMigrationMap } : {}),
+    ...(newModuleFiles ? { newModuleFiles } : {}),
   };
 }
 

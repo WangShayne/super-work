@@ -234,9 +234,21 @@ async function runDoctor(ctx: CommandContext): Promise<number> {
     () => client.runDoctor(fix),
     stdout,
   );
+  let playbookPrune: Awaited<ReturnType<typeof client.pruneNoisyPlaybooks>> | undefined;
+  if (flags["prune-playbooks"]) {
+    playbookPrune = await withAutoStart(
+      baseUrl,
+      autoStart,
+      () => client.pruneNoisyPlaybooks({ mode: "disable" }),
+      stdout,
+    );
+  }
   if (asJson) {
-    stdout(JSON.stringify(report, null, 2));
+    stdout(JSON.stringify(playbookPrune ? { ...report, playbookPrune } : report, null, 2));
   } else {
+    if (playbookPrune) {
+      stdout(`Playbook hygiene: disabled ${playbookPrune.affectedIds.length} noisy rule(s)`);
+    }
     stdout(
       `System Doctor: healthy=${report.healthy} fixesApplied=${report.fixesApplied} checkedAt=${report.checkedAt}`,
     );

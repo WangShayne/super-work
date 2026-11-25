@@ -1002,9 +1002,31 @@ export interface ConflictSemanticContext {
   resolutionSummary?: string;
 }
 
+export interface PlaybookHygieneReport {
+  repoId?: string;
+  total: number;
+  healthy: number;
+  noisyCount: number;
+  noisyEntries: Array<{
+    id: string;
+    rule: string;
+    source: "human" | "auto_healed" | "repo_contract";
+    hitCount: number;
+    enabled: boolean;
+    reasons: string[];
+  }>;
+}
+
+export interface PlaybookHygienePruneResult {
+  audited: PlaybookHygieneReport;
+  affectedIds: string[];
+  mode: "disable" | "delete";
+  dryRun: boolean;
+}
+
 export interface DoctorCheckItem {
   id: string;
-  category: "sqlite" | "worktree" | "preview" | "git_ref" | "code";
+  category: "sqlite" | "worktree" | "preview" | "git_ref" | "code" | "playbook";
   status: "ok" | "warn" | "error";
   title: string;
   detail: string;
@@ -1369,6 +1391,7 @@ export type FlightEventKind =
   | "reload_completed"
   | "canary_rolled_back"
   | "scoped_gate_run"
+  | "gate_reused"
   | "watchdog_switch"
   | "milestone_ready"
   | "milestone_released"
@@ -1431,6 +1454,8 @@ export interface RunDigestReport {
     totalCostUsd: number;
   };
   gateSavings: { scopedRuns: number; totalSavedMs: number };
+  gateReuse?: { reusedRuns: number; totalSavedMs: number };
+  resilience?: { engineTrips: number; spilloverQuarantines: number };
   selfHost: {
     canaryPassed: number;
     reloadsCompleted: number;
@@ -1479,6 +1504,7 @@ export interface Milestone {
   digestSummary?: string;
   releasedCommitSha?: string;
   releasedTag?: string;
+  githubReleaseUrl?: string;
   createdAt: string;
   updatedAt: string;
 }

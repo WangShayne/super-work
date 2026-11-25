@@ -121,7 +121,7 @@ export function formatTranscriptLines(rawJsonl: string, limit = 40): string[] {
 }
 
 export function printHelp(stdout: (line: string) => void): void {
-  stdout(`super-work v1.5.0 CLI
+  stdout(`super-work v1.6.0 CLI
 
 Usage:
   super-work up [-d|--detach] [--host 127.0.0.1] [--port 4318] [--data-dir path] [--token <token>]
@@ -144,10 +144,10 @@ Usage:
   super-work epic <title> [-d|--desc <text>] [--repo <id>] [--template fast|standard|strict] [--tdd]
                   [--engine auto|...] [--preview-only] [--per-subtask] [--wait] [--auto-start] [--json]
   super-work campaign [list | get <id> | create <name> -d <prompt> --metric <cmd> --target <num> [--direction increase|decrease] [--unit <u>] [--regex <re>] [--delivery-mode staging_branch|per_wave_merge] [--max-iter 5] [--budget 5] [--paths <csv>] [--start] | start <id> [-m <note>] | pause <id> [-m <reason>] | deliver <id> [--action local_merge|push_and_create_pr] | delete <id>] [--repo <id>] [--auto-start] [--json]
-  super-work milestone [list | create --name <n> [--version <v>] [--repo <id>] [--template fast|standard|strict] [--engine <e>] [--budget <usd>] [--integration direct_main|milestone_branch] [--route auto|single_ticket] <req...> | show <id> | release <id> [--bump] [--tag] [--push] [--squash] [-m <commit message>]] [--auto-start] [--json]
+  super-work milestone [list | create --name <n> [--version <v>] [--repo <id>] [--template fast|standard|strict] [--engine <e>] [--budget <usd>] [--integration direct_main|milestone_branch] [--route auto|single_ticket] <req...> | show <id> | release <id> [--bump] [--tag] [--push] [--squash] [--github-release] [-m <commit message>]] [--auto-start] [--json]
   super-work train [list | flush | eject <entryId> [-m <reason>]] [--repo <id>] [--auto-start] [--json]
   super-work blueprints [--repo <id>] [--auto-start] [--json]
-  super-work doctor [--fix] [--auto-start] [--json]
+  super-work doctor [--fix] [--prune-playbooks] [--auto-start] [--json]
   super-work engines [status | reset <engine> | probe [engine]] [--auto-start] [--json]
   super-work digest [--repo <id>] [--hours <n>] [--markdown] [--json] [--auto-start]
   super-work backup [list | create | restore <backupId> [--force]] [--auto-start] [--json]
@@ -163,7 +163,7 @@ Usage:
   super-work preview [list | start <ticketId> [--candidate <candId>] | stop <previewId>] [--repo <id>] [--json]
   super-work routine [list | add <name> -d <prompt> [--cron <expr> | --every <min>] [--window HH:MM-HH:MM] [--paths <csv>] [--budget <usd>] | run <id> | toggle <id> | runs [--routine <id>] | delete <id>]
   super-work casebook [list | search <query>] [--repo <id>] [--auto-start] [--json]
-  super-work playbook [list | add <rule> [--paths <csv>] [--pin] | toggle <entryId> | delete <entryId> | prune | sync [--export]] [--repo <id>] [--auto-start] [--json]
+  super-work playbook [list | add <rule> [--paths <csv>] [--pin] | toggle <entryId> | delete <entryId> | audit | prune [--delete] | sync [--export]] [--repo <id>] [--auto-start] [--json]
   super-work logs <ticketId> [-f|--follow] [--auto-start] [--json]
   super-work watch [--repo <id>] [--ticket <id>] [--timeout-ms <ms>] [--auto-start] [--json]
   super-work revert <ticketId> [--auto-start] [--json]

@@ -15,7 +15,7 @@ import { nowIso } from "../utils.ts";
 import type { KernelCoordinatorContext } from "./context.ts";
 import { failCampaignWaveTicket, mergeWaveToTargetStagingBranch } from "./stage-delivery-helpers.ts";
 import { collectTrippedEngines } from "./stage-engine-helpers.ts";
-import { runRepoVerificationGateOp } from "./stage-verification-helpers.ts";
+import { canReuseImplementGate, runRepoVerificationGateOp } from "./stage-verification-helpers.ts";
 import { SpanRecorder } from "./span-recorder.ts";
 
 export async function handleRebaseStageOp(
@@ -318,13 +318,40 @@ export async function handleRebaseStageOp(
       costUsd: ticket.costUsd + resolveCostUsd,
       conflictResolutionCount: (ticket.conflictResolutionCount ?? 0) + 1,
       conflictContext: attemptConflictCtx,
+      inlineMemory: { ...ticket.inlineMemory, lastFullVerification: undefined },
     };
   }
 
-  const gate = await runRepoVerificationGateOp(ctx, workingTicket, repo, stageRun, worktreePath, {
-    isFinalDeliveryGate: !parentEpic,
-  });
-  spans.addExisting(gate.spans);
+  const reusable =
+    rebaseRes.ok && !autoResolvedConflict
+      ? await canReuseImplementGate(ctx, ticket, repo, worktreePath, effectiveBaseBranch)
+      : undefined;
+  let gateReused = false;
+  let gate: Awaited<ReturnType<typeof runRepoVerificationGateOp>>;
+  if (reusable) {
+    gateReused = true;
+    const reuseSpan = spans.start(
+      "static_verify",
+      "Reused full implement gate (fast-forward tree parity)",
+    );
+    spans.end(reuseSpan, "ok");
+    await ctx
+      .recordFlightEvent?.({
+        repoId: repo.id,
+        ticketId: ticket.id,
+        kind: "gate_reused",
+        summary: `Reused full implement gate at rebase (fast-forward tree parity onto ${effectiveBaseBranch})`,
+        savedMs: reusable.durationMs ?? 90_000,
+        metadata: { stage: "rebase", treeSha: reusable.treeSha, baseHeadSha: reusable.baseHeadSha },
+      })
+      ?.catch(() => {});
+    gate = { passed: true, artifacts: [] };
+  } else {
+    gate = await runRepoVerificationGateOp(ctx, workingTicket, repo, stageRun, worktreePath, {
+      isFinalDeliveryGate: !parentEpic,
+    });
+    spans.addExisting(gate.spans);
+  }
   if (!gate.passed) {
     if (autoResolvedConflict && preConflictCp && ctx.workspace.restoreWorktreeCheckpoint) {
       await ctx.workspace
@@ -426,7 +453,9 @@ export async function handleRebaseStageOp(
     completedAt: nowIso(),
     summary: autoResolvedConflict
       ? `3-way conflict auto-resolved onto ${effectiveBaseBranch}${gate.result?.summary ? `; ${gate.result.summary}` : ""}`
-      : gate.artifacts.length > 0
+      : gateReused
+        ? `Rebased cleanly onto ${effectiveBaseBranch}; Reused passing full implement verification (fast-forward tree parity)`
+        : gate.artifacts.length > 0
         ? `Rebased cleanly onto ${effectiveBaseBranch}; ${gate.result?.summary ?? "verification passed"}`
         : `Rebased cleanly onto ${effectiveBaseBranch}`,
   };

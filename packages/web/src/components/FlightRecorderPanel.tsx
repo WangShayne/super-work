@@ -23,6 +23,7 @@ const KIND_STYLES: Record<FlightEventKind, string> = {
   reload_completed: "bg-sky-500/15 text-sky-300",
   canary_rolled_back: "bg-rose-500/15 text-rose-300",
   scoped_gate_run: "bg-indigo-500/15 text-indigo-300",
+  gate_reused: "bg-cyan-500/15 text-cyan-300",
   watchdog_switch: "bg-amber-500/15 text-amber-300",
   milestone_ready: "bg-zinc-500/15 text-zinc-300",
   milestone_released: "bg-zinc-500/15 text-zinc-300",
@@ -179,11 +180,23 @@ export default function FlightRecorderPanel({ repoId }: FlightRecorderPanelProps
                 <Timer className="w-4 h-4 text-indigo-400" />
               </div>
               <div className="text-2xl font-semibold font-mono text-zinc-100">
-                {formatSaved(digest.gateSavings.totalSavedMs)}
+                {formatSaved(digest.gateSavings.totalSavedMs + (digest.gateReuse?.totalSavedMs ?? 0))}
               </div>
               <div className="text-[11px] font-mono text-zinc-500">
-                {digest.gateSavings.scopedRuns} {t("flight.kpi.scopedRunsSuffix")}
+                {digest.gateSavings.scopedRuns} {t("flight.kpi.scopedRunsSuffix")} (
+                {formatSaved(digest.gateSavings.totalSavedMs)}) · {digest.gateReuse?.reusedRuns ?? 0}{" "}
+                {t("flight.kpi.reusedRunsSuffix")} ({formatSaved(digest.gateReuse?.totalSavedMs ?? 0)})
               </div>
+            </div>
+            <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 space-y-2">
+              <div className="flex items-center justify-between text-xs text-zinc-400">
+                <span>{t("flight.kpi.resilience")}</span>
+                <ShieldAlert className="w-4 h-4 text-rose-400" />
+              </div>
+              <div className="text-2xl font-semibold font-mono text-zinc-100">
+                {digest.resilience?.engineTrips ?? 0} / {digest.resilience?.spilloverQuarantines ?? 0}
+              </div>
+              <div className="text-[11px] font-mono text-zinc-500">{t("flight.kpi.resilienceHint")}</div>
             </div>
             <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 space-y-2">
               <div className="flex items-center justify-between text-xs text-zinc-400">

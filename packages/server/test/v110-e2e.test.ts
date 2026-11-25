@@ -250,7 +250,7 @@ describe("v1.1.0 End-to-End Capabilities (A.1 Probes + A.2 Chief & Batch Inbox +
       // 5. MCP (GET /api/mcp + 23 tools + tools/call ask_chief)
       const mcpInfoRes = await fetch(`${baseUrl}/api/mcp`);
       expect(mcpInfoRes.status).toBe(200);
-      expect(((await mcpInfoRes.json()) as { version: string }).version).toBe("1.5.0");
+      expect(((await mcpInfoRes.json()) as { version: string }).version).toBe("1.6.0");
 
       const toolsListRes = await fetch(`${baseUrl}/api/mcp`, {
         method: "POST",
@@ -260,7 +260,7 @@ describe("v1.1.0 End-to-End Capabilities (A.1 Probes + A.2 Chief & Batch Inbox +
       const toolsListJson = (await toolsListRes.json()) as {
         result: { tools: Array<{ name: string }> };
       };
-      expect(toolsListJson.result.tools).toHaveLength(26);
+      expect(toolsListJson.result.tools).toHaveLength(27);
       expect(toolsListJson.result.tools.some((t) => t.name === "steer_ticket")).toBe(true);
       expect(toolsListJson.result.tools.some((t) => t.name === "manage_evals")).toBe(true);
 

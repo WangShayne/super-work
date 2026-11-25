@@ -45,6 +45,7 @@ export interface McpToolHost {
   manageMilestones?(args: Record<string, unknown>): Promise<unknown>;
   getRunDigest?(args: Record<string, unknown>): Promise<unknown>;
   manageEngineHealth?(args: Record<string, unknown>): Promise<unknown>;
+  managePlaybookHygiene?(args: Record<string, unknown>): Promise<unknown>;
 }
 
 export const MCP_PROTOCOL_VERSIONS = ["2025-03-26", "2024-11-05"] as const;
@@ -485,6 +486,10 @@ export const MCP_TOOL_DEFINITIONS = [
         preferredRoute: { type: "string", enum: ["auto", "single_ticket"] },
         squashReleaseCommit: { type: "boolean" },
         releaseCommitMessage: { type: "string" },
+        createGithubRelease: {
+          type: "boolean",
+          description: "Create a GitHub Release via gh (requires createTag and pushRemote).",
+        },
       },
       required: ["action"],
     },
@@ -512,6 +517,21 @@ export const MCP_TOOL_DEFINITIONS = [
         repoId: { type: "string" },
         hours: { type: "number" },
       },
+    },
+  },
+  {
+    name: "manage_playbook_hygiene",
+    description:
+      "Audit the Playbook for one-off approval / ticket-run noise, or prune (disable by default, optionally delete) noisy rules. Supports dryRun.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["audit", "prune"] },
+        repoId: { type: "string" },
+        mode: { type: "string", enum: ["disable", "delete"] },
+        dryRun: { type: "boolean" },
+      },
+      required: ["action"],
     },
   },
 ] as const;
@@ -598,7 +618,7 @@ async function handleSingleMcpRequest(
             },
             serverInfo: {
               name: "super-work",
-              version: "1.5.0",
+              version: "1.6.0",
             },
           },
         };
@@ -731,6 +751,12 @@ async function handleSingleMcpRequest(
                 throw new Error("manage_engine_health is not implemented on this MCP host");
               }
               result = await host.manageEngineHealth(args);
+              break;
+            case "manage_playbook_hygiene":
+              if (!host.managePlaybookHygiene) {
+                throw new Error("manage_playbook_hygiene is not implemented on this MCP host");
+              }
+              result = await host.managePlaybookHygiene(args);
               break;
             case "get_run_digest":
               if (!host.getRunDigest) {

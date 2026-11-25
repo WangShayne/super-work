@@ -241,7 +241,7 @@ describe("v1.5.0 Wave 3 End-to-End (milestone_branch staging, squash release, en
     }
   }, 60_000);
 
-  it("exposes engine health REST routes and MCP 1.5.0 with 26 tools", async () => {
+  it("exposes engine health REST routes and MCP 1.6.0 with 27 tools", async () => {
     const dir = await mkdtemp(join(tmpdir(), "sw-v150-e2e-mcp-"));
     tempDirs.push(dir);
     const store = new SqliteStateStore(join(dir, "state.db"));
@@ -275,8 +275,8 @@ describe("v1.5.0 Wave 3 End-to-End (milestone_branch staging, squash release, en
       expect(resetRes.status).toBe(200);
 
       const mcpInfo = (await (await fetch(`${baseUrl}/api/mcp`)).json()) as { version: string };
-      expect(mcpInfo.version).toBe("1.5.0");
-      expect(MCP_TOOL_DEFINITIONS).toHaveLength(26);
+      expect(mcpInfo.version).toBe("1.6.0");
+      expect(MCP_TOOL_DEFINITIONS).toHaveLength(27);
 
       const rpc = async (method: string, params?: Record<string, unknown>) =>
         (await (
@@ -293,10 +293,10 @@ describe("v1.5.0 Wave 3 End-to-End (milestone_branch staging, squash release, en
           };
         };
       expect((await rpc("initialize", { protocolVersion: "2025-03-26" })).result.serverInfo?.version).toBe(
-        "1.5.0",
+        "1.6.0",
       );
       const tools = (await rpc("tools/list")).result.tools ?? [];
-      expect(tools).toHaveLength(26);
+      expect(tools).toHaveLength(27);
       expect(tools.some((t) => t.name === "manage_engine_health")).toBe(true);
       const called = await rpc("tools/call", {
         name: "manage_engine_health",

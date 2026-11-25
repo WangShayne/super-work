@@ -264,7 +264,7 @@ async function runMilestone(ctx: CommandContext): Promise<number> {
   if (subCmd === "release") {
     const id = positionals[2];
     if (!id) {
-      stderr("Error: milestone id is required. Usage: super-work milestone release <id> [--bump] [--tag] [--push]");
+      stderr("Error: milestone id is required. Usage: super-work milestone release <id> [--bump] [--tag] [--push] [--squash] [--github-release]");
       return 1;
     }
     const { milestone } = await withAutoStart(
@@ -276,6 +276,7 @@ async function runMilestone(ctx: CommandContext): Promise<number> {
           createTag: Boolean(flags.tag),
           pushRemote: Boolean(flags.push),
           squashReleaseCommit: Boolean(flags.squash),
+          createGithubRelease: Boolean(flags["github-release"]),
           releaseCommitMessage: getStringFlag(flags, "m") ?? getStringFlag(flags, "message"),
         }),
       stdout,
@@ -283,7 +284,7 @@ async function runMilestone(ctx: CommandContext): Promise<number> {
     stdout(
       asJson
         ? JSON.stringify({ milestone }, null, 2)
-        : `Released ${fmt(milestone)}${milestone.releasedTag ? ` tag=${milestone.releasedTag}` : ""}${milestone.releasedCommitSha ? ` commit=${milestone.releasedCommitSha.slice(0, 8)}` : ""}`,
+        : `Released ${fmt(milestone)}${milestone.releasedTag ? ` tag=${milestone.releasedTag}` : ""}${milestone.releasedCommitSha ? ` commit=${milestone.releasedCommitSha.slice(0, 8)}` : ""}${milestone.githubReleaseUrl ? ` release=${milestone.githubReleaseUrl}` : ""}`,
     );
     return 0;
   }

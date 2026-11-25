@@ -69,6 +69,7 @@ export function registerMilestoneRoutes(ctx: ServerRouteContext): void {
       pushRemote?: boolean;
       squashReleaseCommit?: boolean;
       releaseCommitMessage?: string;
+      createGithubRelease?: boolean;
     };
     const id = c.req.param("id");
     const existing = await kernel.getMilestone(id);
@@ -79,6 +80,7 @@ export function registerMilestoneRoutes(ctx: ServerRouteContext): void {
         createTag: body.createTag === true,
         pushRemote: body.pushRemote === true,
         squashReleaseCommit: body.squashReleaseCommit === true,
+        createGithubRelease: body.createGithubRelease === true,
         releaseCommitMessage:
           typeof body.releaseCommitMessage === "string" ? body.releaseCommitMessage : undefined,
       });

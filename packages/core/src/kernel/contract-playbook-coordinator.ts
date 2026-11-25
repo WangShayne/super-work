@@ -9,6 +9,7 @@ import {
   normalizePlaybookRuleText,
   playbookDedupeKey,
 } from "../playbook.ts";
+import { auditPlaybookEntries, type PlaybookHygieneReport } from "../playbook-hygiene.ts";
 import type { WorkspaceProvider } from "../ports.ts";
 import type {
   CasebookEntry,
@@ -315,6 +316,64 @@ export async function prunePlaybookEntriesOp(
     }
   }
   return { prunedIds, keptCount };
+}
+
+async function listPlaybookEntriesForScope(
+  ctx: KernelCoordinatorContext,
+  repoId?: string,
+): Promise<PlaybookEntry[]> {
+  if (repoId) {
+    const repo = await ctx.stateStore.getRepo(repoId);
+    if (!repo) throw new Error(`Repository not found: ${repoId}`);
+    return ctx.stateStore.listPlaybookEntries(repoId);
+  }
+  const repos = await ctx.stateStore.listRepos();
+  const all: PlaybookEntry[] = [];
+  for (const r of repos) all.push(...(await ctx.stateStore.listPlaybookEntries(r.id)));
+  return all;
+}
+
+export async function auditPlaybookHygieneOp(
+  ctx: KernelCoordinatorContext,
+  repoId?: string,
+): Promise<PlaybookHygieneReport> {
+  return auditPlaybookEntries(await listPlaybookEntriesForScope(ctx, repoId), repoId);
+}
+
+export async function pruneNoisyPlaybooksOp(
+  ctx: KernelCoordinatorContext,
+  repoId?: string,
+  options?: { dryRun?: boolean; mode?: "disable" | "delete" },
+): Promise<{
+  audited: PlaybookHygieneReport;
+  affectedIds: string[];
+  mode: "disable" | "delete";
+  dryRun: boolean;
+}> {
+  const mode = options?.mode === "delete" ? "delete" : "disable";
+  const dryRun = options?.dryRun === true;
+  const entries = await listPlaybookEntriesForScope(ctx, repoId);
+  const audited = auditPlaybookEntries(entries, repoId);
+  const byId = new Map(entries.map((e) => [e.id, e]));
+  const affectedIds: string[] = [];
+  for (const noisy of audited.noisyEntries) {
+    const entry = byId.get(noisy.id);
+    if (!entry) continue;
+    // In disable mode, already-disabled noisy entries need no further change.
+    if (mode === "disable" && !entry.enabled && entry.suspect) continue;
+    affectedIds.push(entry.id);
+    if (dryRun) continue;
+    const ts = nowIso();
+    if (mode === "delete") {
+      await ctx.stateStore.deletePlaybookEntry(entry.id);
+      ctx.emitEvent({ type: "playbook_updated", repoId: entry.repoId, deletedId: entry.id, timestamp: ts });
+    } else {
+      const updated: PlaybookEntry = { ...entry, enabled: false, suspect: true, updatedAt: ts };
+      await ctx.stateStore.savePlaybookEntry(updated);
+      ctx.emitEvent({ type: "playbook_updated", repoId: entry.repoId, entry: updated, timestamp: ts });
+    }
+  }
+  return { audited, affectedIds, mode, dryRun };
 }
 
 export async function maybeDistillClosedLoopLessonOp(

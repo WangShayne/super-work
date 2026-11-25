@@ -54,7 +54,11 @@ export function buildClaudeCliArgs(input: WorkerTurnInput): string[] {
     args.push("--resume", input.nativeSessionId);
   }
 
-  args.push(input.prompt);
+  args.push(
+    input.stage === "plan"
+      ? `${input.prompt}\n\nPLAN OUTPUT CONTRACT: Do NOT invoke Write or create files such as ~/.claude/plans/*.md. Output the full structured plan directly in your response text.`
+      : input.prompt,
+  );
   return args;
 }
 

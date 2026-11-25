@@ -116,6 +116,12 @@ bun run setup -- --auto
 4. Released milestones move to the collapsible **Released History** section (version, release commit SHA, EN/ZH notes).
 5. Engine health is available via `GET /api/system/engines` and MCP `manage_engine_health` (`list|reset|probe`).
 
+### 7. Playbook Hygiene & Optional GitHub Release (`v1.6.0`)
+1. Inbox notes are **no longer saved to the Playbook by default**. Pass `saveToPlaybook: true` (REST) to opt in; one-off notes such as "human approved continuation" or ticket ids are still skipped.
+2. Audit: `super-work playbook audit` (REST `GET /api/playbooks/hygiene`, MCP `manage_playbook_hygiene {action:"audit"}`). Clean up: `super-work playbook prune` (disables noisy rules; add `--delete` to remove them) or `super-work doctor --prune-playbooks`. In the Web **Doctor** tab use the **Playbook Hygiene** card's *Disable Noisy Rules* button. REST prune accepts `{ repoId?, dryRun?, mode? }`.
+3. The Flight Recorder panel now shows combined gate savings (scoped + rebase reuse) and engine-trip / spillover-quarantine counters.
+4. Optional GitHub Release: `super-work milestone release <id> --bump --tag --push --github-release` (REST `createGithubRelease: true`; Web checkbox is enabled only when *tag* and *push* are ticked). Requires a milestone target version and an authenticated `gh`; invalid combinations are rejected before git is touched. Off by default.
+
 ## 4. Concurrency Best Practices & FAQ
 
 1. **How do multiple Workers run truly in parallel without blocking each other?**

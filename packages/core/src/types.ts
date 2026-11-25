@@ -102,6 +102,16 @@ export interface ReviewEvidencePacket {
   gateCommands: string[];
   gateDurationMs?: number;
   gateSummary: string;
+  refactorParity?: {
+    targetFile: string;
+    lineCountBefore?: number;
+    lineCountAfter: number;
+    maxLines: number;
+    exportsPreserved: boolean;
+    migratedSymbolsCount: number;
+    newModuleFiles: string[];
+    symbolMigrationSummary?: string;
+  };
 }
 
 export interface RefactorGuardConfig {
@@ -553,7 +563,7 @@ export interface ConflictSemanticContext {
 
 export interface DoctorCheckItem {
   id: string;
-  category: "sqlite" | "worktree" | "preview" | "git_ref" | "code";
+  category: "sqlite" | "worktree" | "preview" | "git_ref" | "code" | "playbook";
   status: "ok" | "warn" | "error";
   title: string;
   detail: string;
@@ -709,10 +719,20 @@ export interface ThreadUpdate {
   createdAt: string;
 }
 
+export interface LastFullVerificationSnapshot {
+  treeSha: string;
+  baseHeadSha: string;
+  commands: string[];
+  durationMs?: number;
+  stageRunId: string;
+  verifiedAt: string;
+}
+
 export interface InlineMemory {
   goal: string;
   acceptanceCriteria: string[];
   planSummary?: string;
+  lastFullVerification?: LastFullVerificationSnapshot;
   stageNotes: InlineStageNote[];
   threadUpdates: ThreadUpdate[];
   activeHint?: string;
@@ -1719,6 +1739,7 @@ export type FlightEventKind =
   | "reload_completed"
   | "canary_rolled_back"
   | "scoped_gate_run"
+  | "gate_reused"
   | "watchdog_switch"
   | "milestone_ready"
   | "milestone_released"
@@ -1760,6 +1781,10 @@ export interface RunDigestReport {
     totalCostUsd: number;
   };
   gateSavings: { scopedRuns: number; totalSavedMs: number };
+  /** Rebase-stage gate reuse (v1.6.0): `gate_reused` flight events. */
+  gateReuse?: { reusedRuns: number; totalSavedMs: number };
+  /** Engine/spillover resilience counters (v1.6.0). */
+  resilience?: { engineTrips: number; spilloverQuarantines: number };
   selfHost: {
     canaryPassed: number;
     reloadsCompleted: number;
@@ -1810,6 +1835,8 @@ export interface Milestone {
   digestSummary?: string;
   releasedCommitSha?: string;
   releasedTag?: string;
+  /** Transient (not persisted): set on the release response when a GitHub release was created. */
+  githubReleaseUrl?: string;
   createdAt: string;
   updatedAt: string;
 }

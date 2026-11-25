@@ -19,6 +19,7 @@ export * from "./webhooks.ts";
 export * from "./mcp-protocol.ts";
 export * from "./memory.ts";
 export * from "./playbook.ts";
+export * from "./playbook-hygiene.ts";
 export * from "./review.ts";
 export * from "./pipeline.ts";
 export * from "./watchdog.ts";

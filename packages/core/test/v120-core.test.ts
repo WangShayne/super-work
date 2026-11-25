@@ -195,7 +195,7 @@ describe("v1.2.0 Core Logic (Campaigns, MergeTrain, Immutable super-work.json, M
   });
 
   it("MCP: exposes 23 tools including manage_campaigns & manage_merge_train and advertises 1.3.0", async () => {
-    expect(MCP_TOOL_DEFINITIONS).toHaveLength(26);
+    expect(MCP_TOOL_DEFINITIONS).toHaveLength(27);
     const names = MCP_TOOL_DEFINITIONS.map((t) => t.name);
     expect(names).toContain("manage_campaigns");
     expect(names).toContain("manage_merge_train");
@@ -233,7 +233,7 @@ describe("v1.2.0 Core Logic (Campaigns, MergeTrain, Immutable super-work.json, M
       { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
       stubHost,
     )) as McpJsonRpcResponse;
-    expect((initRes.result as { serverInfo: { version: string } }).serverInfo.version).toBe("1.5.0");
+    expect((initRes.result as { serverInfo: { version: string } }).serverInfo.version).toBe("1.6.0");
 
     const cRes = (await handleMcpJsonRpcMessage(
       {

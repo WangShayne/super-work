@@ -37,6 +37,7 @@ import type {
   RestoreCheckpointInput,
   RoutineRun,
   RunDigestReport,
+  PlaybookHygieneReport,
   RoutineScheduleKind,
   RoutineSpec,
   SelfReloadState,
@@ -422,6 +423,27 @@ export class SuperWorkHttpClient {
     });
   }
 
+  auditPlaybookHygiene(repoId?: string): Promise<PlaybookHygieneReport> {
+    const qs = repoId ? `?repoId=${encodeURIComponent(repoId)}` : "";
+    return this.request(`/api/playbooks/hygiene${qs}`);
+  }
+
+  pruneNoisyPlaybooks(body: {
+    repoId?: string;
+    dryRun?: boolean;
+    mode?: "disable" | "delete";
+  }): Promise<{
+    audited: PlaybookHygieneReport;
+    affectedIds: string[];
+    mode: "disable" | "delete";
+    dryRun: boolean;
+  }> {
+    return this.request("/api/playbooks/hygiene/prune", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
   listCasebook(repoId: string, q?: string): Promise<{ entries: CasebookEntry[] }> {
     const qs = q ? `?q=${encodeURIComponent(q)}` : "";
     return this.request(`/api/repos/${encodeURIComponent(repoId)}/casebook${qs}`);
@@ -681,6 +703,7 @@ export class SuperWorkHttpClient {
       pushRemote?: boolean;
       squashReleaseCommit?: boolean;
       releaseCommitMessage?: string;
+      createGithubRelease?: boolean;
     },
   ): Promise<{ milestone: Milestone }> {
     return this.request<{ milestone: Milestone }>(

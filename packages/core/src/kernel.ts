@@ -1,11 +1,3 @@
-import { existsSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
-import { countDiffLines } from "./arena.ts";
-import { resolveRepoBlueprints } from "./blueprints.ts";
-import { runChiefOfStaffQuery } from "./chief.ts";
-import { selectRelevantCasesForContext } from "./casebook.ts";
-import { buildRunDigestReport } from "./digest.ts";
-import { buildHandoverDigest } from "./handover.ts";
 import {
   createCampaignOp,
   deleteCampaignOp,
@@ -22,6 +14,8 @@ import {
 import type { KernelCoordinatorContext } from "./kernel/context.ts";
 import {
   addOrUpdatePlaybookRuleOp,
+  auditPlaybookHygieneOp,
+  pruneNoisyPlaybooksOp,
   exportRepoContractOp,
   generateAndSaveHandoverDigestOp,
   maybeDistillClosedLoopLessonOp,
@@ -35,7 +29,6 @@ import {
   restoreSystemBackup as restoreSystemBackupOp,
   runSystemDoctor,
 } from "./kernel/doctor-backup-coordinator.ts";
-import { syncEpicStatusesOp } from "./kernel/epic-lifecycle-coordinator.ts";
 import { maybeEvaluateEpicReplanOp } from "./kernel/epic-replan-coordinator.ts";
 import {
   createEvalCaseFromTicket as createEvalCaseFromTicketOp,
@@ -67,12 +60,10 @@ import {
   triggerRoutineNowSpec,
   updateRoutineSpec,
 } from "./kernel/routine-coordinator.ts";
-import { handleSelfHostPostMergeOp, triggerManualSelfReloadOp } from "./kernel/self-host-coordinator.ts";
-import { runTicketStageOp } from "./kernel/stage-execution-coordinator.ts";
+import { triggerManualSelfReloadOp } from "./kernel/self-host-coordinator.ts";
 import { MemoryManager } from "./memory.ts";
 import { OutboxFatalError, OutboxProcessor } from "./outbox.ts";
-import { getFirstStage, getPipelineTemplate } from "./pipeline.ts";
-import { formatPlaybookContext, selectPlaybookRulesForContext } from "./playbook.ts";
+import type { PlaybookHygieneReport } from "./playbook-hygiene.ts";
 import type {
   ArtifactStore,
   ControlPlaneLLM,
@@ -88,15 +79,12 @@ import type {
   WorkerDriver,
   WorkspaceProvider,
 } from "./ports.ts";
-import { evaluateTicketRisk } from "./risk.ts";
 import { EventIntakeRouter, type IngestResult } from "./router.ts";
-import { applyClarificationAnswers, buildHeuristicSpecClarification } from "./spec-studio.ts";
 import type {
   BackupArchiveInfo,
   BackupRestoreResult,
   BatchResolveInboxInput,
   BatchResolveInboxResult,
-  CasebookEntry,
   ChiefAskInput,
   ChiefAskResult,
   CreateCampaignInput,
@@ -108,7 +96,6 @@ import type {
   FlightEvent,
   GoalCampaign,
   GoalCampaignWave,
-  HandoverDigest,
   ImportKnowledgeBundleResult,
   InboxItem,
   KernelEvent,
@@ -130,12 +117,10 @@ import type {
   RequirementIntakeResult,
   RestoreCheckpointInput,
   ReviewCommentStatus,
-  ReviewReport,
   RoutineRun,
   RoutineScheduleKind,
   RoutineSpec,
   SelfReloadState,
-  SmokeCheckResult,
   SpecClarificationInput,
   SpecClarificationResult,
   StageKind,
@@ -150,8 +135,39 @@ import type {
   WorkerEngineId,
   WorktreeGcResult,
 } from "./types.ts";
-import { isTerminalTicketStatus, newId, nowIso } from "./utils.ts";
+import { newId, nowIso } from "./utils.ts";
 import { DEFAULT_WATCHDOG_CONFIG, TwoTierWatchdog } from "./watchdog.ts";
+import {
+  cancelTicketOp,
+  captureTicketCheckpointOp,
+  clarifySpecOp,
+  enqueueDeliveryOutboxOp,
+  escalateTicketOp,
+  intakeRequirementOp,
+  onOutboxTicketDeliveredOp,
+  revertTicketDeliveryOp,
+  steerTicketOp,
+  triggerTicketDeliveryOp,
+} from "./kernel/kernel-ticket-ops.ts";
+import {
+  cleanupTicketWorktreeOp,
+  gcWorktreesOp,
+  getEffectiveBaseInfoOp,
+  getEffectiveDailyBudget,
+  hasUnfinishedDependenciesOp,
+  inspectWorktreesOp,
+  performTickOp,
+  recoverInterruptedRunsOp,
+  runUntilIdleOp,
+  startTicketPreviewOp,
+} from "./kernel/kernel-runtime-ops.ts";
+import {
+  analyzeRepoImpactOp,
+  askChiefOp,
+  buildEnrichedWorkerPromptOp,
+  getRunDigestOp,
+  listRepoBlueprintsOp,
+} from "./kernel/kernel-knowledge-ops.ts";
 
 export const DEFAULT_KERNEL_CONFIG: KernelConfig = {
   maxConcurrentWorkers: 4,
@@ -172,17 +188,6 @@ export interface SuperWorkKernelDeps {
   selfHostRunner?: SelfHostRunner;
   dataDir?: string;
   config?: Partial<KernelConfig>;
-}
-
-function utcTodayString(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function getEffectiveDailyBudget(repo: RepoConfig, todayDate: string): number | undefined {
-  if (repo.dailyBudgetOverrideDate === todayDate && repo.dailyBudgetOverrideUsd !== undefined) {
-    return repo.dailyBudgetOverrideUsd;
-  }
-  return repo.dailyBudgetUsd;
 }
 
 export class SuperWorkKernel {
@@ -284,98 +289,7 @@ export class SuperWorkKernel {
     repo: RepoConfig,
     entry: OutboxEntry,
   ): Promise<void> {
-    let currentTicket = deliveredTicket;
-    const payloadPrNumber =
-      typeof entry.resultPayload?.prNumber === "number" ? entry.resultPayload.prNumber : undefined;
-    const payloadPrUrl =
-      typeof entry.resultPayload?.prUrl === "string" ? entry.resultPayload.prUrl : undefined;
-    const payloadMergeSha =
-      entry.action === "local_merge" && typeof entry.resultPayload?.commitSha === "string"
-        ? entry.resultPayload.commitSha
-        : undefined;
-
-    if (payloadPrNumber || payloadPrUrl || payloadMergeSha) {
-      const prTs = nowIso();
-      currentTicket = {
-        ...currentTicket,
-        prNumber: payloadPrNumber ?? currentTicket.prNumber,
-        prUrl: payloadPrUrl ?? currentTicket.prUrl,
-        mergedCommitSha: payloadMergeSha ?? currentTicket.mergedCommitSha,
-        updatedAt: prTs,
-      };
-      await this.stateStore.saveTicket(currentTicket);
-      this.emitEvent({ type: "ticket_updated", ticket: currentTicket, timestamp: prTs });
-
-      if (repo.githubRepo && currentTicket.prNumber) {
-        const prThreadKey = `gh:${repo.githubRepo}:pr:${currentTicket.prNumber}`;
-        const existingPrThread = await this.stateStore.getThreadByKey(repo.id, prThreadKey);
-        await this.stateStore.upsertThread({
-          id: existingPrThread?.id ?? newId("thr"),
-          repoId: repo.id,
-          threadKey: prThreadKey,
-          subscribedTicketId: currentTicket.id,
-          metadata: {
-            ...(existingPrThread?.metadata ?? {}),
-            source: "github_pr",
-            prNumber: currentTicket.prNumber,
-            branchName: currentTicket.branchName,
-          },
-          createdAt: existingPrThread?.createdAt ?? prTs,
-          updatedAt: prTs,
-        });
-      }
-    }
-
-    if (!(currentTicket.barrierGroupId && currentTicket.handoverDigest)) {
-      currentTicket = await generateAndSaveHandoverDigestOp(
-        this.coordinatorCtx(),
-        currentTicket,
-        repo,
-      );
-    }
-    await recordDeliveredCasebookEntryOp(this.coordinatorCtx(), currentTicket);
-
-    if (currentTicket.routineId) {
-      const routine = await this.stateStore.getRoutine(currentTicket.routineId);
-      if (routine && routine.activeTicketId === currentTicket.id) {
-        const cleared: RoutineSpec = {
-          ...routine,
-          activeTicketId: undefined,
-          updatedAt: nowIso(),
-        };
-        await this.stateStore.saveRoutine(cleared);
-        this.emitEvent({
-          type: "routine_updated",
-          repoId: routine.repoId,
-          routine: cleared,
-          timestamp: cleared.updatedAt,
-        });
-      }
-    }
-
-    if (currentTicket.parentTicketId) {
-      await maybeEvaluateEpicReplanOp(this.coordinatorCtx(), currentTicket.parentTicketId, currentTicket);
-    }
-
-    if (
-      currentTicket.worktreePath &&
-      (repo.autoCleanupWorktree !== false || entry.action === "local_merge")
-    ) {
-      await this.cleanupTicketWorktree(currentTicket.id);
-    }
-
-    // Best-effort post_deliver lifecycle hook
-    await executeLifecycleHookOp(this.coordinatorCtx(), "post_deliver", currentTicket, repo, {
-      cwd: entry.action === "local_merge" ? repo.rootPath : currentTicket.worktreePath || repo.rootPath,
-    }).catch(() => {});
-
-    if (currentTicket.campaignId) {
-      await onCampaignTicketSettledOp(this.coordinatorCtx(), currentTicket, repo).catch(() => {});
-    }
-
-    await handleSelfHostPostMergeOp(this.coordinatorCtx(), currentTicket, repo, entry).catch(
-      () => {},
-    );
+    return onOutboxTicketDeliveredOp(this.coordinatorCtx(), () => this.coordinatorCtx(), deliveredTicket, repo, entry);
   }
 
   subscribe(listener: (event: KernelEvent) => void): () => void {
@@ -448,32 +362,7 @@ export class SuperWorkKernel {
   }
 
   async getRunDigest(options?: { repoId?: string; hours?: number }): Promise<RunDigestReport> {
-    const windowHours = options?.hours ?? 24;
-    const sinceIso =
-      windowHours > 0 ? new Date(Date.now() - windowHours * 3_600_000).toISOString() : undefined;
-    // Prefilter by the same window predicate the digest applies (ticket.updatedAt) so we only
-    // fetch stage runs for in-window tickets instead of the entire history.
-    const allTickets = await this.stateStore.listTickets(
-      options?.repoId ? { repoId: options.repoId } : undefined,
-    );
-    const tickets = sinceIso
-      ? allTickets.filter((t) => (t.updatedAt ?? t.createdAt) >= sinceIso)
-      : allTickets;
-    const stageRuns = (
-      await Promise.all(tickets.map((t) => this.stateStore.listStageRuns(t.id)))
-    ).flat();
-    const flightEvents = await this.listFlightEvents({
-      repoId: options?.repoId,
-      sinceIso,
-      limit: 500,
-    });
-    return buildRunDigestReport({
-      repoId: options?.repoId,
-      windowHours,
-      tickets,
-      stageRuns,
-      flightEvents,
-    });
+    return getRunDigestOp(this.coordinatorCtx(), options);
   }
 
   private coordinatorCtx(): KernelCoordinatorContext {
@@ -595,63 +484,7 @@ export class SuperWorkKernel {
   }
 
   async recoverInterruptedRuns(): Promise<{ recoveredTickets: number; requeuedOutbox: number }> {
-    const ts = nowIso();
-    const interruptedStatuses = new Set<Ticket["status"]>([
-      "planning",
-      "spec_testing",
-      "implementing",
-      "reviewing",
-      "rebasing",
-      "watchdog_intervention",
-    ]);
-    const allTickets = await this.stateStore.listTickets();
-    let recoveredTickets = 0;
-
-    for (const ticket of allTickets) {
-      if (!interruptedStatuses.has(ticket.status) || this.activeTicketRuns.has(ticket.id)) {
-        continue;
-      }
-
-      const stageRuns = await this.stateStore.listStageRuns(ticket.id);
-      const runningRuns = stageRuns.filter((r) => r.status === "running");
-
-      if (ticket.isEpic && ticket.status !== "rebasing" && runningRuns.length === 0) {
-        continue;
-      }
-
-      for (const run of runningRuns) {
-        await this.stateStore.saveStageRun({
-          ...run,
-          status: "aborted",
-          completedAt: ts,
-          summary: "Interrupted by daemon restart (recovered)",
-        });
-      }
-
-      const recoveryNote =
-        "Previous turn was interrupted by daemon restart. Inspect current git status/diff in the worktree first and continue from existing progress.";
-      const existingHint = ticket.inlineMemory.activeHint?.trim() ?? "";
-      const nextHint = existingHint.includes(recoveryNote)
-        ? existingHint
-        : [existingHint, recoveryNote].filter(Boolean).join("\n\n");
-
-      const recovered: Ticket = {
-        ...ticket,
-        status: "queued",
-        activeEngine: undefined,
-        inlineMemory: {
-          ...ticket.inlineMemory,
-          activeHint: nextHint,
-        },
-        updatedAt: ts,
-      };
-      await this.stateStore.saveTicket(recovered);
-      this.emitEvent({ type: "ticket_updated", ticket: recovered, timestamp: ts });
-      recoveredTickets += 1;
-    }
-
-    const requeuedOutbox = await this.stateStore.requeueInterruptedOutboxEntries(ts);
-    return { recoveredTickets, requeuedOutbox };
+    return recoverInterruptedRunsOp(this.coordinatorCtx());
   }
 
   async stop(): Promise<void> {
@@ -738,67 +571,7 @@ export class SuperWorkKernel {
   async intakeRequirement(
     input: RequirementIntakeInput,
   ): Promise<RequirementIntakeResult> {
-    const plan = await this.previewRequirementIntake(input);
-    if (input.previewOnly) {
-      return { route: plan.route, plan };
-    }
-
-    if (plan.route === "goal_campaign" && plan.campaignSpec) {
-      const cmpSpec = plan.campaignSpec;
-      const campaign = await this.createCampaign({
-        repoId: input.repoId,
-        name: cmpSpec.name,
-        goalPrompt: cmpSpec.goalPrompt,
-        metricCommand: cmpSpec.metricCommand,
-        metricRegex: cmpSpec.metricRegex,
-        metricUnit: cmpSpec.metricUnit,
-        direction: cmpSpec.direction,
-        targetValue: cmpSpec.targetValue,
-        deliveryMode: cmpSpec.deliveryMode,
-        allowedPaths: cmpSpec.allowedPaths,
-        template: input.template ?? "standard",
-        preferredEngine: input.preferredEngine,
-        maxIterations: cmpSpec.maxIterations,
-        maxTotalBudgetUsd: input.maxBudgetUsd ?? cmpSpec.maxTotalBudgetUsd,
-        autoStart: true,
-      });
-      return { route: "goal_campaign", plan, campaign };
-    }
-
-    if (plan.route === "epic_dag" && plan.epicPlan) {
-      const { epic, subtasks } = await this.createEpic({
-        repoId: input.repoId,
-        title: plan.title,
-        description: input.requirement.trim(),
-        template: input.template,
-        tddMode: input.tddMode,
-        epicDeliveryMode: plan.epicPlan.epicDeliveryMode,
-        releaseBarrier: plan.epicPlan.releaseBarrier,
-        preferredEngine: input.preferredEngine,
-        modelOverride: input.modelOverride,
-        effortOverride: input.effortOverride,
-        maxCostUsdPerSubtask: input.maxBudgetUsd,
-        subtasks: plan.epicPlan.subtasks,
-      });
-      return { route: "epic_dag", plan, epic, subtasks };
-    }
-
-    const single = plan.singleSpec!;
-    const ticket = await this.createDirectTicket({
-      repoId: input.repoId,
-      title: plan.title,
-      description: single.description,
-      template: input.template ?? single.template,
-      tddMode: input.tddMode ?? single.tddMode,
-      deliveryGatePolicy: input.deliveryGatePolicy,
-      allowedPaths: single.allowedPaths,
-      acceptanceCriteria: single.acceptanceCriteria,
-      preferredEngine: input.preferredEngine,
-      modelOverride: input.modelOverride,
-      effortOverride: input.effortOverride,
-      maxCostUsd: input.maxBudgetUsd,
-    });
-    return { route: "single_ticket", plan, ticket };
+    return intakeRequirementOp(this.coordinatorCtx(), input);
   }
 
   async syncRepoContract(repoId: string, force = false): Promise<RepoConfig | null> {
@@ -826,97 +599,7 @@ export class SuperWorkKernel {
   async revertTicketDelivery(
     ticketId: string,
   ): Promise<{ ticket: Ticket; revertCommitSha: string }> {
-    const ticket = await this.stateStore.getTicket(ticketId);
-    if (!ticket) {
-      throw new Error(`Ticket not found: ${ticketId}`);
-    }
-    if (ticket.revertedAt) {
-      throw new Error(
-        `Ticket ${ticketId} was already reverted (${ticket.revertCommitSha ?? ticket.revertedAt})`,
-      );
-    }
-    const repo = await this.stateStore.getRepo(ticket.repoId);
-    if (!repo) {
-      throw new Error(`Repository not found: ${ticket.repoId}`);
-    }
-
-    let commitSha = ticket.mergedCommitSha;
-    if (!commitSha) {
-      const entries = await this.stateStore.listOutboxEntries({ ticketId: ticket.id });
-      const mergedEntry = [...entries]
-        .reverse()
-        .find((e) => e.action === "local_merge" && e.status === "sent");
-      const shaFromEntry = mergedEntry?.resultPayload?.commitSha;
-      if (typeof shaFromEntry === "string" && shaFromEntry.trim()) {
-        commitSha = shaFromEntry.trim();
-      }
-    }
-
-    if (!commitSha) {
-      throw new Error(
-        `Ticket ${ticketId} has no recorded local merge commit SHA to revert.`,
-      );
-    }
-
-    const res = await this.workspace.revertMergedCommit({
-      rootRepoPath: repo.rootPath,
-      baseBranch: repo.baseBranch,
-      commitSha,
-    });
-    if (!res.ok || !res.revertCommitSha) {
-      const detail =
-        res.conflictFiles && res.conflictFiles.length > 0
-          ? `Revert conflicted on: ${res.conflictFiles.join(", ")}`
-          : res.error || "Git revert failed";
-      throw new Error(detail);
-    }
-
-    const ts = nowIso();
-    const updated: Ticket = {
-      ...ticket,
-      mergedCommitSha: commitSha,
-      revertedAt: ts,
-      revertCommitSha: res.revertCommitSha,
-      updatedAt: ts,
-    };
-    await this.stateStore.saveTicket(updated);
-    this.emitEvent({ type: "ticket_updated", ticket: updated, timestamp: ts });
-    await this.previewProvider?.stopPreviewsForTicket(ticket.id).catch(() => {});
-
-    const existingCase = await this.stateStore.getCasebookEntryByTicket(ticket.id);
-    if (existingCase && !existingCase.reverted) {
-      const flaggedCase: CasebookEntry = {
-        ...existingCase,
-        reverted: true,
-        updatedAt: ts,
-      };
-      await this.stateStore.saveCasebookEntry(flaggedCase);
-      this.emitEvent({
-        type: "casebook_updated",
-        repoId: updated.repoId,
-        entry: flaggedCase,
-        timestamp: ts,
-      });
-    }
-    const repoPlaybook = await this.stateStore.listPlaybookEntries(ticket.repoId);
-    for (const pb of repoPlaybook) {
-      if (pb.source === "auto_healed" && pb.sourceTicketId === ticket.id && !pb.suspect) {
-        const suspectEntry: PlaybookEntry = {
-          ...pb,
-          suspect: true,
-          updatedAt: ts,
-        };
-        await this.stateStore.savePlaybookEntry(suspectEntry);
-        this.emitEvent({
-          type: "playbook_updated",
-          repoId: ticket.repoId,
-          entry: suspectEntry,
-          timestamp: ts,
-        });
-      }
-    }
-
-    return { ticket: updated, revertCommitSha: res.revertCommitSha };
+    return revertTicketDeliveryOp(this.coordinatorCtx(), ticketId);
   }
 
   async sendThreadMessage(ticketId: string, message: string): Promise<Ticket> {
@@ -950,293 +633,23 @@ export class SuperWorkKernel {
   }
 
   async steerTicket(ticketId: string, input: SteerTicketInput): Promise<Ticket> {
-    const instruction = input.instruction?.trim();
-    if (!instruction) {
-      throw new Error("Live steer instruction is required.");
-    }
-    const existing = await this.stateStore.getTicket(ticketId);
-    if (!existing) {
-      throw new Error(`Ticket not found: ${ticketId}`);
-    }
-    if (isTerminalTicketStatus(existing.status)) {
-      throw new Error(`Cannot steer terminal ticket ${ticketId} (${existing.status}).`);
-    }
-
-    const activeCtrl = this.abortControllers.get(ticketId);
-    if (activeCtrl) {
-      this.pendingSteers.set(ticketId, {
-        instruction,
-        preferredEngine: input.preferredEngine,
-      });
-      activeCtrl.abort("live_steer");
-      const activeRun = this.activeTicketRuns.get(ticketId);
-      if (activeRun) {
-        await Promise.race([activeRun, new Promise((r) => setTimeout(r, 600))]).catch(() => {});
-      }
-      return (await this.stateStore.getTicket(ticketId)) ?? existing;
-    }
-
-    const ts = nowIso();
-    const overrideEngine =
-      input.preferredEngine && input.preferredEngine !== "auto"
-        ? input.preferredEngine
-        : existing.activeEngine;
-    const updated: Ticket = {
-      ...existing,
-      status: existing.status === "waiting_deps" ? "waiting_deps" : "queued",
-      pauseBeforeRun: false,
-      errorMessage: undefined,
-      steerCount: (existing.steerCount ?? 0) + 1,
-      preferredEngine: input.preferredEngine ?? existing.preferredEngine,
-      activeEngine: overrideEngine,
-      inlineMemory: {
-        ...existing.inlineMemory,
-        threadUpdates: [
-          ...existing.inlineMemory.threadUpdates,
-          {
-            triggerId: newId("str"),
-            message: `[Live Steer]: ${instruction}`,
-            createdAt: ts,
-          },
-        ],
-        activeHint: `[LIVE STEER]: ${instruction}`,
-      },
-      updatedAt: ts,
-    };
-    await this.stateStore.saveTicket(updated);
-    this.emitEvent({ type: "ticket_updated", ticket: updated, timestamp: ts });
-    return updated;
+    return steerTicketOp(this.coordinatorCtx(), ticketId, input);
   }
 
   async cancelTicket(ticketId: string, reason = "Cancelled by user"): Promise<Ticket> {
-    const ctrl = this.abortControllers.get(ticketId);
-    if (ctrl) {
-      ctrl.abort("cancelled_by_user");
-    }
-    const activeRun = this.activeTicketRuns.get(ticketId);
-    if (activeRun) {
-      await Promise.race([activeRun, new Promise((r) => setTimeout(r, 500))]).catch(() => {});
-    }
-    const ticket = await this.stateStore.getTicket(ticketId);
-    if (!ticket) throw new Error(`Ticket not found: ${ticketId}`);
-
-    const updated: Ticket = {
-      ...ticket,
-      status: "cancelled",
-      errorMessage: reason,
-      updatedAt: nowIso(),
-    };
-    await this.stateStore.saveTicket(updated);
-    this.emitEvent({ type: "ticket_updated", ticket: updated, timestamp: updated.updatedAt });
-    await this.previewProvider?.stopPreviewsForTicket(ticketId).catch(() => {});
-
-    const repo = await this.stateStore.getRepo(updated.repoId);
-    if (repo?.autoCleanupWorktree !== false && updated.worktreePath) {
-      return (await this.cleanupTicketWorktree(ticketId)) ?? updated;
-    }
-    if (repo && updated.campaignId) {
-      await onCampaignTicketSettledOp(this.coordinatorCtx(), updated, repo).catch(() => {});
-    }
-    return updated;
+    return cancelTicketOp(this.coordinatorCtx(), ticketId, reason);
   }
 
   async cleanupTicketWorktree(ticketId: string): Promise<Ticket | null> {
-    const ticket = await this.stateStore.getTicket(ticketId);
-    if (!ticket) return null;
-
-    if (!isTerminalTicketStatus(ticket.status) || this.activeTicketRuns.has(ticketId)) {
-      throw new Error(
-        `Cannot cleanup worktree for non-terminal ticket ${ticketId} (${ticket.status})`,
-      );
-    }
-
-    await this.previewProvider?.stopPreviewsForTicket(ticketId).catch(() => {});
-    const repo = await this.stateStore.getRepo(ticket.repoId);
-    if (ticket.worktreePath) {
-      await this.workspace.cleanupWorkspace(ticket.worktreePath, repo?.rootPath);
-    }
-    if (ticket.arenaCandidates) {
-      for (const cand of ticket.arenaCandidates) {
-        if (cand.worktreePath && cand.worktreePath !== ticket.worktreePath) {
-          await this.workspace.cleanupWorkspace(cand.worktreePath, repo?.rootPath).catch(() => {});
-        }
-      }
-    }
-
-    const ts = nowIso();
-    if (repo) {
-      await this.workspace.cleanupTicketCheckpoints?.(repo.rootPath, ticket.id).catch(() => {});
-      await this.stateStore.markCheckpointsCleaned(ticket.id, ts).catch(() => {});
-    }
-
-    const updated: Ticket = {
-      ...ticket,
-      worktreePath: undefined,
-      worktreeCleanedAt: ts,
-      updatedAt: ts,
-    };
-    await this.stateStore.saveTicket(updated);
-    this.emitEvent({ type: "ticket_updated", ticket: updated, timestamp: ts });
-    return updated;
+    return cleanupTicketWorktreeOp(this.coordinatorCtx(), ticketId);
   }
 
   async inspectWorktrees(repoId?: string): Promise<ManagedWorktreeItem[]> {
-    const [dirs, tickets, repos, previews] = await Promise.all([
-      this.workspace.listWorktreeDirs(),
-      this.stateStore.listTickets(),
-      this.stateStore.listRepos(),
-      this.previewProvider ? this.previewProvider.listPreviews(repoId) : Promise.resolve([]),
-    ]);
-    const previewByPath = new Map<string, PreviewSession>();
-    for (const p of previews) {
-      previewByPath.set(resolve(p.worktreePath), p);
-    }
-    const reposById = new Map(repos.map((r) => [r.id, r]));
-    const ticketsByPath = new Map<string, Ticket>();
-    const ticketsById = new Map<string, Ticket>();
-    for (const t of tickets) {
-      ticketsById.set(t.id, t);
-      if (t.worktreePath) {
-        ticketsByPath.set(resolve(t.worktreePath), t);
-      }
-      if (t.arenaCandidates) {
-        for (const cand of t.arenaCandidates) {
-          if (cand.worktreePath) {
-            ticketsByPath.set(resolve(cand.worktreePath), t);
-          }
-        }
-      }
-    }
-
-    const items: ManagedWorktreeItem[] = [];
-    for (const dir of dirs) {
-      const resolvedDir = resolve(dir);
-      const matched = ticketsByPath.get(resolvedDir) ?? ticketsById.get(basename(resolvedDir));
-      const activePreview = previewByPath.get(resolvedDir);
-      if (matched) {
-        const repo = reposById.get(matched.repoId);
-        const item: ManagedWorktreeItem = {
-          path: dir,
-          ticketId: matched.id,
-          ticketTitle: matched.title,
-          ticketStatus: matched.status,
-          repoId: matched.repoId,
-          repoName: repo?.name,
-          branchName: matched.branchName,
-          reclaimable:
-            isTerminalTicketStatus(matched.status) && !this.activeTicketRuns.has(matched.id),
-          isOrphan: false,
-          ...(activePreview ? { activePreview } : {}),
-        };
-        if (!repoId || item.repoId === repoId) {
-          items.push(item);
-        }
-      } else {
-        items.push({
-          path: dir,
-          reclaimable: true,
-          isOrphan: true,
-          ...(activePreview ? { activePreview } : {}),
-        });
-      }
-    }
-    return items;
+    return inspectWorktreesOp(this.coordinatorCtx(), repoId);
   }
 
   async clarifySpec(input: SpecClarificationInput): Promise<SpecClarificationResult> {
-    const repo =
-      (await this.syncRepoContract(input.repoId).catch(() => null)) ??
-      (await this.stateStore.getRepo(input.repoId));
-    if (!repo) {
-      throw new Error(`Repository not found: ${input.repoId}`);
-    }
-    const [repoStructure, playbookEntries, casebookEntries, probeContext] = await Promise.all([
-      this.workspace.getRepoStructureSummary
-        ? this.workspace.getRepoStructureSummary(repo.rootPath).catch(() => undefined)
-        : Promise.resolve(undefined),
-      this.stateStore.listPlaybookEntries(repo.id, { onlyEnabled: true }),
-      this.stateStore.listCasebookEntries(repo.id),
-      this.workspace.runRepoPreProbe
-        ? this.workspace
-            .runRepoPreProbe(
-              repo.rootPath,
-              `${input.title}\n${input.description}`,
-              repo.forbiddenPaths,
-            )
-            .catch(() => undefined)
-        : Promise.resolve(undefined),
-    ]);
-
-    const playbookText = formatPlaybookContext(playbookEntries, ["**"], 8, 1200);
-    const caseSelection = selectRelevantCasesForContext({
-      cases: casebookEntries,
-      targetPaths: ["**"],
-      queryText: `${input.title} ${input.description}`,
-    });
-    const caseText = caseSelection.formattedMarkdown;
-
-    let spec: SpecClarificationResult;
-    if (this.llm.clarifySpec) {
-      spec = await this.llm.clarifySpec({
-        repo,
-        title: input.title,
-        description: input.description,
-        defaultTemplate: input.template ?? repo.defaultTemplate,
-        repoStructure,
-        playbookRules: playbookText || undefined,
-        casebookContext: caseText || undefined,
-        conventions: repo.conventions,
-        probeContext,
-        probeExecutor: this.createRepoProbeExecutor(repo),
-      });
-      spec = {
-        ...spec,
-        matchedCaseTitles:
-          spec.matchedCaseTitles.length > 0
-            ? spec.matchedCaseTitles
-            : caseSelection.positiveCases.map((c) => c.title),
-        probeSteps:
-          spec.probeSteps && spec.probeSteps.length > 0
-            ? spec.probeSteps
-            : probeContext?.probeSteps,
-      };
-    } else {
-      spec = buildHeuristicSpecClarification({
-        repo,
-        title: input.title,
-        description: input.description,
-        defaultTemplate: input.template ?? repo.defaultTemplate,
-        repoStructure,
-        casebookEntries,
-        playbookEntries,
-        probeContext,
-      });
-    }
-
-    if (
-      this.workspace.analyzeSymbolImpact &&
-      spec.suggestedAllowedPaths.length > 0 &&
-      !spec.suggestedAllowedPaths.includes("**")
-    ) {
-      const symbolImpact = await this.workspace
-        .analyzeSymbolImpact(repo.rootPath, spec.suggestedAllowedPaths)
-        .catch(() => undefined);
-      if (symbolImpact) {
-        spec = {
-          ...spec,
-          ...(symbolImpact.directDependents.length > 0
-            ? { directDependents: symbolImpact.directDependents.slice(0, 12) }
-            : {}),
-          ...(symbolImpact.transitiveDependents.length > 0
-            ? { transitiveDependents: symbolImpact.transitiveDependents.slice(0, 12) }
-            : {}),
-          recommendedTddMode:
-            spec.recommendedTddMode || symbolImpact.directDependents.length >= 3,
-        };
-      }
-    }
-
-    return applyClarificationAnswers(spec, input.answers);
+    return clarifySpecOp(this.coordinatorCtx(), input);
   }
 
   async listPreviews(repoId?: string): Promise<PreviewSession[]> {
@@ -1249,49 +662,7 @@ export class SuperWorkKernel {
     candidateId?: string,
     ttlMinutes?: number,
   ): Promise<PreviewSession> {
-    if (!this.previewProvider) {
-      throw new Error("Live preview provider is not configured in this kernel.");
-    }
-    const ticket = await this.stateStore.getTicket(ticketId);
-    if (!ticket) {
-      throw new Error(`Ticket not found: ${ticketId}`);
-    }
-    const repo = await this.stateStore.getRepo(ticket.repoId);
-    if (!repo) {
-      throw new Error(`Repository not found: ${ticket.repoId}`);
-    }
-
-    let worktreePath = ticket.worktreePath;
-    let label = `${ticket.title}`;
-    if (candidateId && ticket.arenaCandidates) {
-      const cand = ticket.arenaCandidates.find((c) => c.candidateId === candidateId);
-      if (!cand || !cand.worktreePath) {
-        throw new Error(`Arena candidate '${candidateId}' has no active worktree.`);
-      }
-      worktreePath = cand.worktreePath;
-      label = `${ticket.title} [${cand.engine} · ${cand.candidateId}]`;
-    }
-    if (!worktreePath || !existsSync(worktreePath)) {
-      throw new Error(`No active worktree directory exists on disk for ticket ${ticketId}.`);
-    }
-
-    const command =
-      repo.previewCommand?.trim() || repo.smokeCheck?.startCommand?.trim() || "";
-    if (!command) {
-      throw new Error(
-        `Repository '${repo.name}' has neither previewCommand nor smokeCheck.startCommand configured.`,
-      );
-    }
-
-    return this.previewProvider.startPreview({
-      repoId: repo.id,
-      ticketId: ticket.id,
-      candidateId,
-      label,
-      worktreePath,
-      command,
-      ttlMinutes,
-    });
+    return startTicketPreviewOp(this.coordinatorCtx(), ticketId, candidateId, ttlMinutes);
   }
 
   async renewPreview(previewId: string, ttlMinutes?: number): Promise<PreviewSession | null> {
@@ -1305,34 +676,7 @@ export class SuperWorkKernel {
   }
 
   async gcWorktrees(options?: { repoId?: string }): Promise<WorktreeGcResult> {
-    const items = await this.inspectWorktrees(options?.repoId);
-    const removedPaths: string[] = [];
-    const cleanedTicketIds: string[] = [];
-    let skippedActiveCount = 0;
-
-    for (const item of items) {
-      if (!item.reclaimable) {
-        skippedActiveCount += 1;
-        continue;
-      }
-      if (item.ticketId) {
-        await this.cleanupTicketWorktree(item.ticketId);
-        removedPaths.push(item.path);
-        cleanedTicketIds.push(item.ticketId);
-      } else {
-        await this.workspace.cleanupWorkspace(item.path);
-        removedPaths.push(item.path);
-      }
-    }
-
-    const result: WorktreeGcResult = {
-      removedPaths,
-      cleanedTicketIds,
-      skippedActiveCount,
-      timestamp: nowIso(),
-    };
-    this.emitEvent({ type: "worktrees_gc", result, timestamp: result.timestamp });
-    return result;
+    return gcWorktreesOp(this.coordinatorCtx(), options);
   }
 
   async resolveInboxItem(
@@ -1363,206 +707,22 @@ export class SuperWorkKernel {
   }
 
   private async performTick(): Promise<number> {
-    if (this.stopped || this.isDraining()) return 0;
-    let launched = 0;
-    const initialRepos = await this.stateStore.listRepos();
-    const epicById = new Map<string, Ticket>();
-    for (const r of initialRepos) {
-      if (this.stopped) return 0;
-      const synced = (await this.syncRepoContract(r.id).catch(() => r)) ?? r;
-      if (this.stopped) return 0;
-      await this.router.resolveDependenciesForWaitingTickets(synced);
-      await syncEpicStatusesOp(this.coordinatorCtx(), synced);
-      await syncMilestonesOp(this.coordinatorCtx(), synced.id).catch(() => undefined);
-    }
-    if (this.stopped) return 0;
-    await this.processDueRoutines();
-    if (this.stopped) return 0;
-    const repos = await this.stateStore.listRepos();
-    for (const t of await this.stateStore.listTickets()) {
-      if (t.isEpic) epicById.set(t.id, t);
-    }
-
-    const capacity = this.config.maxConcurrentWorkers - this.activeTicketRuns.size;
-    if (capacity <= 0) return 0;
-
-    const activeByRepo = new Map<string, number>();
-    for (const activeId of this.activeTicketRuns.keys()) {
-      const activeTicket = await this.stateStore.getTicket(activeId);
-      if (activeTicket) {
-        activeByRepo.set(activeTicket.repoId, (activeByRepo.get(activeTicket.repoId) ?? 0) + 1);
-      }
-    }
-
-    const reposById = new Map(repos.map((r) => [r.id, r]));
-    const today = utcTodayString();
-    const todaySpendCache = new Map<string, number>();
-
-    const queued = await this.stateStore.listTickets({ status: "queued" });
-    const candidates = queued.filter((t) => {
-      if (this.activeTicketRuns.has(t.id)) return false;
-      if (t.parentTicketId && epicById.get(t.parentTicketId)?.pendingEpicReplan) {
-        return false;
-      }
-      return true;
-    });
-
-    for (const ticket of candidates) {
-      if (this.stopped) break;
-      if (launched >= capacity) break;
-      const repo = reposById.get(ticket.repoId);
-      const stage = ticket.currentStage || getFirstStage(ticket.template, ticket.tddMode);
-
-      if (repo?.maxConcurrentWorkers && repo.maxConcurrentWorkers > 0) {
-        const curRepoActive = activeByRepo.get(repo.id) ?? 0;
-        if (curRepoActive >= repo.maxConcurrentWorkers) {
-          continue;
-        }
-      }
-
-      const effectiveBudget = repo ? getEffectiveDailyBudget(repo, today) : undefined;
-      if (stage !== "rebase" && repo && effectiveBudget !== undefined && effectiveBudget > 0) {
-        let spend = todaySpendCache.get(repo.id);
-        if (spend === undefined) {
-          spend = await this.stateStore.getDailyRepoSpendUsd(repo.id, today);
-          todaySpendCache.set(repo.id, spend);
-        }
-        if (spend >= effectiveBudget) {
-          await this.ensureBudgetCapInboxItem(repo, ticket, spend, effectiveBudget, today);
-          continue;
-        }
-      }
-
-      activeByRepo.set(ticket.repoId, (activeByRepo.get(ticket.repoId) ?? 0) + 1);
-      launched += 1;
-      const promise = runTicketStageOp(this.coordinatorCtx(), ticket.id).finally(() => {
-        this.activeTicketRuns.delete(ticket.id);
-        this.abortControllers.delete(ticket.id);
-      });
-      this.activeTicketRuns.set(ticket.id, promise);
-    }
-    return launched;
-  }
-
-  private async ensureBudgetCapInboxItem(
-    repo: RepoConfig,
-    ticket: Ticket,
-    todaySpendUsd: number,
-    dailyBudgetUsd: number,
-    todayDate: string,
-  ): Promise<void> {
-    const existingPending = await this.stateStore.listInboxItems({
-      repoId: repo.id,
-      status: "pending",
-    });
-    if (existingPending.some((i) => i.kind === "budget_cap")) {
-      return;
-    }
-    const ts = nowIso();
-    const item: InboxItem = {
-      id: newId("inb"),
-      repoId: repo.id,
-      ticketId: ticket.id,
-      kind: "budget_cap",
-      status: "pending",
-      title: `Daily budget cap reached for ${repo.name} ($${todaySpendUsd.toFixed(2)} / $${dailyBudgetUsd.toFixed(2)})`,
-      summary: `Repository ${repo.name} spent $${todaySpendUsd.toFixed(4)} today (cap: $${dailyBudgetUsd.toFixed(2)}). In-flight stages finish cleanly; queued dispatch is paused until budget increase is approved.`,
-      contextPayload: {
-        repoId: repo.id,
-        todaySpendUsd,
-        dailyBudgetUsd,
-        date: todayDate,
-      },
-      createdAt: ts,
-    };
-    await this.stateStore.saveInboxItem(item);
-    this.emitEvent({ type: "inbox_created", item, timestamp: ts });
+    return performTickOp(this.coordinatorCtx(), this.router, this.config);
   }
 
   async runUntilIdle(maxCycles = 30): Promise<void> {
-    for (let i = 0; i < maxCycles; i++) {
-      const launched = await this.tick();
-      const hadActive = this.activeTicketRuns.size > 0;
-      if (hadActive) {
-        await Promise.allSettled(Array.from(this.activeTicketRuns.values()));
-      }
-      const trainMerged = await this.flushMergeTrain();
-      const outboxSent = await this.outbox.processDueEntries();
-      const reposAfter = await this.stateStore.listRepos();
-      for (const repo of reposAfter) {
-        await syncEpicStatusesOp(this.coordinatorCtx(), repo);
-        await syncMilestonesOp(this.coordinatorCtx(), repo.id).catch(() => undefined);
-      }
-
-      const waiting = await this.stateStore.listTickets({ status: "waiting_deps" });
-      const queued = await this.stateStore.listTickets({ status: "queued" });
-      const pendingOutbox = await this.stateStore.listOutboxEntries({ status: "pending" });
-      if (
-        this.activeTicketRuns.size === 0 &&
-        queued.length === 0 &&
-        pendingOutbox.length === 0 &&
-        waiting.length === 0
-      ) {
-        break;
-      }
-      if (
-        this.activeTicketRuns.size === 0 &&
-        !hadActive &&
-        launched === 0 &&
-        trainMerged === 0 &&
-        outboxSent === 0
-      ) {
-        let canUnblock = false;
-        for (const w of waiting) {
-          if (!(await this.hasUnfinishedDependencies(w))) {
-            canUnblock = true;
-            break;
-          }
-        }
-        if (!canUnblock && queued.length === 0) break;
-      }
-    }
+    return runUntilIdleOp(this.coordinatorCtx(), () => this.tick(), this.outbox, maxCycles);
   }
 
   private async hasUnfinishedDependencies(ticket: Ticket): Promise<boolean> {
-    for (const depId of ticket.dependsOn) {
-      const dep = await this.stateStore.getTicket(depId);
-      if (!dep) return true;
-      const barrierReady = Boolean(
-        ticket.barrierGroupId &&
-          dep.barrierGroupId === ticket.barrierGroupId &&
-          dep.status === "outbox_pending" &&
-          dep.handoverDigest,
-      );
-      if (dep.status !== "delivered" && !barrierReady) {
-        return true;
-      }
-    }
-    return false;
+    return hasUnfinishedDependenciesOp(this.coordinatorCtx(), ticket);
   }
 
   private async getEffectiveBaseInfo(
     ticket: Ticket,
     repo: RepoConfig,
   ): Promise<{ effectiveBaseBranch: string; parentEpic: Ticket | null }> {
-    if (ticket.targetBranch && ticket.targetBranch !== repo.baseBranch) {
-      await this.workspace.ensureBranch(repo.rootPath, ticket.targetBranch, repo.baseBranch);
-      return { effectiveBaseBranch: ticket.targetBranch, parentEpic: null };
-    }
-    if (!ticket.parentTicketId) {
-      return { effectiveBaseBranch: repo.baseBranch, parentEpic: null };
-    }
-    const parentEpic = await this.stateStore.getTicket(ticket.parentTicketId);
-    if (
-      parentEpic &&
-      parentEpic.isEpic &&
-      parentEpic.epicDeliveryMode !== "per_subtask" &&
-      parentEpic.branchName
-    ) {
-      await this.workspace.ensureBranch(repo.rootPath, parentEpic.branchName, repo.baseBranch);
-      return { effectiveBaseBranch: parentEpic.branchName, parentEpic };
-    }
-    return { effectiveBaseBranch: repo.baseBranch, parentEpic: null };
+    return getEffectiveBaseInfoOp(this.coordinatorCtx(), ticket, repo);
   }
 
   private async runWithEpicLock<T>(epicId: string, fn: () => Promise<T>): Promise<T> {
@@ -1597,329 +757,18 @@ export class SuperWorkKernel {
       verificationPassed?: boolean;
     },
   ): Promise<TicketCheckpoint | null> {
-    if (!this.workspace.captureWorktreeCheckpoint) return null;
-    try {
-      const cpId = newId("cp");
-      const snap = await this.workspace.captureWorktreeCheckpoint({
-        worktreePath,
-        ticketId: ticket.id,
-        checkpointId: cpId,
-        label: opts.label,
-      });
-      const checkpoint: TicketCheckpoint = {
-        id: cpId,
-        ticketId: ticket.id,
-        repoId: repo.id,
-        stageRunId: opts.stageRunId,
-        stage: opts.stage,
-        engine: opts.engine,
-        label: opts.label,
-        gitRef: snap.gitRef,
-        commitSha: snap.commitSha,
-        changedFiles: opts.changedFiles,
-        verificationPassed: opts.verificationPassed,
-        createdAt: nowIso(),
-      };
-      await this.stateStore.saveCheckpoint(checkpoint);
-      this.emitEvent({
-        type: "checkpoint_created",
-        checkpoint,
-        timestamp: checkpoint.createdAt,
-      });
-      return checkpoint;
-    } catch {
-      return null;
-    }
+    return captureTicketCheckpointOp(this.coordinatorCtx(), ticket, repo, worktreePath, opts);
   }
 
   private async enqueueDeliveryOutbox(ticket: Ticket, repoArg?: RepoConfig): Promise<void> {
-    const repo = repoArg ?? (await this.stateStore.getRepo(ticket.repoId));
-    await maybeDistillClosedLoopLessonOp(this.coordinatorCtx(), ticket, repo ?? undefined);
-    const template = getPipelineTemplate(ticket.template);
-    const ts = nowIso();
-
-    let changedFiles: string[] = Array.from(
-      new Set(ticket.inlineMemory.stageNotes.flatMap((n) => n.changedFiles ?? [])),
-    );
-    let addedLines = 0;
-    let deletedLines = 0;
-    if (ticket.worktreePath && repo) {
-      try {
-        const { effectiveBaseBranch } = await this.getEffectiveBaseInfo(ticket, repo);
-        const wsChanged = await this.workspace.getChangedFiles(ticket.worktreePath, effectiveBaseBranch);
-        if (wsChanged.length > 0) changedFiles = wsChanged;
-        const diffText = await this.workspace.getDiff(ticket.worktreePath, effectiveBaseBranch);
-        const counts = countDiffLines(diffText);
-        addedLines = counts.addedLines;
-        deletedLines = counts.deletedLines;
-      } catch {
-        // Fallback cleanly to recorded stageNote metadata
-      }
-    }
-
-    let reviewReport: ReviewReport | undefined;
-    let maxVisualDiffRatio: number | undefined;
-    let smokeResult: SmokeCheckResult | undefined;
-    try {
-      const artifacts = await this.stateStore.listArtifacts(ticket.id);
-      const latestReviewArt = [...artifacts].reverse().find((a) => a.kind === "review_report");
-      if (latestReviewArt) {
-        const raw = await this.artifactStore.readSpill(latestReviewArt.storageUri).catch(() => "");
-        if (raw) {
-          reviewReport = JSON.parse(raw) as ReviewReport;
-        }
-      }
-      for (const art of artifacts) {
-        if (art.kind === "visual_diff") {
-          const match = /([0-9]+(?:\.[0-9]+)?)%\s*changed/i.exec(art.summary);
-          if (match) {
-            const ratio = Number(match[1]) / 100;
-            if (Number.isFinite(ratio)) {
-              maxVisualDiffRatio = Math.max(maxVisualDiffRatio ?? 0, ratio);
-            }
-          }
-        }
-      }
-      const latestSmokeArt = [...artifacts].reverse().find((a) => a.kind === "smoke_log");
-      if (latestSmokeArt) {
-        smokeResult = {
-          ok: /^PASS\b/i.test(latestSmokeArt.summary),
-          readyUrl: "",
-          port: 0,
-          startupDurationMs: 0,
-          checkResults: [],
-          serverOutputTail: "",
-          summary: latestSmokeArt.summary,
-        };
-      }
-    } catch {
-      // Non-fatal
-    }
-
-    if (!reviewReport) {
-      const reviewNote = [...ticket.inlineMemory.stageNotes]
-        .reverse()
-        .find((n) => n.stage === "review");
-      if (reviewNote && reviewNote.reviewApproved !== undefined) {
-        reviewReport = {
-          verdict: reviewNote.reviewApproved ? "approved" : "changes_requested",
-          reviewedByEngine: reviewNote.engine ?? "codex",
-          summary: reviewNote.summary,
-          findings: reviewNote.reviewFindings ?? [],
-          createdAt: reviewNote.createdAt,
-        };
-      }
-    }
-
-    const staticVerificationPassed = Boolean(
-      [...ticket.inlineMemory.stageNotes]
-        .reverse()
-        .find((n) => (n.stage === "implement" || n.stage === "rebase") && n.verificationPassed !== undefined)
-        ?.verificationPassed,
-    );
-
-    let hotspotFiles: Array<{ filePath: string; lineCount: number }> | undefined;
-    if (repo && this.workspace.scanCodeHotspots && changedFiles.length > 0) {
-      const changedSet = new Set(changedFiles);
-      const all = await this.workspace.scanCodeHotspots(repo.rootPath, 1500).catch(() => []);
-      const touched = all
-        .filter((h) => changedSet.has(h.filePath))
-        .map((h) => ({ filePath: h.filePath, lineCount: h.lineCount }));
-      if (touched.length > 0) hotspotFiles = touched;
-    }
-
-    const riskAssessment = evaluateTicketRisk({
-      ticket,
-      hotspotFiles,
-      repo: repo ?? undefined,
-      changedFiles,
-      addedLines,
-      deletedLines,
-      maxVisualDiffRatio,
-      reviewReport,
-      smokeResult,
-      staticVerificationPassed,
-    });
-
-    const needsSignoff =
-      template.requireOutboxSignoff ||
-      (Boolean(ticket.routineId) && repo?.mode === "observe") ||
-      riskAssessment.requiresSignoff;
-    const defaultChannel = repo?.defaultDeliveryChannel ?? "auto_pr_or_branch";
-    const action: OutboxAction =
-      defaultChannel === "local_merge" ? "local_merge" : "push_and_create_pr";
-
-    const updatedTicket: Ticket = {
-      ...ticket,
-      status: "outbox_pending",
-      activeEngine: undefined,
-      riskAssessment,
-      updatedAt: ts,
-    };
-    await this.stateStore.saveTicket(updatedTicket);
-    this.emitEvent({ type: "ticket_updated", ticket: updatedTicket, timestamp: ts });
-
-    const outboxEntry: OutboxEntry = {
-      id: newId("obx"),
-      repoId: ticket.repoId,
-      ticketId: ticket.id,
-      action,
-      idempotencyKey: `deliver:${action}:${ticket.id}:${ticket.branchName ?? "branch"}:n${ticket.inlineMemory.stageNotes.length}`,
-      payload: {
-        title: ticket.title,
-        branchName: ticket.branchName,
-        worktreePath: ticket.worktreePath,
-        forceGithubPr: defaultChannel === "github_pr",
-        summary: ticket.inlineMemory.stageNotes.map((n) => `[${n.stage}] ${n.summary}`).join("\n"),
-        riskAssessment,
-      },
-      status: needsSignoff ? "awaiting_approval" : "pending",
-      attempts: 0,
-      nextAttemptAt: ts,
-      createdAt: ts,
-      updatedAt: ts,
-    };
-    await this.stateStore.enqueueOutbox(outboxEntry);
-    this.emitEvent({ type: "outbox_queued", entry: outboxEntry, timestamp: ts });
-
-    if (!needsSignoff && action === "local_merge" && repo) {
-      await ensureMergeTrainForOutboxOp(this.coordinatorCtx(), outboxEntry, updatedTicket, repo);
-    }
-
-    if (needsSignoff) {
-      const riskNote = riskAssessment.requiresSignoff
-        ? ` [Risk ${riskAssessment.score}/100 (${riskAssessment.level}), policy=${riskAssessment.policy}]`
-        : "";
-      const inboxItem: InboxItem = {
-        id: newId("inb"),
-        repoId: ticket.repoId,
-        ticketId: ticket.id,
-        kind: "outbox_signoff",
-        status: "pending",
-        title:
-          action === "local_merge"
-            ? `Sign off Local Merge: ${ticket.title}`
-            : `Sign off PR Delivery: ${ticket.title}`,
-        summary:
-          (action === "local_merge"
-            ? `Ready to merge branch ${ticket.branchName} into ${repo?.baseBranch ?? "main"}. Approve Outbox execution to merge & cleanup.`
-            : `Ready to deliver branch ${ticket.branchName}. Approve Outbox execution to push / create PR.`) +
-          riskNote,
-        contextPayload: {
-          outboxId: outboxEntry.id,
-          branchName: ticket.branchName,
-          action,
-          riskAssessment,
-        },
-        createdAt: ts,
-      };
-      await this.stateStore.saveInboxItem(inboxItem);
-      this.emitEvent({ type: "inbox_created", item: inboxItem, timestamp: ts });
-    }
+    return enqueueDeliveryOutboxOp(this.coordinatorCtx(), ticket, repoArg);
   }
 
   async triggerTicketDelivery(
     ticketId: string,
     action: "local_merge" | "push_and_create_pr",
   ): Promise<{ ticket: Ticket; entry: OutboxEntry }> {
-    const ticket = await this.stateStore.getTicket(ticketId);
-    if (!ticket) {
-      throw new Error(`Ticket not found: ${ticketId}`);
-    }
-    if (ticket.isEpic && ticket.epicDeliveryMode === "per_subtask") {
-      throw new Error("Per-subtask Epic umbrella tickets are delivered via their subtasks.");
-    }
-    if (!ticket.branchName) {
-      throw new Error(`Ticket ${ticketId} has no branchName to deliver.`);
-    }
-    if (ticket.parentTicketId) {
-      const parentEpic = await this.stateStore.getTicket(ticket.parentTicketId);
-      if (parentEpic?.isEpic && parentEpic.epicDeliveryMode !== "per_subtask") {
-        throw new Error(
-          `Subtask ${ticketId} was integrated into unified Epic branch '${parentEpic.branchName}'; trigger delivery on parent Epic ${parentEpic.id} instead.`,
-        );
-      }
-    }
-    if (ticket.status !== "delivered" && ticket.status !== "outbox_pending") {
-      throw new Error(
-        `Ticket ${ticketId} must be delivered or outbox_pending before triggering ${action} (status=${ticket.status})`,
-      );
-    }
-
-    const existingEntries = await this.stateStore.listOutboxEntries({ ticketId: ticket.id });
-    const alreadySent = existingEntries.find((e) => e.action === action && e.status === "sent");
-    if (alreadySent) {
-      return { ticket, entry: alreadySent };
-    }
-
-    const ts = nowIso();
-    const idempotencyKey = `deliver:${action}:${ticket.id}:${ticket.branchName}`;
-    const existingByKey = existingEntries.find((e) => e.idempotencyKey === idempotencyKey);
-    let entry: OutboxEntry;
-    if (existingByKey) {
-      entry = {
-        ...existingByKey,
-        status: "pending",
-        attempts: 0,
-        lastError: undefined,
-        nextAttemptAt: ts,
-        updatedAt: ts,
-      };
-      await this.stateStore.updateOutboxEntry(entry);
-    } else {
-      entry = {
-        id: newId("obx"),
-        repoId: ticket.repoId,
-        ticketId: ticket.id,
-        action,
-        idempotencyKey,
-        payload: {
-          title: ticket.title,
-          branchName: ticket.branchName,
-          worktreePath: ticket.worktreePath,
-          forceGithubPr: action === "push_and_create_pr",
-          summary: ticket.inlineMemory.stageNotes
-            .map((n) => `[${n.stage}] ${n.summary}`)
-            .join("\n"),
-        },
-        status: "pending",
-        attempts: 0,
-        nextAttemptAt: ts,
-        createdAt: ts,
-        updatedAt: ts,
-      };
-      await this.stateStore.enqueueOutbox(entry);
-    }
-    this.emitEvent({ type: "outbox_queued", entry, timestamp: ts });
-
-    if (action === "local_merge") {
-      const repo = await this.stateStore.getRepo(ticket.repoId);
-      if (repo) {
-        await ensureMergeTrainForOutboxOp(this.coordinatorCtx(), entry, ticket, repo);
-        await this.flushMergeTrain(repo.id);
-      }
-    } else {
-      await this.outbox.processDueEntries(10);
-    }
-
-    let refreshedTicket = (await this.stateStore.getTicket(ticket.id)) ?? ticket;
-    const refreshedEntry = (await this.stateStore.getOutboxEntry(entry.id)) ?? entry;
-    if (action === "local_merge" && refreshedEntry.status === "sent" && refreshedTicket.worktreePath) {
-      refreshedTicket = {
-        ...refreshedTicket,
-        worktreePath: undefined,
-        worktreeCleanedAt: refreshedTicket.worktreeCleanedAt ?? nowIso(),
-        updatedAt: nowIso(),
-      };
-      await this.stateStore.saveTicket(refreshedTicket);
-      this.emitEvent({
-        type: "ticket_updated",
-        ticket: refreshedTicket,
-        timestamp: refreshedTicket.updatedAt,
-      });
-    }
-
-    return { ticket: refreshedTicket, entry: refreshedEntry };
+    return triggerTicketDeliveryOp(this.coordinatorCtx(), this.outbox, ticketId, action);
   }
 
   private async escalateTicket(
@@ -1928,37 +777,7 @@ export class SuperWorkKernel {
     reason: string,
     contextPayload: Record<string, unknown>,
   ): Promise<void> {
-    const ts = nowIso();
-    const updated: Ticket = {
-      ...ticket,
-      status: "needs_human",
-      activeEngine: undefined,
-      errorMessage: reason,
-      updatedAt: ts,
-    };
-    await this.stateStore.saveTicket(updated);
-    this.emitEvent({ type: "ticket_updated", ticket: updated, timestamp: ts });
-
-    const inboxItem: InboxItem = {
-      id: newId("inb"),
-      repoId: ticket.repoId,
-      ticketId: ticket.id,
-      kind,
-      status: "pending",
-      title: `Action Needed: ${ticket.title}`,
-      summary: reason,
-      contextPayload,
-      createdAt: ts,
-    };
-    await this.stateStore.saveInboxItem(inboxItem);
-    this.emitEvent({ type: "inbox_created", item: inboxItem, timestamp: ts });
-
-    const repo = await this.stateStore.getRepo(ticket.repoId);
-    if (repo) {
-      await executeLifecycleHookOp(this.coordinatorCtx(), "on_escalate", updated, repo).catch(
-        () => {},
-      );
-    }
+    return escalateTicketOp(this.coordinatorCtx(), ticket, kind, reason, contextPayload);
   }
 
   private async runWithRepoWorkspaceLock<T>(repoId: string, fn: () => Promise<T>): Promise<T> {
@@ -1984,128 +803,31 @@ export class SuperWorkKernel {
     ticket: Ticket,
     repo: RepoConfig,
     stage: StageKind,
-    options?: { skipHitTracking?: boolean; reviewEvidence?: ReviewEvidencePacket },
+    options?: { skipHitTracking?: boolean; reviewEvidence?: ReviewEvidencePacket; worktreePath?: string },
   ): Promise<string> {
-    const ts = nowIso();
-    const [relatedMemory, playbookEntries, caseEntries] = await Promise.all([
-      this.stateStore.searchMemory(ticket.title, 6, repo.id),
-      this.stateStore.listPlaybookEntries(repo.id, { onlyEnabled: true }),
-      this.stateStore.listCasebookEntries(repo.id, { includeReverted: true }),
-    ]);
-
-    const upstreamHandovers: HandoverDigest[] = [];
-    if (ticket.dependsOn.length > 0) {
-      const reposById = new Map((await this.stateStore.listRepos()).map((r) => [r.id, r]));
-      for (const depId of ticket.dependsOn) {
-        const dep = await this.stateStore.getTicket(depId);
-        if (!dep) continue;
-        if (dep.handoverDigest) {
-          upstreamHandovers.push(dep.handoverDigest);
-        } else if (dep.status === "delivered") {
-          const depFiles = Array.from(
-            new Set(dep.inlineMemory.stageNotes.flatMap((n) => n.changedFiles)),
-          );
-          upstreamHandovers.push(
-            buildHandoverDigest({
-              ticket: dep,
-              repoName: reposById.get(dep.repoId)?.name,
-              changedFiles: depFiles,
-              diffText: "",
-              stageSummary: dep.inlineMemory.stageNotes.at(-1)?.summary || dep.title,
-            }),
-          );
-        }
-      }
-    }
-
-    const pathExists = (relPath: string): boolean => existsSync(join(repo.rootPath, relPath));
-    const selectedPlaybook = selectPlaybookRulesForContext(
-      playbookEntries,
-      ticket.mandate.allowedPaths,
-      8,
-      1200,
-      { pathExists },
-    );
-    const playbookContext = formatPlaybookContext(
-      playbookEntries,
-      ticket.mandate.allowedPaths,
-      8,
-      1200,
-      { pathExists },
-    );
-
-    const otherCases = caseEntries.filter((c) => c.ticketId !== ticket.id);
-    const ftsTicketIds = new Set(relatedMemory.map((m) => m.ticketId));
-    const caseSelection = selectRelevantCasesForContext({
-      cases: otherCases,
-      ftsTicketIds,
-      targetPaths: ticket.mandate.allowedPaths,
-      queryText: `${ticket.title} ${ticket.description}`,
-      maxPositive: 2,
-      maxChars: 900,
-    });
-
-    if (!options?.skipHitTracking) {
-      if (selectedPlaybook.length > 0) {
-        await this.stateStore.recordPlaybookHits(
-          selectedPlaybook.map((e) => e.id),
-          ts,
-        );
-      }
-      if (caseSelection.positiveCases.length > 0) {
-        await this.stateStore.recordCasebookHits(
-          caseSelection.positiveCases.map((c) => c.id),
-          ts,
-        );
-      }
-    }
-
-    let symbolContextPack: string | undefined;
-    if (
-      (stage === "plan" || stage === "spec_test" || stage === "implement") &&
-      this.workspace.analyzeSymbolImpact &&
-      !ticket.mandate.allowedPaths.includes("**")
-    ) {
-      const impact = await this.workspace
-        .analyzeSymbolImpact(repo.rootPath, ticket.mandate.allowedPaths)
-        .catch(() => null);
-      if (impact?.contextPackMarkdown?.trim()) {
-        symbolContextPack = impact.contextPackMarkdown.trim();
-      }
-    }
-
-    let surgicalContextPack: string | undefined;
-    if (
-      (stage === "plan" || stage === "implement" || stage === "review") &&
-      this.workspace.buildSurgicalContextPack &&
-      !ticket.mandate.allowedPaths.includes("**")
-    ) {
-      const pack = await this.workspace
-        .buildSurgicalContextPack({
-          worktreePath: ticket.worktreePath ?? repo.rootPath,
-          allowedPaths: ticket.mandate.allowedPaths,
-        })
-        .catch(() => undefined);
-      if (pack?.trim()) surgicalContextPack = pack.trim();
-    }
-
-    return this.memory.buildWorkerPromptContext(ticket, stage, relatedMemory, {
-      surgicalContextPack,
-      reviewEvidence: options?.reviewEvidence,
-      verificationCommands: repo.verificationCommands,
-      smokeCheck: repo.smokeCheck,
-      repoConventions:
-        [repo.conventions?.trim(), symbolContextPack].filter(Boolean).join("\n\n") || undefined,
-      playbookContext,
-      casebookContext: caseSelection.formattedMarkdown || undefined,
-      upstreamHandovers,
-    });
+    return buildEnrichedWorkerPromptOp(this.coordinatorCtx(), ticket, repo, stage, options);
   }
 
   async prunePlaybookEntries(
     repoId: string,
   ): Promise<{ prunedIds: string[]; keptCount: number }> {
     return prunePlaybookEntriesOp(this.coordinatorCtx(), repoId);
+  }
+
+  async auditPlaybookHygiene(repoId?: string): Promise<PlaybookHygieneReport> {
+    return auditPlaybookHygieneOp(this.coordinatorCtx(), repoId);
+  }
+
+  async pruneNoisyPlaybooks(
+    repoId?: string,
+    options?: { dryRun?: boolean; mode?: "disable" | "delete" },
+  ): Promise<{
+    audited: PlaybookHygieneReport;
+    affectedIds: string[];
+    mode: "disable" | "delete";
+    dryRun: boolean;
+  }> {
+    return pruneNoisyPlaybooksOp(this.coordinatorCtx(), repoId, options);
   }
 
   // --- Routines ---
@@ -2223,14 +945,7 @@ export class SuperWorkKernel {
 
   // --- Impact, Checkpoints, DAG, Blueprints, Review Comments, Doctor, Chief, Evals ---
   async analyzeRepoImpact(repoId: string, paths: string[]): Promise<SymbolImpactReport> {
-    const repo = await this.stateStore.getRepo(repoId);
-    if (!repo) {
-      throw new Error(`Repository not found: ${repoId}`);
-    }
-    if (!this.workspace.analyzeSymbolImpact) {
-      throw new Error("WorkspaceProvider does not support symbol impact analysis.");
-    }
-    return this.workspace.analyzeSymbolImpact(repo.rootPath, paths);
+    return analyzeRepoImpactOp(this.coordinatorCtx(), repoId, paths);
   }
 
   async listTicketCheckpoints(ticketId: string): Promise<TicketCheckpoint[]> {
@@ -2258,11 +973,7 @@ export class SuperWorkKernel {
   }
 
   async listRepoBlueprints(repoId: string): Promise<TaskBlueprint[]> {
-    const repo = await this.stateStore.getRepo(repoId);
-    if (!repo) {
-      throw new Error(`Repository not found: ${repoId}`);
-    }
-    return resolveRepoBlueprints(repo);
+    return listRepoBlueprintsOp(this.coordinatorCtx(), repoId);
   }
 
   async listTicketReviewComments(ticketId: string): Promise<TicketReviewComment[]> {
@@ -2300,39 +1011,7 @@ export class SuperWorkKernel {
   }
 
   async askChief(input: ChiefAskInput): Promise<ChiefAskResult> {
-    const [allRepos, repo, tickets, inboxItems] = await Promise.all([
-      this.stateStore.listRepos(),
-      input.repoId ? this.stateStore.getRepo(input.repoId) : Promise.resolve(null),
-      this.stateStore.listTickets(),
-      this.stateStore.listInboxItems(),
-    ]);
-    const effectiveRepo = repo ?? (allRepos.length === 1 ? allRepos[0] : undefined);
-    const [metrics, memoryHits, probeContext] = await Promise.all([
-      this.stateStore.getMetricsSummary(effectiveRepo?.id, utcTodayString()),
-      this.stateStore.searchMemory(input.question, 6, effectiveRepo?.id),
-      effectiveRepo && this.workspace.runRepoPreProbe
-        ? this.workspace
-            .runRepoPreProbe(
-              effectiveRepo.rootPath,
-              input.question,
-              effectiveRepo.forbiddenPaths,
-            )
-            .catch(() => undefined)
-        : Promise.resolve(undefined),
-    ]);
-
-    return runChiefOfStaffQuery({
-      question: input.question,
-      repo: effectiveRepo,
-      allRepos,
-      tickets,
-      inboxItems,
-      metrics,
-      memoryHits,
-      probeContext,
-      llm: this.llm,
-      probeExecutor: effectiveRepo ? this.createRepoProbeExecutor(effectiveRepo) : undefined,
-    });
+    return askChiefOp(this.coordinatorCtx(), input);
   }
 
   async createEvalCaseFromTicket(ticketId: string): Promise<EvalCase> {

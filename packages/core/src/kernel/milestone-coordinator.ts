@@ -39,6 +39,8 @@ export interface ReleaseMilestoneOptions {
   pushRemote?: boolean;
   squashReleaseCommit?: boolean;
   releaseCommitMessage?: string;
+  /** Optional GitHub Release (requires createTag + pushRemote). Default false. */
+  createGithubRelease?: boolean;
 }
 
 function requireMilestoneStore(ctx: KernelCoordinatorContext) {
@@ -454,6 +456,7 @@ export async function releaseMilestoneOp(
       stagingBranch: milestone.stagingBranch,
       squashReleaseCommit: options.squashReleaseCommit === true,
       releaseCommitMessage: options.releaseCommitMessage?.trim() || undefined,
+      createGithubRelease: options.createGithubRelease === true,
     }),
   );
 
@@ -474,6 +477,7 @@ export async function releaseMilestoneOp(
       tag: result.tag,
       pushed: result.pushed,
       bumpedFiles: result.bumpedFiles,
+      githubReleaseUrl: result.githubReleaseUrl,
     },
   });
 
@@ -491,5 +495,5 @@ export async function releaseMilestoneOp(
       ctx.emitEvent({ type: "inbox_resolved", item: resolved, timestamp: ts });
     }
   }
-  return released;
+  return result.githubReleaseUrl ? { ...released, githubReleaseUrl: result.githubReleaseUrl } : released;
 }

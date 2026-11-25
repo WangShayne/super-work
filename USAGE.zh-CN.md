@@ -117,6 +117,12 @@ bun run setup -- --auto
 4. 已发布里程碑进入可折叠的**已发布里程碑**区域（版本、发布提交 SHA、中英文发布说明）。
 5. 引擎健康可通过 `GET /api/system/engines` 与 MCP `manage_engine_health`（`list|reset|probe`）查看。
 
+### 7. Playbook 卫生与可选 GitHub Release（`v1.6.0`）
+1. Inbox 备注**默认不再写入 Playbook**。需显式传入 `saveToPlaybook: true`（REST）才会保存；“human approved continuation”、工单 ID 等一次性备注仍会被跳过。
+2. 审计：`super-work playbook audit`（REST `GET /api/playbooks/hygiene`，MCP `manage_playbook_hygiene {action:"audit"}`）。清理：`super-work playbook prune`（禁用噪声规则，加 `--delete` 则删除）或 `super-work doctor --prune-playbooks`。Web **Doctor** 页的 **Playbook 卫生** 卡片提供「禁用噪声规则」按钮。REST 清理接受 `{ repoId?, dryRun?, mode? }`。
+3. 飞行记录器面板现在展示合并后的校验门节省（精简校验 + Rebase 复用）以及引擎熔断 / 溢出隔离计数。
+4. 可选 GitHub Release：`super-work milestone release <id> --bump --tag --push --github-release`（REST `createGithubRelease: true`；Web 勾选框仅在同时勾选*标签*与*推送*时可用）。需要里程碑目标版本与已登录的 `gh`；非法组合会在触碰 git 之前被拒绝，默认关闭。
+
 ## 四、 多任务并发最佳实践与常见问题（FAQ）
 
 1. **如何让多个 Worker 真正并发而不互相排队？**

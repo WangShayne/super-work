@@ -57,6 +57,7 @@ interface DigestLabels {
   active: string;
   cost: string;
   gate: (runs: number, saved: string) => string;
+  gateReuse: (n: number, s: string) => string;
   selfHost: (c: RunDigestReport["selfHost"]) => string;
   engineHeader: string[];
   events: string;
@@ -73,6 +74,7 @@ const LABELS_EN: DigestLabels = {
   active: "Active",
   cost: "Cost (USD)",
   gate: (n, s) => `Impact-scoped gate: ${n} run(s), saved ${s}`,
+  gateReuse: (n, s) => `Rebase gate reuse: ${n} run(s), saved ${s}`,
   selfHost: (c) =>
     `Self-host: ${c.canaryPassed} canary passed, ${c.reloadsCompleted} reloads, ${c.canaryRolledBack} rollbacks, ${c.watchdogSwitches} watchdog switches, ${c.engineTripped ?? 0} engine trips, ${c.spilloverQuarantined ?? 0} spillover quarantines`,
   engineHeader: ["Engine", "Tickets", "Delivered", "Failed/Reverted", "Pass rate", "Cost (USD)", "Avg duration"],
@@ -90,6 +92,7 @@ const LABELS_ZH: DigestLabels = {
   active: "进行中",
   cost: "花费 (USD)",
   gate: (n, s) => `影响范围校验门：${n} 次运行，节省 ${s}`,
+  gateReuse: (n, s) => `Rebase 校验门复用：${n} 次，节省 ${s}`,
   selfHost: (c) =>
     `自举：Canary 通过 ${c.canaryPassed} 次，重载 ${c.reloadsCompleted} 次，回滚 ${c.canaryRolledBack} 次，Watchdog 切换 ${c.watchdogSwitches} 次，引擎熔断 ${c.engineTripped ?? 0} 次，溢出隔离 ${c.spilloverQuarantined ?? 0} 次`,
   engineHeader: ["引擎", "工单", "已交付", "失败/回滚", "通过率", "花费 (USD)", "平均耗时"],
@@ -107,6 +110,9 @@ function renderMarkdown(report: Omit<RunDigestReport, "markdownZh" | "markdownEn
     `- ${L.tickets}: ${s.total} | ${L.delivered}: ${s.delivered} | ${L.reverted}: ${s.reverted} | ${L.escalated}: ${s.escalated} | ${L.active}: ${s.active}`,
     `- ${L.cost}: ${s.totalCostUsd.toFixed(2)}`,
     `- ${L.gate(report.gateSavings.scopedRuns, formatDigestDuration(report.gateSavings.totalSavedMs))}`,
+    ...(report.gateReuse && report.gateReuse.reusedRuns > 0
+      ? [`- ${L.gateReuse(report.gateReuse.reusedRuns, formatDigestDuration(report.gateReuse.totalSavedMs))}`]
+      : []),
     `- ${L.selfHost(report.selfHost)}`,
     "",
     `| ${L.engineHeader.join(" | ")} |`,
@@ -185,6 +191,7 @@ export function buildRunDigestReport(input: BuildRunDigestInput): RunDigestRepor
 
   const count = (kind: FlightEvent["kind"]): number => events.filter((e) => e.kind === kind).length;
   const scoped = events.filter((e) => e.kind === "scoped_gate_run");
+  const reused = events.filter((e) => e.kind === "gate_reused");
 
   const base: Omit<RunDigestReport, "markdownZh" | "markdownEn"> = {
     generatedAt,
@@ -194,6 +201,14 @@ export function buildRunDigestReport(input: BuildRunDigestInput): RunDigestRepor
     gateSavings: {
       scopedRuns: scoped.length,
       totalSavedMs: scoped.reduce((sum, e) => sum + (e.savedMs ?? 0), 0),
+    },
+    gateReuse: {
+      reusedRuns: reused.length,
+      totalSavedMs: reused.reduce((sum, e) => sum + (e.savedMs ?? 0), 0),
+    },
+    resilience: {
+      engineTrips: count("engine_tripped"),
+      spilloverQuarantines: count("spillover_quarantined"),
     },
     selfHost: {
       canaryPassed: count("canary_passed"),

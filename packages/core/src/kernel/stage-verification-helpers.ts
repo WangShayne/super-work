@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { isUiIntentTicket } from "../engine-router.ts";
 import { createDefaultMandate } from "../mandate.ts";
 import type {
+  LastFullVerificationSnapshot,
   RepoConfig,
   ScopedVerificationInfo,
   SmokeCheckResult,
@@ -225,6 +226,78 @@ async function runHotspotParityGuard(
       ],
     } as VerificationRunResult,
   };
+}
+
+export function normalizeGateCommands(commands: string[] | undefined): string[] {
+  return (commands ?? []).map((c) => c.trim().replace(/\s+/g, " ")).filter(Boolean);
+}
+
+/**
+ * Snapshot of a passing FULL implement gate (call after the implement commit so the tree matches HEAD).
+ * Returns undefined when the gate was scoped, had no commands, or SHAs are unavailable.
+ */
+export async function captureLastFullVerification(
+  ctx: KernelCoordinatorContext,
+  repo: RepoConfig,
+  stageRun: StageRun,
+  gate: { passed: boolean; result?: VerificationRunResult },
+  worktreePath: string,
+  effectiveBaseBranch: string,
+): Promise<LastFullVerificationSnapshot | undefined> {
+  if (!gate.passed || gate.result?.scopedVerification?.usedScoped) return undefined;
+  const commands = normalizeGateCommands(repo.verificationCommands);
+  if (commands.length === 0 || !ctx.workspace.getTreeSha || !ctx.workspace.getHeadCommitSha) {
+    return undefined;
+  }
+  try {
+    const [treeSha, baseHeadSha] = await Promise.all([
+      ctx.workspace.getTreeSha(worktreePath),
+      ctx.workspace.getHeadCommitSha(repo.rootPath, effectiveBaseBranch),
+    ]);
+    if (!treeSha || !baseHeadSha) return undefined;
+    const durationMs = (gate.result?.results ?? []).reduce((s, r) => s + (r.durationMs ?? 0), 0);
+    return {
+      treeSha,
+      baseHeadSha,
+      commands,
+      durationMs: durationMs > 0 ? durationMs : undefined,
+      stageRunId: stageRun.id,
+      verifiedAt: nowIso(),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Strict fast-forward parity check for reusing the implement gate at rebase. */
+export async function canReuseImplementGate(
+  ctx: KernelCoordinatorContext,
+  ticket: Ticket,
+  repo: RepoConfig,
+  worktreePath: string,
+  effectiveBaseBranch: string,
+): Promise<LastFullVerificationSnapshot | undefined> {
+  const lfv = ticket.inlineMemory.lastFullVerification;
+  if (!lfv || repo.smokeCheck?.enabled) return undefined;
+  if (!ctx.workspace.getTreeSha || !ctx.workspace.getHeadCommitSha) return undefined;
+  const current = normalizeGateCommands(repo.verificationCommands);
+  const saved = normalizeGateCommands(lfv.commands);
+  if (
+    current.length === 0 ||
+    current.length !== saved.length ||
+    current.some((c, i) => c !== saved[i])
+  ) {
+    return undefined;
+  }
+  try {
+    const [baseSha, treeSha] = await Promise.all([
+      ctx.workspace.getHeadCommitSha(repo.rootPath, effectiveBaseBranch),
+      ctx.workspace.getTreeSha(worktreePath),
+    ]);
+    return baseSha === lfv.baseHeadSha && treeSha === lfv.treeSha ? lfv : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function runRepoVerificationGateOp(

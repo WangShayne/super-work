@@ -32,20 +32,43 @@ async function runPlaybook(ctx: CommandContext): Promise<number> {
     return 0;
   }
 
+  if (subCmd === "audit") {
+    const repoFlag = getStringFlag(flags, "repo");
+    const report = await withAutoStart(baseUrl, autoStart, () => client.auditPlaybookHygiene(repoFlag), stdout);
+    if (asJson) {
+      stdout(JSON.stringify(report, null, 2));
+    } else {
+      stdout(
+        `Playbook hygiene: total=${report.total} healthy=${report.healthy} noisy=${report.noisyCount}`,
+      );
+      for (const e of report.noisyEntries) {
+        stdout(
+          `  ${e.id} (${e.source}${e.enabled ? "" : ", disabled"}) ${e.rule.slice(0, 100)} — ${e.reasons.join("; ")}`,
+        );
+      }
+    }
+    return 0;
+  }
+
   if (subCmd === "prune") {
+    const mode = flags.delete ? "delete" : "disable";
+    const repoFlag = getStringFlag(flags, "repo");
     const res = await withAutoStart(
       baseUrl,
       autoStart,
       async () => {
-        const repoId = await resolveTargetRepoId(client, getStringFlag(flags, "repo"));
-        return client.prunePlaybook(repoId);
+        const repoId = await resolveTargetRepoId(client, repoFlag);
+        const stale = await client.prunePlaybook(repoId);
+        const hygiene = await client.pruneNoisyPlaybooks({ repoId, mode });
+        return { ...stale, hygiene };
       },
       stdout,
     );
     stdout(
       asJson
         ? JSON.stringify(res, null, 2)
-        : `Pruned ${res.prunedIds.length} stale/suspect auto-healed rule(s); ${res.keptCount} rule(s) kept.`,
+        : `Pruned ${res.prunedIds.length} stale/suspect auto-healed rule(s); ${res.keptCount} rule(s) kept. ` +
+            `${res.hygiene.mode === "delete" ? "Deleted" : "Disabled"} ${res.hygiene.affectedIds.length} noisy rule(s).`,
     );
     return 0;
   }

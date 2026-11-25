@@ -338,11 +338,28 @@ export function planImpactScopedVerification(input: ImpactPlanInput): ImpactScop
     impactedTests.size > 0 &&
     impactedTests.size <= MAX_TEST_FILE_TARGETS_PER_PACKAGE;
 
+  // Cross-package pruning: with several changed packages and a small, trustworthy impacted-test set,
+  // a changed package only needs its whole test dir when its changed sources are not clearly covered
+  // (fewer impacted tests in the package than changed non-test source files => keep package-level fallback).
+  const crossPackagePrune =
+    graphReliable &&
+    changedDirs.size > 1 &&
+    impactedTests.size > 0 &&
+    impactedTests.size <= MAX_TEST_FILE_TARGETS_PER_PACKAGE * 2;
+  const isPackageCovered = (dir: string): boolean => {
+    const prefix = `packages/${dir}/`;
+    const sources = changedSources.filter((f) => f.startsWith(prefix) && !TEST_FILE_RE.test(f));
+    if (sources.length === 0) return true; // only test files changed: they are targets themselves
+    const covering = Array.from(impactedTests).filter((t) => t.startsWith(prefix)).length;
+    return covering >= sources.length;
+  };
+
   const dirTargets = new Set<string>();
   if (!pruneAll) {
     for (const dir of affectedSorted) {
       const pkg = pkgByDir.get(dir);
       if (!pkg || pkg.testFiles.length === 0) continue;
+      if (changedDirs.has(dir) && crossPackagePrune && isPackageCovered(dir)) continue;
       if (changedDirs.has(dir) || !graphReliable) dirTargets.add(`packages/${dir}/test`);
     }
   }

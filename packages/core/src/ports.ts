@@ -246,6 +246,8 @@ export interface WorkspaceProvider {
     linesAfter: number;
     missingExports: string[];
     summary: string;
+    symbolMigrationMap?: Array<{ symbol: string; targetFile: string }>;
+    newModuleFiles?: string[];
   }>;
   runVerificationCommands(
     worktreePath: string,
@@ -307,6 +309,7 @@ export interface WorkspaceProvider {
   getChangedFilesSince?(worktreePath: string, refOrSha: string): Promise<string[]>;
   revertPathsToCommit?(worktreePath: string, commitSha: string, paths: string[]): Promise<void>;
   getHeadCommitSha?(repoOrWorktreePath: string, rev?: string): Promise<string>;
+  getTreeSha?(worktreePath: string, rev?: string): Promise<string>;
   captureWorktreeCheckpoint?(input: {
     worktreePath: string;
     ticketId: string;
@@ -385,12 +388,14 @@ export interface WorkspaceProvider {
     stagingBranch?: string;
     squashReleaseCommit?: boolean;
     releaseCommitMessage?: string;
+    createGithubRelease?: boolean;
   }): Promise<{
     commitSha?: string;
     tag?: string;
     bumpedFiles: string[];
     pushed: boolean;
     squashed?: boolean;
+    githubReleaseUrl?: string;
   }>;
   resetBranchRef?(rootRepoPath: string, branchName: string, targetCommitSha: string): Promise<void>;
   prepareSpeculativeMergeSlot?(input: {

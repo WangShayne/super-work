@@ -43,6 +43,7 @@ function MilestoneCard({
   const [createTag, setCreateTag] = useState(false);
   const [pushRemote, setPushRemote] = useState(false);
   const [squash, setSquash] = useState(false);
+  const [githubRelease, setGithubRelease] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [releasing, setReleasing] = useState(false);
   const [error, setError] = useState("");
@@ -60,6 +61,7 @@ function MilestoneCard({
         createTag,
         pushRemote,
         squashReleaseCommit: squash,
+        createGithubRelease: githubRelease && createTag && pushRemote,
       });
       setConfirming(false);
       onChanged();
@@ -184,7 +186,10 @@ function MilestoneCard({
               <input
                 type="checkbox"
                 checked={createTag}
-                onChange={(e) => setCreateTag(e.target.checked)}
+                onChange={(e) => {
+                  setCreateTag(e.target.checked);
+                  if (!e.target.checked) setGithubRelease(false);
+                }}
               />
               {t("milestone.optTag")}
             </label>
@@ -192,9 +197,24 @@ function MilestoneCard({
               <input
                 type="checkbox"
                 checked={pushRemote}
-                onChange={(e) => setPushRemote(e.target.checked)}
+                onChange={(e) => {
+                  setPushRemote(e.target.checked);
+                  if (!e.target.checked) setGithubRelease(false);
+                }}
               />
               {t("milestone.optPush")}
+            </label>
+            <label
+              className={`inline-flex items-center gap-1.5 ${createTag && pushRemote ? "" : "opacity-50"}`}
+              title={t("milestone.optGithubReleaseHint")}
+            >
+              <input
+                type="checkbox"
+                checked={githubRelease && createTag && pushRemote}
+                disabled={!(createTag && pushRemote)}
+                onChange={(e) => setGithubRelease(e.target.checked)}
+              />
+              {t("milestone.optGithubRelease")}
             </label>
             <label className="inline-flex items-center gap-1.5">
               <input

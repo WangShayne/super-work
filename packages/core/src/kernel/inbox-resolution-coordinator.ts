@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { getFirstStage, getNextStage, selectEngineForStage } from "../pipeline.ts";
 import { distillHumanNoteToRule } from "../playbook.ts";
+import { evaluatePlaybookRuleHygiene } from "../playbook-hygiene.ts";
 import type {
   BatchResolveInboxInput,
   BatchResolveInboxResult,
@@ -183,9 +184,10 @@ export async function resolveInboxItemOp(
 
   const baseTicket = ticket!;
 
-  if (options?.saveToPlaybook !== false && item.kind !== "budget_cap") {
+  if (options?.saveToPlaybook === true && item.kind !== "budget_cap") {
     const rule = distillHumanNoteToRule(note);
-    if (rule) {
+    // Hygiene guard: one-off approval/continuation notes never pollute the Playbook.
+    if (rule && evaluatePlaybookRuleHygiene(rule, "human").clean) {
       await ctx.addOrUpdatePlaybookRule({
         repoId: baseTicket.repoId,
         rule,

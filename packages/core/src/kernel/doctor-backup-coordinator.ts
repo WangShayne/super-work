@@ -9,6 +9,7 @@ import type {
 } from "../types.ts";
 import { isTerminalTicketStatus, newId, nowIso } from "../utils.ts";
 import type { KernelCoordinatorContext } from "./context.ts";
+import { auditPlaybookHygieneOp, pruneNoisyPlaybooksOp } from "./contract-playbook-coordinator.ts";
 
 export async function runSystemDoctor(
   ctx: KernelCoordinatorContext,
@@ -189,6 +190,42 @@ export async function runSystemDoctor(
         count: hotspots.length,
       });
     }
+  }
+
+  // 6. Playbook hygiene (one-off approval / ticket-run noise)
+  try {
+    const hygiene = await auditPlaybookHygieneOp(ctx);
+    // Already-disabled noisy rules are handled; only active ones need attention.
+    const activeNoisy = hygiene.noisyEntries.filter((e) => e.enabled).length;
+    if (activeNoisy > 0 && fix) {
+      const pruned = await pruneNoisyPlaybooksOp(ctx, undefined, { mode: "disable" });
+      fixesApplied += pruned.affectedIds.length;
+      items.push({
+        id: "playbook_hygiene",
+        category: "playbook",
+        status: "ok",
+        title: "Playbook Hygiene",
+        detail: `Disabled ${pruned.affectedIds.length} noisy Playbook rule(s)`,
+        fixable: true,
+        fixed: pruned.affectedIds.length > 0,
+        count: 0,
+      });
+    } else {
+      items.push({
+        id: "playbook_hygiene",
+        category: "playbook",
+        status: activeNoisy > 0 ? "warn" : "ok",
+        title: "Playbook Hygiene",
+        detail:
+          activeNoisy > 0
+            ? `${activeNoisy} noisy Playbook rule(s) of ${hygiene.total} (one-off approvals / ticket-run notes); run \`super-work playbook prune\``
+            : `${hygiene.total} Playbook rule(s), no active noise`,
+        fixable: activeNoisy > 0,
+        count: activeNoisy,
+      });
+    }
+  } catch {
+    // Playbook hygiene is advisory; never fail the Doctor run because of it.
   }
 
   return {

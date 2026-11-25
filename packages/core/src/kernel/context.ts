@@ -79,7 +79,7 @@ export interface KernelCoordinatorContext {
     ticket: Ticket,
     repo: RepoConfig,
     stage: StageKind,
-    options?: { skipHitTracking?: boolean; reviewEvidence?: ReviewEvidencePacket },
+    options?: { skipHitTracking?: boolean; reviewEvidence?: ReviewEvidencePacket; worktreePath?: string },
   ): Promise<string>;
   captureTicketCheckpoint(
     ticket: Ticket,

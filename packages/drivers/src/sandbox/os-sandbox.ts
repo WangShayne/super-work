@@ -238,6 +238,7 @@ export interface SeatbeltProfileInput {
   allowNetwork?: boolean;
   mode: Exclude<SandboxMode, "off">;
   homeDir?: string;
+  engine?: SanitizedEnvOptions["engine"];
 }
 
 export function buildMacosSeatbeltProfile(input: SeatbeltProfileInput): string {
@@ -287,6 +288,15 @@ export function buildMacosSeatbeltProfile(input: SeatbeltProfileInput): string {
   for (const adminDir of input.gitAdminDirs ?? []) {
     for (const v of safeRealpathVariants(adminDir)) {
       allowWritePrefixes.add(v);
+    }
+  }
+  if (input.engine === "claude" && input.mode === "balanced") {
+    // Claude CLI keeps per-uid scratch under /tmp/claude-<uid>; allow only that subpath, never /tmp itself.
+    const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+    if (uid !== undefined) {
+      for (const p of [`/private/tmp/claude-${uid}`, `/tmp/claude-${uid}`]) {
+        for (const v of safeRealpathVariants(p)) allowWritePrefixes.add(v);
+      }
     }
   }
   const cacheSubdirs = [
@@ -493,6 +503,7 @@ export function wrapCommandWithOsSandbox(options: WrapSandboxOptions): WrappedSa
       readOnlyPaths: options.readOnlyPaths,
       allowNetwork: options.allowNetwork,
       mode,
+      engine: options.engine,
     });
     env.SUPER_WORK_IN_OS_SANDBOX = "1";
     return {

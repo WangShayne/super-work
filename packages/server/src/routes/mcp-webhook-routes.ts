@@ -496,6 +496,7 @@ export function registerMcpWebhookRoutes(ctx: ServerRouteContext): void {
           createTag: args.createTag === true,
           pushRemote: args.pushRemote === true,
           squashReleaseCommit: args.squashReleaseCommit === true,
+          createGithubRelease: args.createGithubRelease === true,
           releaseCommitMessage:
             typeof args.releaseCommitMessage === "string" ? args.releaseCommitMessage : undefined,
         });
@@ -519,6 +520,21 @@ export function registerMcpWebhookRoutes(ctx: ServerRouteContext): void {
       }
       throw new Error(`Unknown engine health action: ${action}`);
     },
+    managePlaybookHygiene: async (args) => {
+      const action = String(args.action ?? "audit");
+      const repoId = args.repoId ? String(args.repoId) : undefined;
+      if (action === "audit") return { report: await kernel.auditPlaybookHygiene(repoId) };
+      if (action === "prune") {
+        if (args.mode !== undefined && args.mode !== "disable" && args.mode !== "delete") {
+          throw new Error(`Invalid mode: ${String(args.mode)} (expected "disable" or "delete")`);
+        }
+        return kernel.pruneNoisyPlaybooks(repoId, {
+          mode: args.mode === "delete" ? "delete" : "disable",
+          dryRun: args.dryRun === true,
+        });
+      }
+      throw new Error(`Unknown playbook hygiene action: ${action}`);
+    },
     getRunDigest: async (args) => {
       const rawHours = Number(args.hours ?? 24);
       const hours = Number.isFinite(rawHours) ? Math.min(Math.max(rawHours, 0), 8760) : 24;
@@ -534,7 +550,7 @@ export function registerMcpWebhookRoutes(ctx: ServerRouteContext): void {
   app.get("/api/mcp", (c) => {
     return c.json({
       name: "super-work",
-      version: "1.5.0",
+      version: "1.6.0",
       transport: "streamable-http",
       endpoint: "/api/mcp",
     });
