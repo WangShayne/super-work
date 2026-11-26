@@ -2,7 +2,8 @@ export type SmokeTriggerMode = "every_gate" | "delivery_only";
 
 export type SandboxMode = "off" | "balanced" | "strict";
 
-export type VerificationStrategy = "always_full" | "impact_scoped";
+/** smart_tiered 为 v1.8.0 新增，行为等同 impact_scoped（预设与零配置的默认值）。 */
+export type VerificationStrategy = "always_full" | "impact_scoped" | "smart_tiered";
 
 export type VisualDiffMode = "off" | "auto" | "enforce" | "informational";
 

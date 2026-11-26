@@ -47,6 +47,10 @@ interface RepoSettingsModalProps {
   open: boolean;
   repo: RepoConfig | null;
   initialTab?: SettingsTab;
+  /** Render inline (Engine Room) instead of as a fixed modal overlay. */
+  embedded?: boolean;
+  /** Restrict which tabs are offered (embedded Engine Room uses two groups). */
+  visibleTabs?: SettingsTab[];
   availableEngines: WorkerEngineId[];
   onClose: () => void;
   onRefresh?: () => void;
@@ -87,12 +91,15 @@ export function RepoSettingsModal({
   open,
   repo,
   initialTab = "runtime",
+  embedded = false,
+  visibleTabs,
   availableEngines,
   onClose,
   onRefresh,
   onSubmit,
 }: RepoSettingsModalProps) {
   const { t } = useI18n();
+  const [savedNotice, setSavedNotice] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(initialTab);
   const [name, setName] = useState("");
   const [baseBranch, setBaseBranch] = useState("main");
@@ -233,9 +240,11 @@ export function RepoSettingsModal({
     setAutoCleanupWorktree(repo.autoCleanupWorktree !== false);
     void loadPlaybook(repo.id);
     void loadCasebook(repo.id);
-  }, [open, repo, initialTab]);
+    // Keyed on id/updatedAt (not object identity) so SSE refreshes don't wipe in-progress edits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, repo?.id, repo?.updatedAt, initialTab]);
 
-  useEscapeKey(open, onClose);
+  useEscapeKey(open && !embedded, onClose);
 
   if (!open || !repo) return null;
 
@@ -381,7 +390,8 @@ export function RepoSettingsModal({
             : null,
         autoCleanupWorktree,
       });
-      onClose();
+      if (embedded) setSavedNotice(true);
+      else onClose();
     } finally {
       setSubmitting(false);
     }
@@ -566,11 +576,17 @@ export function RepoSettingsModal({
   return (
     <div
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
+        if (!embedded && e.target === e.currentTarget) onClose();
       }}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4"
+      className={
+        embedded ? "" : "fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4"
+      }
     >
-      <div className="w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl">
+      <div
+        className={`w-full flex flex-col overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 ${
+          embedded ? "max-h-[70vh]" : "max-w-2xl max-h-[90vh] shadow-2xl"
+        }`}
+      >
         <div className="shrink-0 px-5 pt-5 space-y-4 border-b border-zinc-800">
           <div className="flex items-center justify-between">
             <div>
@@ -579,9 +595,11 @@ export function RepoSettingsModal({
                 {repo.rootPath}
               </div>
             </div>
-            <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200">
-              <X className="w-4 h-4" />
-            </button>
+            {!embedded && (
+              <button type="button" onClick={onClose} className="text-zinc-500 hover:text-zinc-200">
+                <X className="w-4 h-4" />
+              </button>
+            )}
           </div>
 
           {/* Settings Tab Bar */}
@@ -590,6 +608,7 @@ export function RepoSettingsModal({
             setSettingsTab={setSettingsTab}
             playbook={playbook}
             casebook={casebook}
+            visibleTabs={visibleTabs}
           />
         </div>
 
@@ -697,14 +716,17 @@ export function RepoSettingsModal({
             )}
             </div>
 
-            <div className="shrink-0 border-t border-zinc-800 bg-zinc-900/95 px-5 py-3 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={onClose}
-                className="px-3 py-1.5 rounded-lg border border-zinc-800 text-zinc-400 hover:text-zinc-200"
-              >
-                {t("modal.repo.cancel")}
-              </button>
+            <div className="shrink-0 border-t border-zinc-800 bg-zinc-900/95 px-5 py-3 flex items-center justify-end gap-2">
+              {savedNotice && <span className="text-emerald-300 text-[11px] mr-auto">{t("engineRoom.saved")}</span>}
+              {!embedded && (
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="px-3 py-1.5 rounded-lg border border-zinc-800 text-zinc-400 hover:text-zinc-200"
+                >
+                  {t("modal.repo.cancel")}
+                </button>
+              )}
               <button
                 type="submit"
                 disabled={submitting}
@@ -728,7 +750,7 @@ export function RepoSettingsModal({
             setNewRulePinned={setNewRulePinned}
             bundleBusy={bundleBusy}
             bundleNotice={bundleNotice}
-            onClose={onClose}
+            onClose={embedded ? undefined : onClose}
             handleAddPlaybookRule={handleAddPlaybookRule}
             handleTogglePlaybook={handleTogglePlaybook}
             handleDeletePlaybook={handleDeletePlaybook}
@@ -745,7 +767,7 @@ export function RepoSettingsModal({
             casebookQuery={casebookQuery}
             setCasebookQuery={setCasebookQuery}
             repo={repo}
-            onClose={onClose}
+            onClose={embedded ? undefined : onClose}
             handleDeleteCase={handleDeleteCase}
             loadCasebook={loadCasebook}
           />

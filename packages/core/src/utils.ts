@@ -51,7 +51,7 @@ export function normalizeErrorSignature(raw: string): string {
 
 /** Single validator for the repo verification strategy (REST, contract sync, SQLite mapper). */
 export function normalizeVerificationStrategy(raw: unknown): VerificationStrategy | undefined {
-  return raw === "always_full" || raw === "impact_scoped" ? raw : undefined;
+  return raw === "always_full" || raw === "impact_scoped" || raw === "smart_tiered" ? raw : undefined;
 }
 
 export function normalizeSmokeCheckConfig(raw: unknown): SmokeCheckConfig | undefined {

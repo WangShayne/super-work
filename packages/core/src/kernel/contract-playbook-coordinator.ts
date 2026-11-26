@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { getAutonomyPresetPatch, normalizeAutonomyPreset } from "../autonomy-preset.ts";
 import { buildCasebookEntryFromTicket } from "../casebook.ts";
 import { buildHandoverDigest, extractDiffContracts } from "../handover.ts";
 import {
@@ -59,12 +60,23 @@ export async function syncRepoContractOp(
       }
     : repo.hooks;
 
+  // v1.8.0: contract 中的 autonomyPreset 作为底，contract 显式字段优先，其次才是现有 repo 值。
+  // 预设仅在首次同步或显式 force 同步时展开，避免后续自动同步回退用户经 PATCH 做的显式覆盖（与 mode 规则一致）。
+  const contractPreset = normalizeAutonomyPreset(contract.autonomyPreset);
+  const preset = contractPreset && (!repo.contractSyncedHash || force) ? contractPreset : undefined;
+  const presetPatch = preset ? getAutonomyPresetPatch(preset) : undefined;
+
   const updatedRepo: RepoConfig = {
     ...repo,
+    autonomyPreset: preset ?? repo.autonomyPreset,
     mode:
-      !repo.contractSyncedHash && contract.defaultMode
-        ? contract.defaultMode
+      !repo.contractSyncedHash && (contract.defaultMode ?? presetPatch?.mode)
+        ? (contract.defaultMode ?? presetPatch!.mode)
         : repo.mode,
+    autoCleanupWorktree:
+      presetPatch && repo.autoCleanupWorktree === undefined
+        ? presetPatch.autoCleanupWorktree
+        : repo.autoCleanupWorktree,
     defaultDeliveryChannel:
       contract.defaultDeliveryChannel !== undefined
         ? contract.defaultDeliveryChannel
@@ -75,11 +87,13 @@ export async function syncRepoContractOp(
     deliveryGatePolicy:
       contract.deliveryGatePolicy !== undefined
         ? contract.deliveryGatePolicy
-        : repo.deliveryGatePolicy,
+        : (presetPatch?.deliveryGatePolicy ?? repo.deliveryGatePolicy),
     riskThreshold:
       contract.riskThreshold !== undefined
         ? contract.riskThreshold
-        : repo.riskThreshold,
+        : presetPatch
+          ? presetPatch.riskThreshold
+          : repo.riskThreshold,
     sensitivePaths:
       contract.sensitivePaths !== undefined
         ? contract.sensitivePaths.map((s) => String(s).trim()).filter(Boolean)
@@ -92,7 +106,9 @@ export async function syncRepoContractOp(
         ? contract.verificationCommands.map((s) => String(s).trim()).filter(Boolean)
         : repo.verificationCommands,
     verificationStrategy:
-      normalizeVerificationStrategy(contract.verificationStrategy) ?? repo.verificationStrategy,
+      normalizeVerificationStrategy(contract.verificationStrategy) ??
+      presetPatch?.verificationStrategy ??
+      repo.verificationStrategy,
     setupCommands:
       contract.setupCommands !== undefined
         ? contract.setupCommands.map((s) => String(s).trim()).filter(Boolean)
@@ -106,7 +122,10 @@ export async function syncRepoContractOp(
       contract.previewCommand !== undefined
         ? contract.previewCommand.trim() || undefined
         : repo.previewCommand,
-    sandboxMode: contract.sandboxMode !== undefined ? contract.sandboxMode : repo.sandboxMode,
+    sandboxMode:
+      contract.sandboxMode !== undefined
+        ? contract.sandboxMode
+        : (presetPatch?.sandboxMode ?? repo.sandboxMode),
     forbiddenPaths:
       contract.forbiddenPaths !== undefined
         ? contract.forbiddenPaths.map((s) => String(s).trim()).filter(Boolean)
@@ -190,6 +209,7 @@ export async function exportRepoContractOp(
 
   const contract: RepoContractFile = {
     version: 1,
+    ...(repo.autonomyPreset ? { autonomyPreset: repo.autonomyPreset } : {}),
     defaultMode: repo.mode,
     ...(repo.defaultDeliveryChannel ? { defaultDeliveryChannel: repo.defaultDeliveryChannel } : {}),
     defaultTemplate: repo.defaultTemplate,

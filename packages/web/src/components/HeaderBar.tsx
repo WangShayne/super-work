@@ -1,519 +1,201 @@
+import { Clock, Cpu, FolderGit2, Home, Languages, Plus, Settings } from "lucide-react";
 import type { ReactNode } from "react";
-import {
-  Activity,
-  AlertTriangle,
-  Bot,
-  BrainCircuit,
-  Clock,
-  Command,
-  Cpu,
-  FileJson2,
-  FolderGit2,
-  Languages,
-  Plus,
-  Radio,
-  Send,
-  Settings,
-  ShieldCheck,
-  SlidersHorizontal,
-} from "lucide-react";
-import {
-  formatEngineDisplayName,
-  formatLlmProviderDisplay,
-  useI18n,
-} from "../i18n.tsx";
-import type { HealthResponse, OperatingMode, RepoConfig } from "../types.ts";
+import { useI18n, type TranslationKey } from "../i18n.tsx";
+import type { EngineHealthRecord, RepoConfig, SelfReloadState, WorkerEngineId } from "../types.ts";
+import { healthAlertReasons, type HealthAlertReason } from "../utils/superAgent.ts";
+
+export type MainTab = "home" | "history" | "settings";
 
 interface HeaderBarProps {
+  activeTab: MainTab;
+  onChangeTab: (tab: MainTab) => void;
+  pendingInboxCount: number;
+  historyCount: number;
   repos: RepoConfig[];
   selectedRepoId: string;
   onSelectRepo: (id: string) => void;
-  onChangeMode: (repoId: string, mode: OperatingMode) => void;
-  health: HealthResponse | null;
-  sseConnected: boolean;
-  runningTicketCount: number;
-  attentionTicketCount: number;
-  onOpenDispatch: () => void;
-  onOpenSimulate: () => void;
+  /** SSE is offline AFTER the initial mount grace period (computed by App). */
+  sseOffline: boolean;
+  engineHealth: EngineHealthRecord[];
+  availableEngines: WorkerEngineId[];
+  selfReload?: SelfReloadState;
   onOpenAddRepo: () => void;
-  onOpenRepoSettings: () => void;
-  onOpenContractSettings?: () => void;
-  onOpenRoutines?: () => void;
-  onOpenMergeTrain?: () => void;
-  onOpenWorktrees: () => void;
-  onOpenSetup: () => void;
-  onOpenCommandPalette?: () => void;
-  trippedEngineCount?: number;
-  onOpenEngineHealth?: () => void;
+  onOpenCommandPalette: () => void;
+  onOpenEngineHealth: () => void;
 }
 
-interface StatusCapsuleProps {
-  icon: ReactNode;
-  label: string;
-  value: string;
-  extra?: string;
-  tone?: "neutral" | "good" | "warn" | "accent";
-  align?: "left" | "right";
-  tooltipTitle: string;
-  tooltipBody: string;
-  tooltipFooter?: string;
-  onClick?: () => void;
-}
-
-function StatusCapsule({
-  icon,
-  label,
-  value,
-  extra,
-  tone = "neutral",
-  align = "left",
-  tooltipTitle,
-  tooltipBody,
-  tooltipFooter,
-  onClick,
-}: StatusCapsuleProps) {
-  const toneClasses =
-    tone === "good"
-      ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-200"
-      : tone === "warn"
-        ? "border-amber-500/35 bg-amber-500/10 text-amber-200"
-        : tone === "accent"
-          ? "border-indigo-500/30 bg-indigo-500/10 text-indigo-200"
-          : "border-zinc-800 bg-zinc-900/80 text-zinc-200";
-
-  const alignClass = align === "right" ? "right-0" : "left-0";
-  const interactiveClass = onClick
-    ? "cursor-pointer hover:border-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/60"
-    : "cursor-help";
-
-  const { locale, t } = useI18n();
-  const content = (
-    <>
-      <span className="shrink-0">{icon}</span>
-      <span className="text-zinc-400">
-        {label}
-        {locale === "zh" ? "：" : ":"}
-      </span>
-      <span className="font-medium text-zinc-100">{value}</span>
-      {extra && <span className="text-zinc-400 font-mono text-[10px]">{extra}</span>}
-    </>
-  );
-
-  return (
-    <div className="relative group shrink-0">
-      {onClick ? (
-        <button
-          type="button"
-          onClick={onClick}
-          className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border text-[11px] whitespace-nowrap transition ${toneClasses} ${interactiveClass}`}
-        >
-          {content}
-        </button>
-      ) : (
-        <div
-          tabIndex={0}
-          className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border text-[11px] whitespace-nowrap transition ${toneClasses} ${interactiveClass}`}
-        >
-          {content}
-        </div>
-      )}
-
-      <div
-        role="tooltip"
-        className={`pointer-events-none invisible opacity-0 group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100 transition-opacity duration-150 absolute top-full mt-1.5 ${alignClass} w-72 rounded-xl border border-zinc-700/80 bg-zinc-900/95 backdrop-blur p-3 shadow-2xl z-40 text-left space-y-1.5`}
-      >
-        <div className="text-[11px] font-semibold text-zinc-100">{tooltipTitle}</div>
-        <p className="text-[11px] text-zinc-300 leading-relaxed">{tooltipBody}</p>
-        {tooltipFooter && (
-          <div className="pt-1 border-t border-zinc-800 text-[10px] font-mono text-indigo-300">
-            {tooltipFooter}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
+const REASON_KEY: Record<HealthAlertReason, TranslationKey> = {
+  sse_offline: "header.alert.sse",
+  no_healthy_engine: "header.alert.engines",
+  pinned_engine_down: "header.alert.pinned",
+};
 
 export function HeaderBar({
+  activeTab,
+  onChangeTab,
+  pendingInboxCount,
+  historyCount,
   repos,
   selectedRepoId,
   onSelectRepo,
-  onChangeMode,
-  health,
-  sseConnected,
-  runningTicketCount,
-  attentionTicketCount,
-  onOpenDispatch,
-  onOpenSimulate,
+  sseOffline,
+  engineHealth,
+  availableEngines,
+  selfReload,
   onOpenAddRepo,
-  onOpenRepoSettings,
-  onOpenContractSettings,
-  onOpenRoutines,
-  onOpenMergeTrain,
-  onOpenWorktrees,
-  onOpenSetup,
   onOpenCommandPalette,
-  trippedEngineCount = 0,
   onOpenEngineHealth,
 }: HeaderBarProps) {
-  const { locale, t, toggleLocale } = useI18n();
+  const { t, toggleLocale } = useI18n();
   const activeRepo = repos.find((r) => r.id === selectedRepoId) ?? repos[0];
+  const reasons = healthAlertReasons({ sseOffline, availableEngines, engineHealth, repo: activeRepo });
+  const reloadPhase = selfReload && selfReload.phase !== "idle" ? selfReload : undefined;
+  const reloadBad = reloadPhase?.phase === "rolled_back" || reloadPhase?.phase === "failed";
 
-  const modes: Array<{ id: OperatingMode; label: string; desc: string }> = [
-    { id: "off", label: t("header.mode.off"), desc: t("header.mode.offDesc") },
-    { id: "observe", label: t("header.mode.observe"), desc: t("header.mode.observeDesc") },
-    { id: "auto", label: t("header.mode.auto"), desc: t("header.mode.autoDesc") },
+  const tabs: { id: MainTab; label: string; icon: typeof Home; badge?: ReactNode }[] = [
+    {
+      id: "home",
+      label: t("nav.home"),
+      icon: Home,
+      badge:
+        pendingInboxCount > 0 ? (
+          <span className="px-1.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-mono">
+            {pendingInboxCount}
+          </span>
+        ) : null,
+    },
+    {
+      id: "history",
+      label: t("nav.history"),
+      icon: Clock,
+      badge: <span className="text-[10px] font-mono text-zinc-500">{historyCount}</span>,
+    },
+    { id: "settings", label: t("nav.settings"), icon: Settings },
   ];
 
-  const implEngine = activeRepo?.preferredImplementEngine ?? "claude";
-  const reviewEngine = activeRepo?.preferredReviewEngine ?? "codex";
-  const availableList = (health?.availableEngines ?? []).map((e) =>
-    formatEngineDisplayName(e, locale),
-  );
-  const llmDisplay = formatLlmProviderDisplay(health?.llmProvider, locale);
-  const activeWorktrees = health?.counts.activeWorktrees ?? 0;
-  const reclaimableWorktrees = health?.counts.reclaimableWorktrees ?? 0;
-
-  const implDisplay = formatEngineDisplayName(implEngine, locale);
-  const reviewDisplay = formatEngineDisplayName(reviewEngine, locale);
-  const enginesCompactValue =
-    implEngine === reviewEngine ? implDisplay : `${implDisplay} → ${reviewDisplay}`;
-  const smokeEnabled = Boolean(activeRepo?.smokeCheck?.enabled);
-  const hasStaticGate = Boolean(
-    activeRepo?.contractSyncedAt || (activeRepo?.verificationCommands?.length ?? 0) > 0,
-  );
-  const vdiffMode = activeRepo?.smokeCheck?.browserCheck?.visualDiffMode ?? "auto";
-  const vdiffActive = smokeEnabled && Boolean(activeRepo?.smokeCheck?.browserCheck?.enabled) && vdiffMode !== "off";
-  const riskGateActive =
-    activeRepo?.deliveryGatePolicy === "risk_gated" ||
-    activeRepo?.deliveryGatePolicy === "always_signoff";
-  const contractExtras = [
-    activeRepo?.defaultTddMode ? t("header.tddOn") : "",
-    vdiffActive ? t("header.vdiffOn") : "",
-    riskGateActive ? t("header.riskGateTag") : "",
-  ].filter(Boolean);
-
   return (
-    <header className="border-b border-zinc-800/80 bg-zinc-950/95 backdrop-blur sticky top-0 z-20">
-      {/* Row 1: Primary Bar */}
-      <div className="px-5 py-3 flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-4 flex-wrap">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-indigo-500/15 border border-indigo-400/30 flex items-center justify-center text-indigo-400">
-              <Cpu className="w-4 h-4" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-semibold tracking-tight text-zinc-100 text-sm">super-work</span>
-                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
-                  v1.7
-                </span>
-                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700/60">
-                  {t("brand.badge")}
-                </span>
-                {health?.selfReload && health.selfReload.phase !== "idle" && (
-                  <span
-                    title={health.selfReload.summary ?? health.selfReload.error}
-                    className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
-                      health.selfReload.phase === "rolled_back" ||
-                      health.selfReload.phase === "failed"
-                        ? "bg-rose-500/15 text-rose-300 border-rose-500/35"
-                        : "bg-amber-500/15 text-amber-200 border-amber-500/35 animate-pulse"
-                    }`}
-                  >
-                    {t(`selfHost.phase.${health.selfReload.phase}` as Parameters<typeof t>[0])}
-                  </span>
-                )}
-              </div>
-              <p className="text-[11px] text-zinc-500">{t("brand.subtitle")}</p>
-            </div>
+    <header className="sticky top-0 z-20 border-b border-zinc-800/70 bg-zinc-950/90 backdrop-blur-md">
+      <div className="min-h-[52px] px-4 sm:px-5 py-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
+        {/* Left: brand + health */}
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="w-7 h-7 rounded-lg bg-indigo-500/15 border border-indigo-400/30 flex items-center justify-center text-indigo-400">
+            <Cpu className="w-3.5 h-3.5" aria-hidden="true" />
           </div>
-
-          <div className="h-6 w-px bg-zinc-800 hidden sm:block" />
-
-          <div className="flex items-center gap-2">
-            <FolderGit2 className="w-4 h-4 text-zinc-400" />
-            <select
-              value={activeRepo?.id ?? ""}
-              onChange={(e) => onSelectRepo(e.target.value)}
-              className="bg-zinc-900 border border-zinc-800 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-indigo-500"
+          <span className="font-semibold tracking-tight text-zinc-100 text-sm">super-work</span>
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-300/90 border border-indigo-500/25">
+            v1.8
+          </span>
+          {reloadPhase && (
+            <span
+              title={reloadPhase.summary ?? reloadPhase.error}
+              className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
+                reloadBad
+                  ? "bg-rose-500/15 text-rose-300 border-rose-500/35"
+                  : "bg-amber-500/15 text-amber-200 border-amber-500/35 animate-pulse"
+              }`}
             >
-              {repos.length === 0 ? (
-                <option value="">{t("header.noRepo")}</option>
-              ) : (
-                repos.map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.name} ({r.baseBranch})
-                  </option>
-                ))
-              )}
-            </select>
-            <button
-              onClick={onOpenAddRepo}
-              title={t("header.registerRepoTitle")}
-              className="p-1.5 rounded-md border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-100 hover:border-zinc-700 transition"
-            >
-              <Plus className="w-3.5 h-3.5" />
-            </button>
-            <button
-              onClick={onOpenRepoSettings}
-              disabled={!activeRepo}
-              title={t("header.repoSettingsTitle")}
-              className="p-1.5 rounded-md border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-100 hover:border-zinc-700 disabled:opacity-40 transition"
-            >
-              <SlidersHorizontal className="w-3.5 h-3.5" />
-            </button>
-          </div>
-
-          {activeRepo && (
-            <div className="flex items-center bg-zinc-900 rounded-lg p-0.5 border border-zinc-800">
-              {modes.map((m) => {
-                const selected = activeRepo.mode === m.id;
-                const activeColors =
-                  m.id === "auto"
-                    ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
-                    : m.id === "observe"
-                      ? "bg-amber-500/20 text-amber-300 border-amber-500/40"
-                      : "bg-zinc-800 text-zinc-300 border-zinc-700";
-                return (
-                  <button
-                    key={m.id}
-                    title={m.desc}
-                    onClick={() => onChangeMode(activeRepo.id, m.id)}
-                    className={`px-2.5 py-1 rounded-md text-[11px] font-medium border transition ${
-                      selected
-                        ? activeColors
-                        : "border-transparent text-zinc-500 hover:text-zinc-300"
-                    }`}
-                  >
-                    {m.label}
-                  </button>
-                );
-              })}
-            </div>
+              {t(`selfHost.phase.${reloadPhase.phase}` as TranslationKey)}
+            </span>
           )}
-        </div>
-
-        <div className="flex items-center gap-2 flex-wrap">
-          {onOpenCommandPalette && (
-            <button
-              onClick={onOpenCommandPalette}
-              title="⌘K / Ctrl+K"
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-indigo-500/35 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-200 text-xs font-medium transition"
+          {reasons.length === 0 ? (
+            <span
+              role="img"
+              title={t("header.healthOk")}
+              aria-label={t("header.healthOk")}
+              className="inline-flex items-center px-1"
             >
-              <Command className="w-3.5 h-3.5" />
-              {t("header.commandPaletteBtn")}
-            </button>
-          )}
-
-          {trippedEngineCount > 0 && (
+              <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px] shadow-emerald-400/60" />
+            </span>
+          ) : (
             <button
               type="button"
-              onClick={onOpenEngineHealth ?? onOpenSetup}
-              title={t("engines.badgeTitle")}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 text-amber-200 text-xs font-medium transition"
+              onClick={onOpenEngineHealth}
+              title={t("header.alertsTitle")}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 text-amber-200 text-[11px] font-medium transition"
             >
-              <AlertTriangle className="w-3.5 h-3.5" />
-              {t("engines.badge")} · {trippedEngineCount}
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" aria-hidden="true" />
+              {t(REASON_KEY[reasons[0]!])}
+              {reasons.length > 1 ? ` +${reasons.length - 1}` : ""}
             </button>
           )}
+        </div>
 
+        {/* Center: floating pill tablist */}
+        <div
+          role="tablist"
+          aria-label={t("header.mainNav")}
+          className="order-last sm:order-none w-full sm:w-auto flex justify-center bg-zinc-900/80 border border-zinc-800/80 rounded-full p-0.5"
+        >
+          {tabs.map(({ id, label, icon: Icon, badge }) => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === id}
+              onClick={() => onChangeTab(id)}
+              className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-medium transition ${
+                activeTab === id ? "bg-zinc-800 text-zinc-100 shadow-sm" : "text-zinc-500 hover:text-zinc-300"
+              }`}
+            >
+              <Icon className="w-3.5 h-3.5" aria-hidden="true" />
+              {label}
+              {badge}
+            </button>
+          ))}
+        </div>
+
+        {/* Right: compact repo pill (non-home only), ⌘K, language */}
+        <div className="flex items-center gap-2">
+          {activeTab !== "home" && (
+            <div className="flex items-center gap-1">
+              <div className="inline-flex items-center gap-1.5 pl-2 rounded-full border border-zinc-800 bg-zinc-900">
+                <FolderGit2 className="w-3.5 h-3.5 text-zinc-400" aria-hidden="true" />
+                <select
+                  value={activeRepo?.id ?? ""}
+                  onChange={(e) => onSelectRepo(e.target.value)}
+                  aria-label={t("header.repoSelect")}
+                  className="bg-transparent py-1 pr-2 text-xs text-zinc-200 max-w-[160px] rounded-full"
+                >
+                  {repos.length === 0 ? (
+                    <option value="">{t("header.noRepo")}</option>
+                  ) : (
+                    repos.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.name} · {r.baseBranch}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
+              <button
+                type="button"
+                onClick={onOpenAddRepo}
+                title={t("header.registerRepoTitle")}
+                aria-label={t("header.registerRepoTitle")}
+                className="p-1.5 rounded-full border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-100 hover:border-zinc-700 transition"
+              >
+                <Plus className="w-3.5 h-3.5" aria-hidden="true" />
+              </button>
+            </div>
+          )}
           <button
-            onClick={onOpenSetup}
-            title={t("header.settingsTitle")}
-            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-zinc-800 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 text-xs font-medium transition"
+            type="button"
+            onClick={onOpenCommandPalette}
+            title="⌘K / Ctrl+K"
+            className="px-2.5 py-1 rounded-full border border-indigo-500/35 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-200 text-xs font-medium transition"
           >
-            <Settings className="w-3.5 h-3.5 text-zinc-400" />
-            {t("header.settings")}
+            {t("header.cmdK")}
           </button>
-
           <button
+            type="button"
             onClick={toggleLocale}
             title={t("header.langTitle")}
-            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-zinc-800 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 text-xs font-medium transition"
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-zinc-800 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 text-xs transition"
           >
-            <Languages className="w-3.5 h-3.5 text-indigo-400" />
+            <Languages className="w-3.5 h-3.5" aria-hidden="true" />
             {t("header.langButton")}
           </button>
-
-          <button
-            onClick={onOpenSimulate}
-            disabled={!activeRepo}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 text-xs font-medium disabled:opacity-40 transition"
-          >
-            <Send className="w-3.5 h-3.5 text-amber-400" />
-            {t("header.simulateEvent")}
-          </button>
-
-          <button
-            onClick={onOpenDispatch}
-            disabled={!activeRepo}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium disabled:opacity-40 transition shadow-sm shadow-indigo-950"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            {t("header.dispatchTask")}
-          </button>
         </div>
-      </div>
-
-      {/* Row 2: Self-Explanatory System Status Strip */}
-      <div className="px-5 py-1.5 border-t border-zinc-800/60 bg-zinc-900/40 flex flex-wrap items-center gap-1.5">
-        <StatusCapsule
-          icon={
-            <Radio
-              className={`w-3 h-3 ${sseConnected ? "text-emerald-400" : "text-rose-400"}`}
-            />
-          }
-          label={t("strip.sse.label")}
-          value={sseConnected ? t("strip.sse.live") : t("strip.sse.reconnecting")}
-          tone={sseConnected ? "good" : "warn"}
-          align="left"
-          tooltipTitle={t("strip.sse.label")}
-          tooltipBody={t("strip.sse.desc")}
-        />
-
-        <StatusCapsule
-          icon={<BrainCircuit className="w-3 h-3 text-indigo-400" />}
-          label={t("strip.llm.label")}
-          value={llmDisplay}
-          tone="accent"
-          align="left"
-          onClick={onOpenSetup}
-          tooltipTitle={t("strip.llm.label")}
-          tooltipBody={t("strip.llm.desc")}
-          tooltipFooter={`${t("header.controlPlanePrefix")}: ${health?.llmProvider ?? "heuristic:local"}`}
-        />
-
-        <StatusCapsule
-          icon={<Bot className="w-3 h-3 text-sky-400" />}
-          label={t("strip.engines.label")}
-          value={enginesCompactValue}
-          extra={`(${health?.availableEngines.length ?? 0})`}
-          align="left"
-          onClick={onOpenSetup}
-          tooltipTitle={t("strip.engines.label")}
-          tooltipBody={t("strip.engines.desc")}
-          tooltipFooter={`${t("strip.engines.coding")}: ${implDisplay} · ${t("strip.engines.review")}: ${reviewDisplay} | ${t("strip.engines.detectedPrefix")} ${availableList.join(", ") || "—"}`}
-        />
-
-        {activeRepo && (
-          <StatusCapsule
-            icon={
-              <FileJson2
-                className={`w-3 h-3 ${
-                  smokeEnabled ? "text-emerald-400" : hasStaticGate ? "text-indigo-400" : "text-zinc-400"
-                }`}
-              />
-            }
-            label={t("strip.contract.label")}
-            value={
-              smokeEnabled
-                ? activeRepo.smokeCheck?.browserCheck?.enabled
-                  ? t("strip.contract.smokeUiOn")
-                  : t("strip.contract.smokeOn")
-                : hasStaticGate
-                  ? t("strip.contract.synced")
-                  : t("strip.contract.unset")
-            }
-            extra={contractExtras.length > 0 ? contractExtras.join("·") : undefined}
-            tone={smokeEnabled ? "good" : hasStaticGate ? "accent" : "neutral"}
-            align="left"
-            onClick={onOpenContractSettings ?? onOpenRepoSettings}
-            tooltipTitle={t("strip.contract.label")}
-            tooltipBody={t("strip.contract.desc")}
-            tooltipFooter={`Sandbox: ${activeRepo.sandboxMode ?? "balanced"} | ${
-              smokeEnabled
-                ? `Smoke: ${activeRepo.smokeCheck?.startCommand}`
-                : `${activeRepo.verificationCommands?.length ?? 0} verification cmd(s)`
-            }`}
-          />
-        )}
-
-        <StatusCapsule
-          icon={
-            <ShieldCheck
-              className={`w-3 h-3 ${
-                attentionTicketCount > 0 ? "text-amber-400" : "text-emerald-400"
-              }`}
-            />
-          }
-          label={t("strip.watchdog.label")}
-          value={
-            attentionTicketCount > 0
-              ? `${attentionTicketCount} ${t("strip.watchdog.alertSuffix")}`
-              : t("strip.watchdog.guarding")
-          }
-          extra={
-            attentionTicketCount === 0
-              ? `(${runningTicketCount} ${t("strip.watchdog.runningSuffix")})`
-              : undefined
-          }
-          tone={attentionTicketCount > 0 ? "warn" : "neutral"}
-          align="right"
-          tooltipTitle={t("strip.watchdog.label")}
-          tooltipBody={t("strip.watchdog.desc")}
-        />
-
-        <StatusCapsule
-          icon={<Activity className="w-3 h-3 text-sky-400" />}
-          label={t("strip.outbox.label")}
-          value={`${health?.counts.pendingOutbox ?? 0} ${t("strip.outbox.pendingSuffix")}`}
-          onClick={onOpenMergeTrain}
-          align="right"
-          tooltipTitle={t("strip.outbox.label")}
-          tooltipBody={t("strip.outbox.desc")}
-        />
-
-        <StatusCapsule
-          icon={
-            <Clock
-              className={`w-3 h-3 ${
-                (health?.counts.activeRoutines ?? 0) > 0 ? "text-teal-400" : "text-zinc-400"
-              }`}
-            />
-          }
-          label={t("strip.routines.label")}
-          value={
-            (health?.counts.activeRoutines ?? 0) > 0
-              ? `${health?.counts.activeRoutines} ${t("strip.routines.activeSuffix")}`
-              : t("strip.routines.none")
-          }
-          tone={(health?.counts.activeRoutines ?? 0) > 0 ? "good" : "neutral"}
-          align="right"
-          onClick={onOpenRoutines}
-          tooltipTitle={t("strip.routines.label")}
-          tooltipBody={t("strip.routines.desc")}
-        />
-
-        <StatusCapsule
-          icon={
-            <FolderGit2
-              className={`w-3 h-3 ${
-                reclaimableWorktrees > 0 ? "text-amber-400" : "text-sky-400"
-              }`}
-            />
-          }
-          label={t("strip.worktrees.label")}
-          value={
-            reclaimableWorktrees > 0
-              ? `${reclaimableWorktrees} ${t("strip.worktrees.reclaimableSuffix")}`
-              : activeWorktrees > 0
-                ? `${activeWorktrees} ${t("strip.worktrees.activeSuffix")}`
-                : t("strip.worktrees.clean")
-          }
-          extra={
-            (health?.counts.activePreviews ?? 0) > 0
-              ? `(${health?.counts.activePreviews} ${t("strip.worktrees.liveSuffix")})`
-              : reclaimableWorktrees > 0 && activeWorktrees > 0
-                ? `(${activeWorktrees} ${t("strip.worktrees.activeSuffix")})`
-                : undefined
-          }
-          tone={reclaimableWorktrees > 0 ? "warn" : "neutral"}
-          align="right"
-          onClick={onOpenWorktrees}
-          tooltipTitle={t("strip.worktrees.label")}
-          tooltipBody={t("strip.worktrees.desc")}
-        />
       </div>
     </header>
   );

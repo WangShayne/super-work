@@ -1,92 +1,60 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { BarChart3, Clock, Inbox, Kanban } from "lucide-react";
-import { api, getAuthToken } from "./api.ts";
-import { HeaderBar } from "./components/HeaderBar.tsx";
-import { useI18n } from "./i18n.tsx";
+import { api } from "./api.ts";
+import type { EngineRoomSection, EngineRoomTarget } from "./components/EngineRoomPanel.tsx";
+import type { ResolveHandler } from "./components/NeedsYouCard.tsx";
+import { HeaderBar, type MainTab } from "./components/HeaderBar.tsx";
+import { useKernelEvents } from "./hooks/useKernelEvents.ts";
 import type {
+  AutonomyPreset,
+  EngineHealthRecord,
   HealthResponse,
   InboxItem,
-  LiveEventLogEntry,
-  OperatingMode,
   PublicSetupStatus,
   RepoConfig,
   RepoMetricsSummary,
+  RequirementRouteKind,
   Ticket,
 } from "./types.ts";
-import { InboxView } from "./views/InboxView.tsx";
 
-const BoardView = lazy(() =>
-  import("./views/BoardView.tsx").then((m) => ({ default: m.BoardView })),
-);
-const RoutinesView = lazy(() =>
-  import("./views/RoutinesView.tsx").then((m) => ({ default: m.RoutinesView })),
-);
-const MetricsView = lazy(() =>
-  import("./views/MetricsView.tsx").then((m) => ({ default: m.MetricsView })),
-);
+const HomeView = lazy(() => import("./views/HomeView.tsx").then((m) => ({ default: m.HomeView })));
+const HistoryView = lazy(() => import("./views/HistoryView.tsx").then((m) => ({ default: m.HistoryView })));
+const SettingsView = lazy(() => import("./views/SettingsView.tsx").then((m) => ({ default: m.SettingsView })));
 const DeepDiveDrawer = lazy(() =>
   import("./components/DeepDiveDrawer.tsx").then((m) => ({ default: m.DeepDiveDrawer })),
-);
-const DispatchTaskModal = lazy(() =>
-  import("./components/DispatchTaskModal.tsx").then((m) => ({ default: m.DispatchTaskModal })),
-);
-const RepoSettingsModal = lazy(() =>
-  import("./components/RepoSettingsModal.tsx").then((m) => ({ default: m.RepoSettingsModal })),
 );
 const SetupWizardModal = lazy(() =>
   import("./components/SetupWizardModal.tsx").then((m) => ({ default: m.SetupWizardModal })),
 );
-const SimulateEventModal = lazy(() =>
-  import("./components/Modals.tsx").then((m) => ({ default: m.SimulateEventModal })),
-);
 const AddRepoModal = lazy(() =>
   import("./components/Modals.tsx").then((m) => ({ default: m.AddRepoModal })),
 );
-const WorktreeManagerModal = lazy(() =>
-  import("./components/Modals.tsx").then((m) => ({ default: m.WorktreeManagerModal })),
-);
 const CommandPaletteModal = lazy(() =>
-  import("./components/CommandPaletteModal.tsx").then((m) => ({
-    default: m.CommandPaletteModal,
-  })),
-);
-const MergeTrainModal = lazy(() =>
-  import("./components/MergeTrainModal.tsx").then((m) => ({
-    default: m.MergeTrainModal,
-  })),
+  import("./components/CommandPaletteModal.tsx").then((m) => ({ default: m.CommandPaletteModal })),
 );
 
-type MainTab = "inbox" | "board" | "routines" | "metrics";
+type RepoPatch = Parameters<typeof api.patchRepo>[1];
+
+/** SSE must stay offline this long after mount before the header raises an alert. */
+const SSE_GRACE_MS = 2000;
 
 export function App() {
-  const { t } = useI18n();
-  const [activeTab, setActiveTab] = useState<MainTab>("inbox");
+  const [sseGraceElapsed, setSseGraceElapsed] = useState(false);
+  const [activeTab, setActiveTab] = useState<MainTab>("home");
   const [repos, setRepos] = useState<RepoConfig[]>([]);
-  const [selectedRepoId, setSelectedRepoId] = useState<string>("");
+  const [selectedRepoId, setSelectedRepoId] = useState("");
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [allTickets, setAllTickets] = useState<Ticket[]>([]);
   const [inboxItems, setInboxItems] = useState<InboxItem[]>([]);
   const [metrics, setMetrics] = useState<RepoMetricsSummary | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [sseConnected, setSseConnected] = useState(false);
-
   const [inspectedTicketId, setInspectedTicketId] = useState<string | null>(null);
-  const [liveEvents, setLiveEvents] = useState<LiveEventLogEntry[]>([]);
-  const [dispatchOpen, setDispatchOpen] = useState(false);
-  const [simulateOpen, setSimulateOpen] = useState(false);
   const [addRepoOpen, setAddRepoOpen] = useState(false);
-  const [repoSettingsOpen, setRepoSettingsOpen] = useState(false);
-  const [repoSettingsInitialTab, setRepoSettingsInitialTab] = useState<
-    "runtime" | "contract" | "playbook" | "casebook"
-  >("runtime");
-  const [worktreesOpen, setWorktreesOpen] = useState(false);
-  const [mergeTrainOpen, setMergeTrainOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [setupStatus, setSetupStatus] = useState<PublicSetupStatus | null>(null);
   const [setupOpen, setSetupOpen] = useState(false);
-  const [setupInitialTab, setSetupInitialTab] = useState<"config" | "doctor">("config");
+  const [engineRoomTarget, setEngineRoomTarget] = useState<EngineRoomTarget | null>(null);
+  const [engineHealth, setEngineHealth] = useState<EngineHealthRecord[]>([]);
   const setupAutoCheckedRef = useRef(false);
-  const [trippedEngineCount, setTrippedEngineCount] = useState(0);
 
   const refreshAll = useCallback(async (repoFilter?: string) => {
     const [h, r, s] = await Promise.all([api.getHealth(), api.listRepos(), api.getSetupStatus()]);
@@ -95,42 +63,46 @@ export function App() {
     setSetupStatus(s);
     api
       .listEngineHealth()
-      .then(({ engines }) => setTrippedEngineCount(engines.filter((e) => e.status === "tripped").length))
+      .then(({ engines }) => setEngineHealth(engines))
       .catch(() => undefined);
     if (!setupAutoCheckedRef.current) {
       setupAutoCheckedRef.current = true;
-      if (!s.initialized) {
-        setSetupOpen(true);
-      }
+      if (!s.initialized) setSetupOpen(true);
     }
 
-    const activeRepo = repoFilter || r.repos[0]?.id || "";
-    if (!repoFilter && activeRepo) {
-      setSelectedRepoId((prev) => prev || activeRepo);
-    }
+    const activeRepoId = repoFilter || r.repos[0]?.id || "";
+    if (!repoFilter && activeRepoId) setSelectedRepoId((prev) => prev || activeRepoId);
 
     const [tAll, i, m] = await Promise.all([
       api.listTickets(),
-      api.listInbox(activeRepo || undefined),
-      api.getMetrics(activeRepo || undefined),
+      api.listInbox(activeRepoId || undefined),
+      api.getMetrics(activeRepoId || undefined),
     ]);
     setAllTickets(tAll.tickets);
     const byId = new Map(tAll.tickets.map((tkt) => [tkt.id, tkt]));
-    const scopedTickets = activeRepo
-      ? tAll.tickets.filter(
-          (tkt) =>
-            tkt.repoId === activeRepo ||
-            (tkt.parentTicketId && byId.get(tkt.parentTicketId)?.repoId === activeRepo),
-        )
-      : tAll.tickets;
-    setTickets(scopedTickets);
+    setTickets(
+      activeRepoId
+        ? tAll.tickets.filter(
+            (tkt) =>
+              tkt.repoId === activeRepoId ||
+              (tkt.parentTicketId && byId.get(tkt.parentTicketId)?.repoId === activeRepoId),
+          )
+        : tAll.tickets,
+    );
     setInboxItems(i.items);
     setMetrics(m.metrics);
   }, []);
 
+  const refresh = useCallback(() => void refreshAll(selectedRepoId || undefined), [refreshAll, selectedRepoId]);
+
   useEffect(() => {
     void refreshAll(selectedRepoId || undefined);
   }, [selectedRepoId, refreshAll]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSseGraceElapsed(true), SSE_GRACE_MS);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -143,313 +115,113 @@ export function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  // Subscribe to real-time Kernel SSE bus
-  useEffect(() => {
-    const token = getAuthToken();
-    const sseUrl = token ? `/api/events?token=${encodeURIComponent(token)}` : "/api/events";
-    const es = new EventSource(sseUrl);
+  const { sseConnected, liveEvents } = useKernelEvents(refresh);
 
-    es.onopen = () => setSseConnected(true);
-    es.onerror = () => setSseConnected(false);
-
-    const pushLog = (ticketId: string, kind: string, summary: string, raw: unknown) => {
-      setLiveEvents((prev) => [
-        ...prev.slice(-199),
-        {
-          id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-          ticketId,
-          kind,
-          summary,
-          timestamp: new Date().toISOString(),
-          raw,
-        },
-      ]);
-    };
-
-    const handleRefreshEvent = () => {
-      void refreshAll(selectedRepoId || undefined);
-    };
-
-    const eventNames = [
-      "repo_updated",
-      "playbook_updated",
-      "routine_updated",
-      "routine_run_updated",
-      "casebook_updated",
-      "epic_replanned",
-      "preview_updated",
-      "checkpoint_created",
-      "ticket_created",
-      "ticket_updated",
-      "stage_started",
-      "stage_completed",
-      "thread_routed",
-      "watchdog_signal",
-      "watchdog_decision",
-      "inbox_created",
-      "inbox_resolved",
-      "outbox_queued",
-      "outbox_sent",
-      "outbox_failed",
-      "worktrees_gc",
-      "verification_completed",
-      "review_comment_updated",
-      "eval_run_updated",
-      "campaign_updated",
-      "milestone_updated",
-      "merge_train_updated",
-      "lifecycle_hook_executed",
-      "self_reload_updated",
-    ];
-
-    for (const name of eventNames) {
-      es.addEventListener(name, (e: MessageEvent) => {
-        try {
-          const parsed = JSON.parse(e.data) as Record<string, unknown>;
-          const tId =
-            (parsed.ticketId as string | undefined) ||
-            ((parsed.ticket as { id?: string } | undefined)?.id) ||
-            ((parsed.checkpoint as { ticketId?: string } | undefined)?.ticketId) ||
-            ((parsed.item as { ticketId?: string } | undefined)?.ticketId) ||
-            ((parsed.entry as { ticketId?: string } | undefined)?.ticketId) ||
-            ((parsed.signal as { ticketId?: string } | undefined)?.ticketId);
-          if (tId) {
-            pushLog(tId, name, JSON.stringify(parsed).slice(0, 180), parsed);
-          }
-        } catch {
-          // Ignore parse errors
-        }
-        handleRefreshEvent();
-      });
-    }
-
-    es.addEventListener("worker_event", (e: MessageEvent) => {
-      try {
-        const parsed = JSON.parse(e.data) as {
-          ticketId: string;
-          engine: string;
-          event: { type: string; text?: string; toolName?: string; inputSummary?: string; summary?: string; message?: string };
-        };
-        const ev = parsed.event;
-        const msg =
-          ev.text || ev.summary || ev.message || (ev.toolName ? `${ev.toolName}: ${ev.inputSummary ?? ""}` : ev.type);
-        pushLog(parsed.ticketId, `${parsed.engine}:${ev.type}`, msg, parsed);
-      } catch {
-        // Ignore
-      }
-    });
-
-    return () => {
-      es.close();
-    };
-  }, [selectedRepoId, refreshAll]);
-
-  const ticketsById = useMemo(() => {
-    const map = new Map<string, Ticket>();
-    for (const t of allTickets) map.set(t.id, t);
-    return map;
-  }, [allTickets]);
-
-  const pendingInboxCount = useMemo(
-    () => inboxItems.filter((i) => i.status === "pending").length,
-    [inboxItems],
-  );
-
-  const runningTicketCount = useMemo(
-    () =>
-      tickets.filter((tkt) =>
-        ["planning", "spec_testing", "implementing", "reviewing", "rebasing"].includes(tkt.status),
-      ).length,
-    [tickets],
-  );
-
-  const attentionTicketCount = useMemo(
-    () =>
-      tickets.filter((tkt) =>
-        ["watchdog_intervention", "needs_human"].includes(tkt.status),
-      ).length,
-    [tickets],
-  );
-
+  const ticketsById = useMemo(() => new Map(allTickets.map((tkt) => [tkt.id, tkt])), [allTickets]);
+  const pendingInboxCount = useMemo(() => inboxItems.filter((i) => i.status === "pending").length, [inboxItems]);
   const activeRepo = repos.find((r) => r.id === selectedRepoId) ?? repos[0];
+  const availableEngines = health?.availableEngines ?? ["mock"];
 
-  const handleChangeMode = async (repoId: string, mode: OperatingMode) => {
-    await api.patchRepo(repoId, { mode });
+  const openEngineRoom = useCallback((section: EngineRoomSection) => {
+    setEngineRoomTarget({ section, nonce: Date.now() });
+    setActiveTab("settings");
+  }, []);
+
+  const patchRepo = async (repoId: string, patch: RepoPatch) => {
+    await api.patchRepo(repoId, patch);
     await refreshAll(repoId);
   };
 
-  const handleResolveInbox = async (
-    id: string,
-    decision: "approved" | "rejected",
-    note?: string,
-    deliveryAction?: "local_merge" | "push_and_create_pr",
-    options?: {
-      expandMandate?: boolean;
-      budgetIncreaseUsd?: number;
-      arenaWinnerId?: string;
-      selectedOption?: string;
-    },
-  ) => {
+  const handleChangeAutonomyPreset = (repoId: string, autonomyPreset: AutonomyPreset) => {
+    // Optimistic UI; refreshAll restores server truth (including on failure).
+    setRepos((prev) => prev.map((r) => (r.id === repoId ? { ...r, autonomyPreset } : r)));
+    void api
+      .patchRepo(repoId, { autonomyPreset })
+      .catch(() => undefined)
+      .then(() => refreshAll(repoId));
+  };
+
+  const handleResolveInbox: ResolveHandler = async (id, decision, note, deliveryAction, options) => {
     await api.resolveInbox(id, decision, note, deliveryAction, options);
     await refreshAll(selectedRepoId || undefined);
+  };
+
+  const handleComposerSubmitted = async (route: RequirementRouteKind | "milestone") => {
+    await refreshAll(selectedRepoId || undefined);
+    if (route === "goal_campaign") openEngineRoom("automation");
   };
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col">
       <HeaderBar
+        activeTab={activeTab}
+        onChangeTab={setActiveTab}
+        pendingInboxCount={pendingInboxCount}
+        historyCount={tickets.length}
         repos={repos}
         selectedRepoId={selectedRepoId}
-        onSelectRepo={(id) => setSelectedRepoId(id)}
-        onChangeMode={handleChangeMode}
-        health={health}
-        sseConnected={sseConnected}
-        runningTicketCount={runningTicketCount}
-        attentionTicketCount={attentionTicketCount}
-        onOpenDispatch={() => setDispatchOpen(true)}
-        onOpenSimulate={() => setSimulateOpen(true)}
+        onSelectRepo={setSelectedRepoId}
+        sseOffline={sseGraceElapsed && !sseConnected}
+        engineHealth={engineHealth}
+        availableEngines={availableEngines}
+        selfReload={health?.selfReload}
         onOpenAddRepo={() => setAddRepoOpen(true)}
-        onOpenRepoSettings={() => {
-          setRepoSettingsInitialTab("runtime");
-          setRepoSettingsOpen(true);
-        }}
-        onOpenContractSettings={() => {
-          setRepoSettingsInitialTab("contract");
-          setRepoSettingsOpen(true);
-        }}
-        onOpenRoutines={() => setActiveTab("routines")}
-        onOpenMergeTrain={() => setMergeTrainOpen(true)}
-        onOpenWorktrees={() => setWorktreesOpen(true)}
-        onOpenSetup={() => {
-          setSetupInitialTab("config");
-          setSetupOpen(true);
-        }}
         onOpenCommandPalette={() => setCommandPaletteOpen(true)}
-        trippedEngineCount={trippedEngineCount}
-        onOpenEngineHealth={() => {
-          setSetupInitialTab("doctor");
-          setSetupOpen(true);
-        }}
+        onOpenEngineHealth={() => openEngineRoom("doctor")}
       />
 
-      {/* Primary View Switcher */}
-      <nav className="border-b border-zinc-800/80 bg-zinc-950 px-5 flex items-center gap-2">
-        <button
-          onClick={() => setActiveTab("inbox")}
-          className={`inline-flex items-center gap-2 px-3 py-2.5 text-xs font-medium border-b-2 transition ${
-            activeTab === "inbox"
-              ? "border-indigo-500 text-zinc-100"
-              : "border-transparent text-zinc-500 hover:text-zinc-300"
-          }`}
-        >
-          <Inbox className="w-3.5 h-3.5" />
-          {t("nav.inbox")}
-          {pendingInboxCount > 0 && (
-            <span className="px-1.5 py-0.2 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-mono">
-              {pendingInboxCount}
-            </span>
-          )}
-        </button>
-
-        <button
-          onClick={() => setActiveTab("board")}
-          className={`inline-flex items-center gap-2 px-3 py-2.5 text-xs font-medium border-b-2 transition ${
-            activeTab === "board"
-              ? "border-indigo-500 text-zinc-100"
-              : "border-transparent text-zinc-500 hover:text-zinc-300"
-          }`}
-        >
-          <Kanban className="w-3.5 h-3.5" />
-          {t("nav.board")}
-          <span className="px-1.5 py-0.2 rounded-full bg-zinc-800 text-zinc-400 text-[10px] font-mono">
-            {tickets.length}
-          </span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab("routines")}
-          className={`inline-flex items-center gap-2 px-3 py-2.5 text-xs font-medium border-b-2 transition ${
-            activeTab === "routines"
-              ? "border-indigo-500 text-zinc-100"
-              : "border-transparent text-zinc-500 hover:text-zinc-300"
-          }`}
-        >
-          <Clock className="w-3.5 h-3.5" />
-          {t("nav.routines")}
-          {(health?.counts.activeRoutines ?? 0) > 0 && (
-            <span className="px-1.5 py-0.2 rounded-full bg-teal-500/20 text-teal-300 border border-teal-500/30 text-[10px] font-mono">
-              {health?.counts.activeRoutines}
-            </span>
-          )}
-        </button>
-
-        <button
-          onClick={() => setActiveTab("metrics")}
-          className={`inline-flex items-center gap-2 px-3 py-2.5 text-xs font-medium border-b-2 transition ${
-            activeTab === "metrics"
-              ? "border-indigo-500 text-zinc-100"
-              : "border-transparent text-zinc-500 hover:text-zinc-300"
-          }`}
-        >
-          <BarChart3 className="w-3.5 h-3.5" />
-          {t("nav.metrics")}
-          {metrics?.budgetExceeded && (
-            <span className="w-1.5 h-1.5 rounded-full bg-rose-400 animate-pulse" />
-          )}
-        </button>
-      </nav>
-
       <main className="flex-1">
-        {activeTab === "inbox" ? (
-          <InboxView
-            items={inboxItems}
-            ticketsById={ticketsById}
-            selectedRepoId={selectedRepoId || undefined}
-            totalTicketCount={tickets.length}
-            runningTicketCount={runningTicketCount}
-            onResolve={handleResolveInbox}
-            onRefresh={() => void refreshAll(selectedRepoId || undefined)}
-            onInspectTicket={(id) => setInspectedTicketId(id)}
-            onOpenDispatch={activeRepo ? () => setDispatchOpen(true) : undefined}
-            onSwitchToBoard={() => setActiveTab("board")}
-            onOpenContractSettings={
-              activeRepo
-                ? () => {
-                    setRepoSettingsInitialTab("contract");
-                    setRepoSettingsOpen(true);
-                  }
-                : undefined
-            }
-          />
-        ) : activeTab === "board" ? (
-          <Suspense fallback={null}>
-            <BoardView
+        <Suspense fallback={null}>
+          {activeTab === "home" ? (
+            <HomeView
+              repo={activeRepo}
+              repos={repos}
+              selectedRepoId={selectedRepoId}
+              onSelectRepo={setSelectedRepoId}
+              onChangeAutonomyPreset={handleChangeAutonomyPreset}
+              tickets={tickets}
+              ticketsById={ticketsById}
+              inboxItems={inboxItems}
+              liveEvents={liveEvents}
+              availableEngines={availableEngines}
+              onResolve={handleResolveInbox}
+              onRefresh={refresh}
+              onInspectTicket={setInspectedTicketId}
+              onOpenAddRepo={() => setAddRepoOpen(true)}
+              onComposerSubmitted={handleComposerSubmitted}
+            />
+          ) : activeTab === "history" ? (
+            <HistoryView
               tickets={tickets}
               allTickets={allTickets}
               repos={repos}
               selectedRepoId={selectedRepoId}
-              availableEngines={health?.availableEngines ?? ["mock"]}
-              onSelectTicket={(id) => setInspectedTicketId(id)}
-              onRefresh={() => void refreshAll(selectedRepoId || undefined)}
-            />
-          </Suspense>
-        ) : activeTab === "routines" ? (
-          <Suspense fallback={null}>
-            <RoutinesView
-              repo={activeRepo}
-              availableEngines={health?.availableEngines ?? ["mock"]}
-              onInspectTicket={(id) => setInspectedTicketId(id)}
-              onRefreshParent={() => void refreshAll(selectedRepoId || undefined)}
-            />
-          </Suspense>
-        ) : (
-          <Suspense fallback={null}>
-            <MetricsView
               metrics={metrics}
-              repo={activeRepo}
-              availableEngines={health?.availableEngines ?? ["mock"]}
+              availableEngines={availableEngines}
+              onInspectTicket={setInspectedTicketId}
+              onRefresh={refresh}
             />
-          </Suspense>
-        )}
+          ) : (
+            <SettingsView
+              repo={activeRepo}
+              repos={repos}
+              availableEngines={availableEngines}
+              setupStatus={setupStatus}
+              metrics={metrics}
+              target={engineRoomTarget}
+              onChangeAutonomyPreset={handleChangeAutonomyPreset}
+              onPatchRepo={patchRepo}
+              onOpenAddRepo={() => setAddRepoOpen(true)}
+              onOpenSetup={() => setSetupOpen(true)}
+              onSetupSaved={(next) => {
+                setSetupStatus(next);
+                refresh();
+              }}
+              onInspectTicket={setInspectedTicketId}
+              onRefresh={refresh}
+            />
+          )}
+        </Suspense>
       </main>
 
       <Suspense fallback={null}>
@@ -460,48 +232,9 @@ export function App() {
           repo={activeRepo}
           liveEvents={liveEvents}
           onClose={() => setInspectedTicketId(null)}
-          onSelectTicket={(id) => setInspectedTicketId(id)}
-          onRefresh={() => void refreshAll(selectedRepoId || undefined)}
+          onSelectTicket={setInspectedTicketId}
+          onRefresh={refresh}
         />
-
-        {activeRepo && (
-          <>
-            <DispatchTaskModal
-              open={dispatchOpen}
-              repoId={activeRepo.id}
-              repos={repos}
-              allTickets={allTickets}
-              availableEngines={health?.availableEngines ?? ["mock"]}
-              defaultTemplate={activeRepo.defaultTemplate}
-              defaultTddMode={activeRepo.defaultTddMode}
-              defaultEngine={activeRepo.preferredImplementEngine}
-              onClose={() => setDispatchOpen(false)}
-              onIntakeSuccess={async (route) => {
-                await refreshAll(activeRepo.id);
-                setActiveTab(route === "goal_campaign" ? "routines" : "board");
-              }}
-              onSubmit={async (data) => {
-                await api.createTicket({ repoId: activeRepo.id, ...data });
-                await refreshAll(activeRepo.id);
-                setActiveTab("board");
-              }}
-              onCreateEpic={async (epicPayload) => {
-                await api.createEpic(epicPayload);
-                await refreshAll(activeRepo.id);
-                setActiveTab("board");
-              }}
-            />
-
-            <SimulateEventModal
-              open={simulateOpen}
-              onClose={() => setSimulateOpen(false)}
-              onSubmit={async (data) => {
-                await api.simulateTrigger({ repoId: activeRepo.id, ...data });
-                await refreshAll(activeRepo.id);
-              }}
-            />
-          </>
-        )}
 
         <AddRepoModal
           open={addRepoOpen}
@@ -513,35 +246,10 @@ export function App() {
           }}
         />
 
-        <RepoSettingsModal
-          open={repoSettingsOpen}
-          repo={activeRepo ?? null}
-          initialTab={repoSettingsInitialTab}
-          availableEngines={health?.availableEngines ?? ["mock"]}
-          onClose={() => setRepoSettingsOpen(false)}
-          onRefresh={() => void refreshAll(selectedRepoId || undefined)}
-          onSubmit={async (repoId, patch) => {
-            await api.patchRepo(repoId, patch);
-            await refreshAll(repoId);
-          }}
-        />
-
-        <WorktreeManagerModal
-          open={worktreesOpen}
-          repoId={activeRepo?.id}
-          onClose={() => setWorktreesOpen(false)}
-          onChanged={() => void refreshAll(selectedRepoId || undefined)}
-          onOpenDoctor={() => {
-            setSetupInitialTab("doctor");
-            setSetupOpen(true);
-          }}
-        />
-
         <SetupWizardModal
           open={setupOpen}
           setupStatus={setupStatus}
-          availableEngines={health?.availableEngines ?? ["mock"]}
-          initialTab={setupInitialTab}
+          availableEngines={availableEngines}
           onClose={() => setSetupOpen(false)}
           onSaved={async (next) => {
             setSetupStatus(next);
@@ -556,28 +264,11 @@ export function App() {
           selectedRepoId={selectedRepoId}
           tickets={tickets}
           inboxItems={inboxItems}
-          onSelectRepo={(id) => setSelectedRepoId(id)}
-          onSwitchTab={(tab) => setActiveTab(tab)}
-          onInspectTicket={(id) => setInspectedTicketId(id)}
-          onOpenDispatch={() => {
-            if (activeRepo) setDispatchOpen(true);
-            else setAddRepoOpen(true);
-          }}
-          onOpenDoctor={() => {
-            setSetupInitialTab("doctor");
-            setSetupOpen(true);
-          }}
-          onOpenMergeTrain={() => setMergeTrainOpen(true)}
-          onRefresh={() => void refreshAll(selectedRepoId || undefined)}
-        />
-
-        <MergeTrainModal
-          open={mergeTrainOpen}
-          repoId={activeRepo?.id}
-          repos={repos}
-          onClose={() => setMergeTrainOpen(false)}
-          onInspectTicket={(id) => setInspectedTicketId(id)}
-          onChanged={() => void refreshAll(selectedRepoId || undefined)}
+          onSelectRepo={setSelectedRepoId}
+          onSwitchTab={setActiveTab}
+          onInspectTicket={setInspectedTicketId}
+          onOpenEngineRoom={openEngineRoom}
+          onRefresh={refresh}
         />
       </Suspense>
     </div>

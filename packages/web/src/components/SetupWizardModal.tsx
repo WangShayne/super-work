@@ -1,326 +1,91 @@
-import { useEffect, useState } from "react";
-import {
-  AlertTriangle,
-  Bell,
-  CheckCircle2,
-  Copy,
-  Cpu,
-  KeyRound,
-  Plug,
-  RefreshCw,
-  Send,
-  Sparkles,
-  Terminal,
-  Wrench,
-  X,
-  XCircle,
-} from "lucide-react";
+import { Suspense, lazy, useEffect, useState } from "react";
+import { ChevronDown, ChevronRight, Loader2, RefreshCw, Rocket, Wrench, X } from "lucide-react";
 import { api } from "../api.ts";
 import { useI18n } from "../i18n.tsx";
-import { DoctorBackupPanel } from "./DoctorBackupPanel.tsx";
-import type {
-  CliScanReport,
-  DetectedCliTool,
-  LlmConnectionTestResult,
-  LlmProviderPreset,
-  PublicSetupStatus,
-  ReasoningEffort,
-  WorkerEngineId,
-} from "../types.ts";
+import type { CliScanReport, PublicSetupStatus, WorkerEngineId } from "../types.ts";
+
+const CustomizeSetupForm = lazy(() =>
+  import("./setup/CustomizeSetupForm.tsx").then((m) => ({ default: m.CustomizeSetupForm })),
+);
 
 interface SetupWizardModalProps {
   open: boolean;
   setupStatus: PublicSetupStatus | null;
   availableEngines: WorkerEngineId[];
-  initialTab?: "config" | "doctor";
   onClose: () => void;
   onSaved: (next: PublicSetupStatus) => Promise<void>;
 }
 
-const PRESET_DEFAULTS: Record<LlmProviderPreset, { baseUrl: string; model: string }> = {
-  deepseek: { baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat" },
-  openai: { baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini" },
-  custom: { baseUrl: "http://localhost:11434/v1", model: "qwen2.5-coder" },
-  claude_cli: { baseUrl: "", model: "" },
-  codex_cli: { baseUrl: "", model: "" },
-  heuristic: { baseUrl: "", model: "heuristic" },
-};
+function toolMark(tool: CliScanReport["tools"][number]): { glyph: string; cls: string } {
+  if (!tool.installed) return { glyph: "—", cls: "border-zinc-800 bg-zinc-900 text-zinc-500" };
+  if (tool.authenticated === true) return { glyph: "✓", cls: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300" };
+  if (tool.authenticated === false) return { glyph: "!", cls: "border-amber-500/30 bg-amber-500/10 text-amber-300" };
+  return { glyph: "✓", cls: "border-sky-500/30 bg-sky-500/10 text-sky-300" };
+}
 
-export function SetupWizardModal({
-  open,
-  setupStatus,
-  availableEngines,
-  initialTab = "config",
-  onClose,
-  onSaved,
-}: SetupWizardModalProps) {
+export function SetupWizardModal({ open, setupStatus, availableEngines, onClose, onSaved }: SetupWizardModalProps) {
   const { t } = useI18n();
-  const [activeTab, setActiveTab] = useState<"config" | "doctor">(initialTab);
   const [scanReport, setScanReport] = useState<CliScanReport | null>(null);
-  const [preset, setPreset] = useState<LlmProviderPreset>("deepseek");
-  const [baseUrl, setBaseUrl] = useState("https://api.deepseek.com/v1");
-  const [model, setModel] = useState("deepseek-chat");
-  const [llmEffort, setLlmEffort] = useState<ReasoningEffort>("low");
-  const [apiKey, setApiKey] = useState("");
-  const [implEngine, setImplEngine] = useState<WorkerEngineId>("claude");
-  const [reviewEngine, setReviewEngine] = useState<WorkerEngineId>("codex");
-  const [claudeModel, setClaudeModel] = useState("");
-  const [claudeEffort, setClaudeEffort] = useState<ReasoningEffort | "">("");
-  const [codexModel, setCodexModel] = useState("");
-  const [codexEffort, setCodexEffort] = useState<ReasoningEffort | "">("");
-  const [opencodeModel, setOpencodeModel] = useState("");
-  const [opencodeEffort, setOpencodeEffort] = useState<ReasoningEffort | "">("");
-  const [geminiModel, setGeminiModel] = useState("");
-  const [geminiEffort, setGeminiEffort] = useState<ReasoningEffort | "">("");
-
-  const [macosEnabled, setMacosEnabled] = useState(false);
-  const [webhookEnabled, setWebhookEnabled] = useState(false);
-  const [webhookUrl, setWebhookUrl] = useState("");
-  const [webhookSecret, setWebhookSecret] = useState("");
-  const [notifyOnInbox, setNotifyOnInbox] = useState(true);
-  const [notifyOnDelivery, setNotifyOnDelivery] = useState(true);
-  const [notifyOnFailure, setNotifyOnFailure] = useState(true);
-  const [publicBaseUrl, setPublicBaseUrl] = useState("");
-  const [actionSecret, setActionSecret] = useState("");
-  const [githubWebhookSecret, setGithubWebhookSecret] = useState("");
-  const [mcpCopied, setMcpCopied] = useState(false);
-  const [testingNotify, setTestingNotify] = useState(false);
-  const [notifyTestMsg, setNotifyTestMsg] = useState<{ ok: boolean; text: string } | null>(null);
-
+  const [customizeOpen, setCustomizeOpen] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [scanning, setScanning] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [testResult, setTestResult] = useState<LlmConnectionTestResult | null>(null);
+  const [error, setError] = useState("");
 
   useEffect(() => {
-    if (!open || !setupStatus) return;
-    setActiveTab(initialTab);
-    const cfg = setupStatus.config;
-    setScanReport(setupStatus.scanReport);
-    setPreset(cfg.llmPreset);
-    setBaseUrl(cfg.llmBaseUrl || PRESET_DEFAULTS[cfg.llmPreset].baseUrl);
-    const loadedModel =
-      cfg.llmPreset === "claude_cli" && cfg.llmModel === "claude-cli" ? "" : cfg.llmModel;
-    setModel(loadedModel || PRESET_DEFAULTS[cfg.llmPreset].model);
-    setLlmEffort(cfg.llmEffort ?? "low");
-    setImplEngine(cfg.preferredImplementEngine);
-    setReviewEngine(cfg.preferredReviewEngine);
-    setClaudeModel(cfg.claudeProfile?.model ?? "");
-    setClaudeEffort(cfg.claudeProfile?.effort ?? "");
-    setCodexModel(cfg.codexProfile?.model ?? "");
-    setCodexEffort(cfg.codexProfile?.effort ?? "");
-    setOpencodeModel(cfg.opencodeProfile?.model ?? "");
-    setOpencodeEffort(cfg.opencodeProfile?.effort ?? "");
-    setGeminiModel(cfg.geminiProfile?.model ?? "");
-    setGeminiEffort(cfg.geminiProfile?.effort ?? "");
-    setMacosEnabled(cfg.notifications?.macosEnabled ?? false);
-    setWebhookEnabled(cfg.notifications?.webhookEnabled ?? false);
-    setWebhookUrl(cfg.notifications?.webhookUrl ?? "");
-    setWebhookSecret("");
-    setNotifyOnInbox(cfg.notifications?.notifyOnInbox ?? true);
-    setNotifyOnDelivery(cfg.notifications?.notifyOnDelivery ?? true);
-    setNotifyOnFailure(cfg.notifications?.notifyOnFailure ?? true);
-    setPublicBaseUrl(cfg.notifications?.publicBaseUrl ?? "");
-    setActionSecret("");
-    setGithubWebhookSecret("");
-    setMcpCopied(false);
-    setNotifyTestMsg(null);
-    setApiKey("");
-    setTestResult(null);
-  }, [open, setupStatus]);
+    if (!open) return;
+    setCustomizeOpen(false);
+    setError("");
+    setScanReport(setupStatus?.scanReport ?? null);
+  }, [open, setupStatus?.scanReport]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [open, onClose]);
 
   if (!open || !setupStatus) return null;
 
   const isFirstRun = !setupStatus.initialized;
-  const needsApiFields = preset === "deepseek" || preset === "openai" || preset === "custom";
-  const isCliLlm = preset === "claude_cli" || preset === "codex_cli";
-  const engineChoices: WorkerEngineId[] =
-    availableEngines.length > 0 ? availableEngines : ["claude", "codex", "mock"];
-  const claudeScan = scanReport?.tools.find((tool) => tool.id === "claude");
-  const codexScan = scanReport?.tools.find((tool) => tool.id === "codex");
-  const opencodeScan = scanReport?.tools.find((tool) => tool.id === "opencode");
-  const geminiScan = scanReport?.tools.find((tool) => tool.id === "gemini");
+  const tools = scanReport?.tools ?? [];
+  const readyTools = tools.filter((tool) => tool.installed && tool.authenticated === true);
+  const brain = readyTools.find((x) => x.id === "claude")
+    ? "Claude CLI"
+    : readyTools.find((x) => x.id === "codex")
+      ? "Codex CLI"
+      : t("setup.preset.heuristic.title");
 
-  const handleSelectPreset = (next: LlmProviderPreset) => {
-    setPreset(next);
-    setBaseUrl(PRESET_DEFAULTS[next].baseUrl);
-    setModel(PRESET_DEFAULTS[next].model);
-    if (next === "claude_cli" || next === "codex_cli") {
-      setLlmEffort("low");
+  const run = async (setBusy: (v: boolean) => void, fn: () => Promise<void>) => {
+    setBusy(true);
+    setError("");
+    try {
+      await fn();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
     }
-    setTestResult(null);
   };
 
-  const handleRescan = async () => {
-    setScanning(true);
-    try {
+  const quickStart = () =>
+    run(setStarting, async () => {
+      const next = await api.quickStartSetup();
+      await onSaved(next);
+      onClose();
+    });
+
+  const rescan = () =>
+    run(setScanning, async () => {
       const res = await api.scanCliEnvironment();
       setScanReport(res.scanReport);
-      setImplEngine(res.scanReport.recommendedImplementEngine);
-      setReviewEngine(res.scanReport.recommendedReviewEngine);
-    } finally {
-      setScanning(false);
-    }
-  };
-
-  const handleTest = async () => {
-    setTesting(true);
-    setTestResult(null);
-    try {
-      const res = await api.testLlmConnection({
-        llmPreset: preset,
-        llmBaseUrl: baseUrl,
-        llmModel: model,
-        llmEffort: isCliLlm ? llmEffort : undefined,
-        llmApiKey: apiKey.trim() || undefined,
-        useSavedKey: setupStatus.config.hasApiKey && !apiKey.trim(),
-      });
-      setTestResult(res);
-    } finally {
-      setTesting(false);
-    }
-  };
-
-  const handleSave = async () => {
-    setSaving(true);
-    try {
-      const updated = await api.configureSetup({
-        llmPreset: preset,
-        llmBaseUrl: baseUrl,
-        llmModel: model,
-        llmEffort: isCliLlm ? llmEffort : undefined,
-        llmApiKey: apiKey.trim() || undefined,
-        preferredImplementEngine: implEngine,
-        preferredReviewEngine: reviewEngine,
-        claudeProfile: {
-          model: claudeModel.trim() || undefined,
-          effort: claudeEffort || undefined,
-        },
-        codexProfile: {
-          model: codexModel.trim() || undefined,
-          effort: codexEffort || undefined,
-        },
-        opencodeProfile: {
-          model: opencodeModel.trim() || undefined,
-          effort: opencodeEffort || undefined,
-        },
-        geminiProfile: {
-          model: geminiModel.trim() || undefined,
-          effort: geminiEffort || undefined,
-        },
-        notifications: {
-          macosEnabled,
-          webhookEnabled,
-          webhookUrl: webhookUrl.trim() || undefined,
-          webhookSecret: webhookSecret.trim() || undefined,
-          notifyOnInbox,
-          notifyOnDelivery,
-          notifyOnFailure,
-          publicBaseUrl: publicBaseUrl.trim() || undefined,
-          actionSecret: actionSecret.trim() || undefined,
-          githubWebhookSecret: githubWebhookSecret.trim() || undefined,
-        },
-      });
-      await onSaved(updated);
-      onClose();
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleTestNotification = async () => {
-    setTestingNotify(true);
-    setNotifyTestMsg(null);
-    try {
-      const res = await api.testNotification({
-        macosEnabled,
-        webhookEnabled,
-        webhookUrl: webhookUrl.trim() || undefined,
-        webhookSecret: webhookSecret.trim() || undefined,
-        notifyOnInbox,
-        notifyOnDelivery,
-        notifyOnFailure,
-      });
-      if (res.results.length === 0) {
-        setNotifyTestMsg({ ok: false, text: "Enable macOS or Webhook channel first." });
-      } else {
-        setNotifyTestMsg({
-          ok: res.ok,
-          text: res.results.map((r) => `${r.channel}: ${r.detail ?? (r.ok ? "ok" : "failed")}`).join(" | "),
-        });
-      }
-    } catch (err) {
-      setNotifyTestMsg({ ok: false, text: err instanceof Error ? err.message : String(err) });
-    } finally {
-      setTestingNotify(false);
-    }
-  };
-
-  const renderToolBadge = (tool: DetectedCliTool) => {
-    if (!tool.installed) {
-      return (
-        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500 text-[10px] font-mono">
-          <XCircle className="w-2.5 h-2.5" />
-          {t("setup.status.missing")}
-        </span>
-      );
-    }
-    if (tool.authenticated === false) {
-      return (
-        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[10px] font-mono">
-          <AlertTriangle className="w-2.5 h-2.5" />
-          {t("setup.status.unauth")}
-        </span>
-      );
-    }
-    if (tool.authenticated === true) {
-      return (
-        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[10px] font-mono">
-          <CheckCircle2 className="w-2.5 h-2.5" />
-          {t("setup.status.ready")}
-        </span>
-      );
-    }
-    return (
-      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30 text-[10px] font-mono">
-        <CheckCircle2 className="w-2.5 h-2.5" />
-        {t("setup.status.detected")}
-      </span>
-    );
-  };
-
-  const presets: Array<{ id: LlmProviderPreset; title: string; desc: string }> = [
-    {
-      id: "deepseek",
-      title: t("setup.preset.deepseek.title"),
-      desc: t("setup.preset.deepseek.desc"),
-    },
-    {
-      id: "openai",
-      title: t("setup.preset.openai.title"),
-      desc: t("setup.preset.openai.desc"),
-    },
-    {
-      id: "claude_cli",
-      title: t("setup.preset.claude_cli.title"),
-      desc: t("setup.preset.claude_cli.desc"),
-    },
-    {
-      id: "codex_cli",
-      title: t("setup.preset.codex_cli.title"),
-      desc: t("setup.preset.codex_cli.desc"),
-    },
-    {
-      id: "heuristic",
-      title: t("setup.preset.heuristic.title"),
-      desc: t("setup.preset.heuristic.desc"),
-    },
-  ];
+    });
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-xs p-4 overflow-y-auto">
-      <div className="w-full max-w-3xl rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl overflow-hidden my-4">
-        {/* Header */}
+      <div className="w-full max-w-2xl rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl overflow-hidden my-4">
         <div className="px-6 py-4 border-b border-zinc-800 flex items-center justify-between bg-zinc-900/40">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
@@ -335,665 +100,105 @@ export function SetupWizardModal({
               </p>
             </div>
           </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-200">
+          <button type="button" onClick={onClose} aria-label={t("setup.later")} className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-200">
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Tab Bar */}
-        <div className="px-6 pt-2.5 border-b border-zinc-800/80 bg-zinc-900/20 flex items-center gap-2 text-xs">
-          <button
-            type="button"
-            onClick={() => setActiveTab("config")}
-            className={`px-3 py-1.5 rounded-t-lg border-b-2 font-medium transition ${
-              activeTab === "config"
-                ? "border-indigo-500 text-indigo-300 bg-zinc-900/60"
-                : "border-transparent text-zinc-400 hover:text-zinc-200"
-            }`}
-          >
-            {t("setup.tabConfig")}
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("doctor")}
-            className={`px-3 py-1.5 rounded-t-lg border-b-2 font-medium transition ${
-              activeTab === "doctor"
-                ? "border-emerald-500 text-emerald-300 bg-zinc-900/60"
-                : "border-transparent text-zinc-400 hover:text-zinc-200"
-            }`}
-          >
-            {t("setup.tabDoctorBackup")}
-          </button>
-        </div>
-
-        <div className="p-6 space-y-6 max-h-[80vh] overflow-y-auto text-xs">
-          {activeTab === "doctor" ? (
-            <DoctorBackupPanel />
-          ) : (
-            <>
-          {isFirstRun && (
-            <div className="p-3.5 rounded-xl border border-indigo-500/30 bg-indigo-500/10 text-indigo-200 flex items-start gap-2.5">
-              <Sparkles className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5" />
-              <span>{t("setup.firstRunBanner")}</span>
-            </div>
-          )}
-
-          {/* Panel A: CLI Environment Scan */}
-          <section className="space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 font-semibold text-zinc-200">
-                <Terminal className="w-4 h-4 text-sky-400" />
-                {t("setup.cliSectionTitle")}
-              </div>
-              <button
-                type="button"
-                onClick={handleRescan}
-                disabled={scanning}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-zinc-800 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 text-[11px] disabled:opacity-50"
-              >
-                <RefreshCw className={`w-3 h-3 ${scanning ? "animate-spin" : ""}`} />
-                {scanning ? t("setup.scanning") : t("setup.rescan")}
-              </button>
+        <div className="p-6 space-y-5 max-h-[80vh] overflow-y-auto text-xs">
+          {/* Zero-config card */}
+          <section className="rounded-2xl border border-indigo-500/30 bg-indigo-500/5 p-5 space-y-4">
+            <div>
+              <h3 className="text-sm font-semibold text-zinc-100">{t("setup.zero.title")}</h3>
+              <p className="text-[11px] text-zinc-400 mt-1 leading-relaxed">{t("setup.zero.desc")}</p>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
-              {(scanReport?.tools ?? []).map((tool) => (
-                <div
-                  key={tool.id}
-                  className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3 space-y-1.5"
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-[11px] text-zinc-400">{t("setup.zero.detected")}</span>
+                <button
+                  type="button"
+                  onClick={() => void rescan()}
+                  disabled={scanning}
+                  className="inline-flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-200 disabled:opacity-50"
                 >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium text-zinc-100">{tool.name}</span>
-                    {renderToolBadge(tool)}
-                  </div>
-                  <div className="font-mono text-[10px] text-zinc-400 truncate">
-                    {tool.version ?? tool.binaryPath ?? "—"}
-                  </div>
-                  {tool.authSummary && (
-                    <div className="font-mono text-[10px] text-zinc-500 truncate">
-                      {tool.authSummary}
-                    </div>
-                  )}
-                  {(tool.localDefaultModel || tool.localDefaultEffort) && (
-                    <div className="font-mono text-[10px] text-indigo-300/90 truncate">
-                      {t("setup.localDefaultPrefix")}{" "}
-                      {[tool.localDefaultModel, tool.localDefaultEffort].filter(Boolean).join(" · ")}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-              <div>
-                <label className="block text-zinc-400 mb-1">{t("setup.defaultImplEngine")}</label>
-                <select
-                  value={implEngine}
-                  onChange={(e) => setImplEngine(e.target.value as WorkerEngineId)}
-                  className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-100 font-mono"
-                >
-                  {engineChoices.map((eId) => (
-                    <option key={eId} value={eId}>
-                      {eId}
-                    </option>
-                  ))}
-                </select>
+                  <RefreshCw className={`w-3 h-3 ${scanning ? "animate-spin" : ""}`} />
+                  {scanning ? t("setup.scanning") : t("setup.rescan")}
+                </button>
               </div>
-              <div>
-                <label className="block text-zinc-400 mb-1">{t("setup.defaultReviewEngine")}</label>
-                <select
-                  value={reviewEngine}
-                  onChange={(e) => setReviewEngine(e.target.value as WorkerEngineId)}
-                  className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-100 font-mono"
-                >
-                  {engineChoices.map((eId) => (
-                    <option key={eId} value={eId}>
-                      {eId}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            {/* Worker CLI Model & Effort Defaults */}
-            <div className="rounded-xl border border-zinc-800/80 bg-zinc-900/35 p-4 space-y-3">
-              <div>
-                <div className="font-semibold text-zinc-200">{t("setup.workerProfilesTitle")}</div>
-                <p className="text-[11px] text-zinc-400 mt-0.5">{t("setup.workerProfilesHint")}</p>
-              </div>
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                <div className="rounded-lg border border-zinc-800 bg-zinc-950/70 p-3 space-y-2.5">
-                  <div className="font-medium text-zinc-200">{t("setup.claudeProfileTitle")}</div>
-                  <div>
-                    <label className="block text-zinc-400 mb-1">{t("setup.modelLabel")}</label>
-                    <input
-                      list="claude-model-presets"
-                      value={claudeModel}
-                      onChange={(e) => setClaudeModel(e.target.value)}
-                      placeholder={
-                        claudeScan?.localDefaultModel
-                          ? `${t("setup.followLocalDefault")} (${claudeScan.localDefaultModel})`
-                          : t("setup.followLocalDefault")
-                      }
-                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 font-mono text-zinc-100 focus:outline-none focus:border-indigo-500"
-                    />
-                    <datalist id="claude-model-presets">
-                      <option value="sonnet" />
-                      <option value="opus" />
-                      <option value="fable" />
-                    </datalist>
-                  </div>
-                  <div>
-                    <label className="block text-zinc-400 mb-1">{t("setup.effortLabel")}</label>
-                    <select
-                      value={claudeEffort}
-                      onChange={(e) => setClaudeEffort(e.target.value as ReasoningEffort | "")}
-                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-zinc-100"
-                    >
-                      <option value="">{t("setup.effort.inherit")}</option>
-                      <option value="low">{t("setup.effort.low")}</option>
-                      <option value="medium">{t("setup.effort.medium")}</option>
-                      <option value="high">{t("setup.effort.high")}</option>
-                      <option value="xhigh">{t("setup.effort.xhigh")}</option>
-                      <option value="max">{t("setup.effort.max")}</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div className="rounded-lg border border-zinc-800 bg-zinc-950/70 p-3 space-y-2.5">
-                  <div className="font-medium text-zinc-200">{t("setup.codexProfileTitle")}</div>
-                  <div>
-                    <label className="block text-zinc-400 mb-1">{t("setup.modelLabel")}</label>
-                    <input
-                      value={codexModel}
-                      onChange={(e) => setCodexModel(e.target.value)}
-                      placeholder={
-                        codexScan?.localDefaultModel
-                          ? `${t("setup.followLocalDefault")} (${codexScan.localDefaultModel})`
-                          : t("setup.followLocalDefault")
-                      }
-                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 font-mono text-zinc-100 focus:outline-none focus:border-indigo-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-zinc-400 mb-1">{t("setup.effortLabel")}</label>
-                    <select
-                      value={codexEffort}
-                      onChange={(e) => setCodexEffort(e.target.value as ReasoningEffort | "")}
-                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-zinc-100"
-                    >
-                      <option value="">
-                        {codexScan?.localDefaultEffort
-                          ? `${t("setup.effort.inherit")} (${codexScan.localDefaultEffort})`
-                          : t("setup.effort.inherit")}
-                      </option>
-                      <option value="low">{t("setup.effort.low")}</option>
-                      <option value="medium">{t("setup.effort.medium")}</option>
-                      <option value="high">{t("setup.effort.high")}</option>
-                      <option value="xhigh">{t("setup.effort.xhigh")}</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div className="rounded-lg border border-zinc-800 bg-zinc-950/70 p-3 space-y-2.5">
-                  <div className="font-medium text-zinc-200">{t("setup.opencodeProfileTitle")}</div>
-                  <div>
-                    <label className="block text-zinc-400 mb-1">{t("setup.modelLabel")}</label>
-                    <input
-                      value={opencodeModel}
-                      onChange={(e) => setOpencodeModel(e.target.value)}
-                      placeholder={
-                        opencodeScan?.localDefaultModel
-                          ? `${t("setup.followLocalDefault")} (${opencodeScan.localDefaultModel})`
-                          : "provider/model"
-                      }
-                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 font-mono text-zinc-100 focus:outline-none focus:border-indigo-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-zinc-400 mb-1">{t("setup.effortLabel")}</label>
-                    <select
-                      value={opencodeEffort}
-                      onChange={(e) => setOpencodeEffort(e.target.value as ReasoningEffort | "")}
-                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-zinc-100"
-                    >
-                      <option value="">
-                        {opencodeScan?.localDefaultEffort
-                          ? `${t("setup.effort.inherit")} (${opencodeScan.localDefaultEffort})`
-                          : t("setup.effort.inherit")}
-                      </option>
-                      <option value="low">{t("setup.effort.low")}</option>
-                      <option value="medium">{t("setup.effort.medium")}</option>
-                      <option value="high">{t("setup.effort.high")}</option>
-                      <option value="xhigh">{t("setup.effort.xhigh")}</option>
-                      <option value="max">{t("setup.effort.max")}</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div className="rounded-lg border border-zinc-800 bg-zinc-950/70 p-3 space-y-2.5">
-                  <div className="font-medium text-zinc-200">{t("setup.geminiProfileTitle")}</div>
-                  <div>
-                    <label className="block text-zinc-400 mb-1">{t("setup.modelLabel")}</label>
-                    <input
-                      list="gemini-model-presets"
-                      value={geminiModel}
-                      onChange={(e) => setGeminiModel(e.target.value)}
-                      placeholder={
-                        geminiScan?.localDefaultModel
-                          ? `${t("setup.followLocalDefault")} (${geminiScan.localDefaultModel})`
-                          : t("setup.followLocalDefault")
-                      }
-                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 font-mono text-zinc-100 focus:outline-none focus:border-indigo-500"
-                    />
-                    <datalist id="gemini-model-presets">
-                      <option value="gemini-2.5-pro" />
-                      <option value="gemini-2.5-flash" />
-                    </datalist>
-                  </div>
-                  <div>
-                    <label className="block text-zinc-400 mb-1">{t("setup.effortLabel")}</label>
-                    <select
-                      value={geminiEffort}
-                      onChange={(e) => setGeminiEffort(e.target.value as ReasoningEffort | "")}
-                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-zinc-100"
-                    >
-                      <option value="">{t("setup.effort.inherit")}</option>
-                      <option value="low">{t("setup.effort.low")}</option>
-                      <option value="medium">{t("setup.effort.medium")}</option>
-                      <option value="high">{t("setup.effort.high")}</option>
-                    </select>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          {/* Panel B: Control-Plane LLM */}
-          <section className="space-y-3 pt-2 border-t border-zinc-800/80">
-            <div className="flex items-center gap-2 font-semibold text-zinc-200">
-              <Cpu className="w-4 h-4 text-indigo-400" />
-              {t("setup.llmSectionTitle")}
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
-              {presets.map((p) => {
-                const selected = preset === p.id || (p.id === "openai" && preset === "custom");
-                return (
-                  <button
-                    key={p.id}
-                    type="button"
-                    onClick={() => handleSelectPreset(p.id)}
-                    className={`text-left rounded-xl border p-3.5 transition space-y-1 ${
-                      selected
-                        ? "border-indigo-500 bg-indigo-500/10"
-                        : "border-zinc-800 bg-zinc-900/40 hover:border-zinc-700"
-                    }`}
-                  >
-                    <div className="font-semibold text-zinc-100">{p.title}</div>
-                    <div className="text-[11px] text-zinc-400 leading-relaxed">{p.desc}</div>
-                  </button>
-                );
-              })}
-            </div>
-
-            {isCliLlm && (
-              <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-zinc-400 mb-1">{t("setup.cliLlmModel")}</label>
-                  <input
-                    value={model}
-                    onChange={(e) => setModel(e.target.value)}
-                    placeholder={
-                      preset === "claude_cli"
-                        ? claudeScan?.localDefaultModel || t("setup.followLocalDefault")
-                        : codexScan?.localDefaultModel || t("setup.followLocalDefault")
-                    }
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100 focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-zinc-400 mb-1">{t("setup.cliLlmEffort")}</label>
-                  <select
-                    value={llmEffort}
-                    onChange={(e) => setLlmEffort(e.target.value as ReasoningEffort)}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-100"
-                  >
-                    <option value="low">{t("setup.effort.low")}</option>
-                    <option value="medium">{t("setup.effort.medium")}</option>
-                    <option value="high">{t("setup.effort.high")}</option>
-                    <option value="xhigh">{t("setup.effort.xhigh")}</option>
-                    {preset === "claude_cli" && <option value="max">{t("setup.effort.max")}</option>}
-                  </select>
-                </div>
-              </div>
-            )}
-
-            {needsApiFields && (
-              <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 space-y-3">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-zinc-400 mb-1">{t("setup.baseUrl")}</label>
-                    <input
-                      value={baseUrl}
-                      onChange={(e) => setBaseUrl(e.target.value)}
-                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100 focus:outline-none focus:border-indigo-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-zinc-400 mb-1">{t("setup.model")}</label>
-                    <input
-                      value={model}
-                      onChange={(e) => setModel(e.target.value)}
-                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100 focus:outline-none focus:border-indigo-500"
-                    />
-                  </div>
-                </div>
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="text-zinc-400">{t("setup.apiKey")}</label>
-                    {setupStatus.config.hasApiKey && (
-                      <span className="text-[10px] font-mono text-emerald-400">
-                        {setupStatus.config.maskedApiKey} · {t("setup.apiKeySavedHint")}
-                      </span>
-                    )}
-                  </div>
-                  <input
-                    type="password"
-                    value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
-                    placeholder={
-                      setupStatus.config.hasApiKey
-                        ? `${setupStatus.config.maskedApiKey} (${t("setup.apiKeySavedHint")})`
-                        : t("setup.apiKeyPlaceholder")
-                    }
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100 focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-              </div>
-            )}
-
-            {testResult && (
-              <div
-                className={`p-3 rounded-lg border text-xs flex items-center gap-2 ${
-                  testResult.ok
-                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
-                    : "border-rose-500/30 bg-rose-500/10 text-rose-300"
-                }`}
-              >
-                {testResult.ok ? (
-                  <CheckCircle2 className="w-4 h-4 shrink-0" />
-                ) : (
-                  <XCircle className="w-4 h-4 shrink-0" />
-                )}
-                <span>{testResult.message}</span>
-              </div>
-            )}
-          </section>
-
-          {/* Panel C: Attention Push Notifications */}
-          <section className="space-y-3 pt-2 border-t border-zinc-800/80">
-            <div className="flex items-center justify-between gap-2">
-              <div>
-                <div className="flex items-center gap-2 font-semibold text-zinc-200">
-                  <Bell className="w-4 h-4 text-amber-400" />
-                  {t("setup.notificationsTitle")}
-                </div>
-                <p className="text-[11px] text-zinc-400 mt-0.5">{t("setup.notificationsDesc")}</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => void handleTestNotification()}
-                disabled={testingNotify}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-amber-500/40 bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 text-[11px] disabled:opacity-50 shrink-0"
-              >
-                <Send className="w-3 h-3" />
-                {testingNotify ? t("setup.testingNotification") : t("setup.testNotificationBtn")}
-              </button>
-            </div>
-
-            <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 space-y-3">
-              <div className="flex flex-wrap gap-4">
-                <label className="inline-flex items-center gap-2 cursor-pointer text-zinc-200">
-                  <input
-                    type="checkbox"
-                    checked={macosEnabled}
-                    onChange={(e) => setMacosEnabled(e.target.checked)}
-                    className="rounded border-zinc-700 bg-zinc-950 text-indigo-500"
-                  />
-                  {t("setup.macosNotifyLabel")}
-                </label>
-                <label className="inline-flex items-center gap-2 cursor-pointer text-zinc-200">
-                  <input
-                    type="checkbox"
-                    checked={webhookEnabled}
-                    onChange={(e) => setWebhookEnabled(e.target.checked)}
-                    className="rounded border-zinc-700 bg-zinc-950 text-indigo-500"
-                  />
-                  {t("setup.webhookNotifyLabel")}
-                </label>
-              </div>
-
-              {webhookEnabled && (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-zinc-400 mb-1">{t("setup.webhookUrl")}</label>
-                    <input
-                      value={webhookUrl}
-                      onChange={(e) => setWebhookUrl(e.target.value)}
-                      placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."
-                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-zinc-400 mb-1">
-                      {t("setup.webhookSecret")}
-                      {setupStatus.config.notifications?.hasWebhookSecret && (
-                        <span className="ml-2 text-[10px] text-emerald-400">
-                          ({t("setup.webhookSecretSavedHint")})
-                        </span>
-                      )}
-                    </label>
-                    <input
-                      type="password"
-                      value={webhookSecret}
-                      onChange={(e) => setWebhookSecret(e.target.value)}
-                      placeholder="Optional HMAC secret"
-                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
-                    />
-                  </div>
-                </div>
-              )}
-
-              <div className="flex flex-wrap gap-4 pt-1 text-[11px] text-zinc-300">
-                <label className="inline-flex items-center gap-1.5 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={notifyOnInbox}
-                    onChange={(e) => setNotifyOnInbox(e.target.checked)}
-                    className="rounded border-zinc-700 bg-zinc-950 text-indigo-500"
-                  />
-                  {t("setup.notifyOnInbox")}
-                </label>
-                <label className="inline-flex items-center gap-1.5 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={notifyOnDelivery}
-                    onChange={(e) => setNotifyOnDelivery(e.target.checked)}
-                    className="rounded border-zinc-700 bg-zinc-950 text-indigo-500"
-                  />
-                  {t("setup.notifyOnDelivery")}
-                </label>
-                <label className="inline-flex items-center gap-1.5 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={notifyOnFailure}
-                    onChange={(e) => setNotifyOnFailure(e.target.checked)}
-                    className="rounded border-zinc-700 bg-zinc-950 text-indigo-500"
-                  />
-                  {t("setup.notifyOnFailure")}
-                </label>
-              </div>
-
-              {notifyTestMsg && (
-                <div
-                  className={`p-2.5 rounded-lg border text-[11px] ${
-                    notifyTestMsg.ok
-                      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
-                      : "border-rose-500/30 bg-rose-500/10 text-rose-300"
-                  }`}
-                >
-                  {notifyTestMsg.text}
-                </div>
-              )}
-            </div>
-          </section>
-
-          {/* Panel D: MCP Integration & Bidirectional Remote Webhooks (v0.9) */}
-          <section className="space-y-3 pt-2 border-t border-zinc-800/80">
-            <div className="flex items-start justify-between gap-2 flex-wrap">
-              <div>
-                <h4 className="font-semibold text-zinc-200 flex items-center gap-1.5">
-                  <Plug className="w-3.5 h-3.5 text-teal-400" />
-                  {t("setup.mcpWebhookTitle")}
-                </h4>
-                <p className="text-[11px] text-zinc-400 mt-0.5">{t("setup.mcpWebhookDesc")}</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  const snippet = JSON.stringify(
-                    {
-                      mcpServers: {
-                        "super-work": {
-                          command: "bun",
-                          args: ["run", "packages/cli/src/index.ts", "mcp"],
-                        },
-                      },
-                    },
-                    null,
-                    2,
+              <div className="flex flex-wrap gap-2">
+                {tools.map((tool) => {
+                  const mark = toolMark(tool);
+                  return (
+                    <span key={tool.id} className={`px-2.5 py-1 rounded-lg border font-mono text-[11px] ${mark.cls}`}>
+                      {tool.id} {mark.glyph}
+                    </span>
                   );
-                  void navigator.clipboard?.writeText(snippet).then(() => {
-                    setMcpCopied(true);
-                    window.setTimeout(() => setMcpCopied(false), 1800);
-                  });
-                }}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-teal-500/40 bg-teal-500/10 hover:bg-teal-500/20 text-teal-200 text-[11px] shrink-0"
-              >
-                <Copy className="w-3 h-3" />
-                {mcpCopied ? t("setup.mcpCopied") : t("setup.mcpCopyBtn")}
-              </button>
-            </div>
-
-            <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 space-y-3">
-              <div>
-                <label className="block text-zinc-400 mb-1">{t("setup.publicBaseUrl")}</label>
-                <input
-                  value={publicBaseUrl}
-                  onChange={(e) => setPublicBaseUrl(e.target.value)}
-                  placeholder="https://my-mac.tailnet.ts.net:4318"
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
-                />
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <div className="flex items-center justify-between gap-2 mb-1">
-                    <label className="text-zinc-400">
-                      {t("setup.actionSecret")}
-                      {setupStatus.config.notifications?.hasActionSecret && (
-                        <span className="ml-1.5 text-[10px] text-emerald-400">
-                          ({setupStatus.config.notifications.maskedActionSecret})
-                        </span>
-                      )}
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setActionSecret(
-                          `${crypto.randomUUID().replace(/-/g, "")}${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`,
-                        )
-                      }
-                      className="inline-flex items-center gap-1 text-[10px] text-indigo-300 hover:text-indigo-200"
-                    >
-                      <KeyRound className="w-2.5 h-2.5" />
-                      {t("setup.generateSecretBtn")}
-                    </button>
-                  </div>
-                  <input
-                    value={actionSecret}
-                    onChange={(e) => setActionSecret(e.target.value)}
-                    placeholder="HMAC secret for /api/webhooks/action & chatops"
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
-                  />
-                </div>
-                <div>
-                  <label className="block text-zinc-400 mb-1">
-                    {t("setup.githubWebhookSecret")}
-                    {setupStatus.config.notifications?.hasGithubWebhookSecret && (
-                      <span className="ml-1.5 text-[10px] text-emerald-400">
-                        ({setupStatus.config.notifications.maskedGithubWebhookSecret})
-                      </span>
-                    )}
-                  </label>
-                  <input
-                    type="password"
-                    value={githubWebhookSecret}
-                    onChange={(e) => setGithubWebhookSecret(e.target.value)}
-                    placeholder="Secret configured on GitHub /api/webhooks/github"
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-zinc-100"
-                  />
-                </div>
+                })}
               </div>
             </div>
+
+            <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 px-3.5 py-2.5 text-[11px] text-zinc-300 space-y-0.5">
+              <div className="text-zinc-400">{t("setup.zero.recommended")}</div>
+              <div className="font-mono">
+                {t("setup.zero.brain")}: <span className="text-indigo-300">{brain}</span>
+              </div>
+              <div className="font-mono">
+                {t("setup.defaultImplEngine")}:{" "}
+                <span className="text-indigo-300">{scanReport?.recommendedImplementEngine ?? "claude"}</span>
+                {" · "}
+                {t("setup.defaultReviewEngine")}:{" "}
+                <span className="text-indigo-300">{scanReport?.recommendedReviewEngine ?? "codex"}</span>
+              </div>
+            </div>
+
+            {error && <div className="text-rose-400 break-words">{error}</div>}
+
+            <button
+              type="button"
+              onClick={() => void quickStart()}
+              disabled={starting}
+              className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold disabled:opacity-60 transition"
+            >
+              {starting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Rocket className="w-4 h-4" />}
+              {t("setup.zero.start")}
+            </button>
           </section>
-            </>
-          )}
+
+          {/* Manual customization accordion */}
+          <section>
+            <button
+              type="button"
+              onClick={() => setCustomizeOpen((v) => !v)}
+              aria-expanded={customizeOpen}
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-zinc-300 hover:text-zinc-100"
+            >
+              {customizeOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+              {t("setup.zero.customize")} ▾
+            </button>
+            {customizeOpen && (
+              <div className="mt-4">
+                <Suspense fallback={<div className="py-6 text-center text-zinc-500">…</div>}>
+                  <CustomizeSetupForm
+                    setupStatus={setupStatus}
+                    availableEngines={availableEngines}
+                    onClose={onClose}
+                    onSaved={onSaved}
+                  />
+                </Suspense>
+              </div>
+            )}
+          </section>
         </div>
 
-        {/* Footer */}
-        <div className="px-6 py-4 border-t border-zinc-800 bg-zinc-900/40 flex flex-wrap items-center justify-between gap-3">
-          {activeTab === "doctor" ? (
-            <div className="ml-auto">
-              <button
-                type="button"
-                onClick={onClose}
-                className="px-4 py-2 rounded-lg border border-zinc-800 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 text-xs"
-              >
-                {t("modal.worktrees.close")}
-              </button>
-            </div>
-          ) : (
-            <>
-              <button
-                type="button"
-                onClick={handleTest}
-                disabled={testing}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 text-xs font-medium disabled:opacity-50"
-              >
-                {testing ? t("setup.testing") : t("setup.testConnection")}
-              </button>
-
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={onClose}
-                  className="px-3.5 py-2 rounded-lg border border-zinc-800 text-zinc-400 hover:text-zinc-200 text-xs"
-                >
-                  {t("setup.later")}
-                </button>
-                <button
-                  type="button"
-                  onClick={handleSave}
-                  disabled={saving}
-                  className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium disabled:opacity-50"
-                >
-                  {saving ? t("setup.saving") : t("setup.saveActivate")}
-                </button>
-              </div>
-            </>
-          )}
+        <div className="px-6 py-3 border-t border-zinc-800 bg-zinc-900/40 flex justify-end">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3.5 py-2 rounded-lg border border-zinc-800 text-zinc-400 hover:text-zinc-200 text-xs"
+          >
+            {t("setup.later")}
+          </button>
         </div>
       </div>
     </div>

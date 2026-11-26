@@ -247,7 +247,7 @@ export function DagCanvas({
   return (
     <div className="space-y-4">
       {/* Layered Topological SVG + HTML Canvas */}
-      <div className="rounded-xl border border-zinc-800 bg-zinc-950/90 overflow-auto">
+      <div className="rounded-xl border border-zinc-800 bg-zinc-950/90 overflow-auto overscroll-contain max-h-[calc(100vh-18rem)] min-h-[240px]">
         <div
           className="relative"
           style={{ width: `${layout.width}px`, height: `${layout.height}px` }}

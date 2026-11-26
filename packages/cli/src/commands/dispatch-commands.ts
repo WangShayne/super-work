@@ -7,6 +7,7 @@ import type {
 } from "@super-work/core";
 import type { CommandContext, CommandHandler } from "./context.ts";
 import { formatEventLine, formatTranscriptLines } from "./cli-formatters.ts";
+import { runDo } from "./do-command.ts";
 import {
   getStringFlag,
   isFinalForWait,
@@ -631,6 +632,9 @@ async function runWait(ctx: CommandContext): Promise<number> {
 }
 
 export const dispatchCommands: Record<string, CommandHandler> = {
+  do: runDo,
+  // `approve <id>` 是 `inbox approve <id>` 的顶层别名。
+  approve: (ctx) => runInbox({ ...ctx, positionals: ["inbox", "approve", ...ctx.positionals.slice(1)] }),
   dispatch: runDispatch,
   epic: runEpic,
   inbox: runInbox,

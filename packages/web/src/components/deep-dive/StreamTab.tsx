@@ -1,10 +1,10 @@
-import { Compass, FileCode2, FolderGit2, GitFork, Layers, Link2, Lock, Sparkles, Wrench, Zap } from "lucide-react";
+import { FileCode2, FolderGit2, GitFork, Layers, Link2, Lock, Sparkles, Wrench, Zap } from "lucide-react";
 import { api } from "../../api.ts";
 import { DagCanvas } from "../DagCanvas.tsx";
 import { HandoverDigestView } from "./HandoverDigestView.tsx";
 import { scopedVerificationForRun } from "./scopedVerification.ts";
 import { formatStage, formatTicketStatus, useI18n } from "../../i18n.tsx";
-import type { EnginePreference, LiveEventLogEntry, RepoConfig, Ticket, TicketDetailResponse } from "../../types.ts";
+import type { LiveEventLogEntry, RepoConfig, Ticket, TicketDetailResponse } from "../../types.ts";
 
 export interface StreamTabProps {
   ticketId: string;
@@ -16,12 +16,6 @@ export interface StreamTabProps {
   ticketLiveEvents: LiveEventLogEntry[];
   deliveryError: string | null;
   evalNotice: string | null;
-  steerInstruction: string;
-  setSteerInstruction: (v: string) => void;
-  steerEngine: EnginePreference | "";
-  setSteerEngine: (v: EnginePreference | "") => void;
-  steering: boolean;
-  handleLiveSteer: (e: React.FormEvent) => Promise<void>;
   setDetail: (d: TicketDetailResponse) => void;
   onRefresh: () => void;
   onSelectTicket?: (ticketId: string) => void;
@@ -37,12 +31,6 @@ export function StreamTab({
   ticketLiveEvents,
   deliveryError,
   evalNotice,
-  steerInstruction,
-  setSteerInstruction,
-  steerEngine,
-  setSteerEngine,
-  steering,
-  handleLiveSteer,
   setDetail,
   onRefresh,
   onSelectTicket,
@@ -65,48 +53,6 @@ export function StreamTab({
           {evalNotice}
         </div>
       )}
-
-      {ticket &&
-        ["planning", "spec_testing", "implementing", "reviewing"].includes(
-          ticket.status,
-        ) && (
-          <form
-            onSubmit={handleLiveSteer}
-            className="rounded-lg border border-sky-500/30 bg-sky-500/5 p-3 space-y-2 text-xs"
-          >
-            <div className="flex flex-wrap items-center gap-2">
-              <Compass className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-              <input
-                type="text"
-                value={steerInstruction}
-                onChange={(e) => setSteerInstruction(e.target.value)}
-                placeholder={t("drawer.liveSteerPlaceholder")}
-                className="flex-1 min-w-[200px] bg-zinc-950 border border-zinc-800 rounded-md px-2.5 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-sky-500"
-              />
-              <select
-                value={steerEngine}
-                onChange={(e) => setSteerEngine(e.target.value as EnginePreference | "")}
-                className="bg-zinc-950 border border-zinc-800 rounded-md px-2 py-1.5 text-[11px] font-mono text-zinc-300"
-              >
-                <option value="">keep engine</option>
-                <option value="auto">auto</option>
-                <option value="claude">claude</option>
-                <option value="codex">codex</option>
-                <option value="opencode">opencode</option>
-                <option value="gemini">gemini</option>
-                <option value="mock">mock</option>
-              </select>
-              <button
-                type="submit"
-                disabled={steering || !steerInstruction.trim()}
-                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 text-white text-[11px] font-medium disabled:opacity-40 transition"
-              >
-                <Compass className="w-3 h-3" />
-                {t("drawer.liveSteerBtn")}
-              </button>
-            </div>
-          </form>
-        )}
 
       {ticket &&
         (ticket.routingRationale ||

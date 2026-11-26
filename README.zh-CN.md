@@ -8,6 +8,35 @@
 
 ---
 
+## v1.8.0 — Super-Agent First：大简化（消费级界面，专业级引擎）
+
+v1.8.0 将 `super-work` 重塑为**架在不变的专业引擎之上的消费级界面**：你只需说出需求、扫一眼“需要你”的事项、点击批准。下列所有高级能力依然存在，只是被收纳进可折叠的 **Engine Room（引擎室）**。
+
+- **单栏 HeaderBar**：`v1.8` 徽标 + 实时健康点 · 胶囊标签页（Home / History / Settings） · `⌘K` 命令面板 / `ZH-EN` 切换（非首页标签另有紧凑仓库胶囊）。仓库切换器与 **受控 / 智能 / 全权**（Guarded / Smart / Autonomous）授权拨盘集成在 Hero Composer 的上下文工具栏中，紧贴你正在输入的需求。
+- **三大空间**：
+  - **Home（首页）** —— **Hero Composer**（隐式智能分诊、可选 `scope:<glob>` 令牌、可折叠 *Advanced ▾*）、**Needs You**（三个人类动词：**Approve 批准 / Answer 回答 / Unblock 解阻**）与 **Live Work** 实时任务卡片。
+  - **History（历史）** —— 时间线与发布（Timeline & Releases），以及看板 / DAG 视图。
+  - **Settings（设置）** —— 5 项 *Essentials* 精要设置，外加可折叠的 **Developer / Engine Room**：Contract / Gates、Playbook / Casebook、Routines / Campaigns、Worktrees / Merge Train / Simulate、Flight Recorder / Doctor / Evals。
+- **精简 DeepDiveDrawer**：*Overview & Changes* + *More ▾*，底部常驻 **Steer** 输入栏。
+- **1 键零配置 SetupWizard**（`POST /api/setup/quick-start`）自动选择已登录的最佳 CLI（`claude` → `codex` → 启发式）作为控制面大脑；**智能仓库自动检测**（`POST /api/repos/detect`，只读）推断名称、基线分支、技术栈（Bun / Node / Rust / Python / Go）与验证命令。
+- **`AutonomyPreset`**（`guarded` / `smart` / `autonomous`，即 **受控 / 智能 / 全权**，表示你委托给超级智能体的权限大小）是统一配置项，展开为运行模式、交付门禁策略、沙箱与验证默认值。仅在首次或强制同步时展开；自动重同步绝不覆盖用户通过 `PATCH /api/repos/:id` 设置的显式覆盖。旧名称 `copilot` / `standard` / `autopilot` 在 REST、`.super-work.json` 与已存储仓库中仍被接受，并分别映射为 `guarded` / `smart` / `autonomous`。
+- **主 CLI 动词**：`super-work do "<需求>"`，支持 `--preview`、`--wait` 与 `--milestone <vX.Y.Z>`。
+
+### 60 秒快速开始
+
+```bash
+bun install && bun run build
+bun run dev:server                                  # 守护进程 http://localhost:4318
+# 打开 Web 界面：SetupWizard 一键自动配置（POST /api/setup/quick-start）。
+# 添加仓库——名称、基线分支与验证命令自动检测（POST /api/repos/detect）。
+super-work do "新增 /healthz 接口 scope:packages/server/**"          # 派发
+super-work do "新增 /healthz 接口" --preview                         # 仅预览计划，不创建任务
+super-work do "新增 /healthz 接口" --wait                            # 阻塞直至完成
+super-work do "新增 /healthz 接口" --milestone v1.9.0                # 归入里程碑
+```
+
+---
+
 ## 核心能力
 
 - **Router + 隔离 Worker 双层架构**：

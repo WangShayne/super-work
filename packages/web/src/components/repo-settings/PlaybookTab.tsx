@@ -17,7 +17,7 @@ export interface PlaybookTabProps {
   setNewRulePinned: (value: boolean) => void;
   bundleBusy: boolean;
   bundleNotice: string | null;
-  onClose: () => void;
+  onClose?: () => void;
   handleAddPlaybookRule: (e: React.FormEvent) => Promise<void>;
   handleTogglePlaybook: (entry: PlaybookEntry, field: "enabled" | "pinned") => Promise<void>;
   handleDeletePlaybook: (entryId: string) => Promise<void>;

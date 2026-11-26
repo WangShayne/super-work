@@ -130,6 +130,9 @@ export type {
   MilestoneItem,
   MilestoneIntegrationMode,
   Milestone,
+  AutonomyPreset,
+  InboxHumanAction,
+  RepoAutoDetectResult,
 } from "@super-work/core/types";
 
 import type {

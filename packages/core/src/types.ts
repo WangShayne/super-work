@@ -14,3 +14,6 @@ export * from "./domain-types/memory.ts";
 export * from "./domain-types/autonomy.ts";
 export * from "./domain-types/milestone.ts";
 export * from "./domain-types/events.ts";
+export * from "./autonomy-preset.ts";
+export * from "./inbox-taxonomy.ts";
+export * from "./repo-autodetect.ts";

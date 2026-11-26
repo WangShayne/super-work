@@ -1,14 +1,19 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   classifyPlaybookHealth,
+  detectRepoDefaults,
+  getAutonomyPresetPatch,
+  inferAutonomyPreset,
   newId,
+  normalizeAutonomyPreset,
   normalizePlaybookRuleText,
   normalizeSmokeCheckConfig,
   normalizeVerificationStrategy,
   nowIso,
 } from "@super-work/core";
 import type {
+  AutonomyPreset,
   DeliveryChannel,
   DeliveryGatePolicy,
   LifecycleHooksConfig,
@@ -23,13 +28,41 @@ import type {
 } from "@super-work/core";
 import { type ServerRouteContext, normalizeHooksConfig } from "./context.ts";
 
+/**
+ * SQLite repos 表尚无 autonomy_preset 列（drivers 不在本 ticket 范围内）；
+ * preset 展开后的具体字段已持久化，读取时由 inferAutonomyPreset 无损还原。
+ */
+function withAutonomyPreset(repo: RepoConfig): RepoConfig {
+  return { ...repo, autonomyPreset: inferAutonomyPreset(repo) };
+}
+
 export function registerRepoRoutes(ctx: ServerRouteContext): void {
   const { app, kernel, stateStore } = ctx;
 
   // --- Repositories ---
   app.get("/api/repos", async (c) => {
     const repos = await stateStore.listRepos();
-    return c.json({ repos });
+    return c.json({ repos: repos.map(withAutonomyPreset) });
+  });
+
+  // v1.8.0 零配置检测：只读，不注册仓库。
+  app.post("/api/repos/detect", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { rootPath?: unknown };
+    const rootPath = typeof body.rootPath === "string" ? body.rootPath.trim() : "";
+    if (!rootPath) {
+      return c.json({ error: "rootPath is required" }, 400);
+    }
+    const abs = resolve(rootPath);
+    let isDir = false;
+    try {
+      isDir = existsSync(abs) && statSync(abs).isDirectory();
+    } catch {
+      isDir = false;
+    }
+    if (!isDir) {
+      return c.json({ error: `Directory does not exist: ${abs}` }, 400);
+    }
+    return c.json({ detected: detectRepoDefaults(abs) });
   });
 
   app.post("/api/repos", async (c) => {
@@ -38,12 +71,22 @@ export function registerRepoRoutes(ctx: ServerRouteContext): void {
       return c.json({ error: "name and rootPath are required" }, 400);
     }
     const ts = nowIso();
+    const rootPath = resolve(body.rootPath);
+    const detected = detectRepoDefaults(rootPath);
+    // 显式 autonomyPreset，或既无 mode 也无 deliveryGatePolicy 时展开预设（smart 为默认）；显式字段始终优先。
+    const explicitPreset = normalizeAutonomyPreset(body.autonomyPreset);
+    const expandPreset =
+      explicitPreset !== undefined ||
+      (body.mode === undefined && body.deliveryGatePolicy === undefined);
+    const preset: AutonomyPreset = explicitPreset ?? "smart";
+    const pp = expandPreset ? getAutonomyPresetPatch(preset) : undefined;
     const repo: RepoConfig = {
       id: body.id ?? newId("repo"),
       name: body.name,
-      rootPath: resolve(body.rootPath),
-      baseBranch: body.baseBranch ?? "main",
-      mode: body.mode ?? "observe",
+      rootPath,
+      baseBranch: body.baseBranch ?? detected.baseBranch,
+      mode: body.mode ?? pp?.mode ?? "observe",
+      autonomyPreset: expandPreset ? preset : undefined,
       githubRepo: body.githubRepo,
       defaultTemplate: body.defaultTemplate ?? "standard",
       defaultTddMode: Boolean(body.defaultTddMode),
@@ -52,11 +95,11 @@ export function registerRepoRoutes(ctx: ServerRouteContext): void {
         body.deliveryGatePolicy === "risk_gated" ||
         body.deliveryGatePolicy === "always_signoff"
           ? body.deliveryGatePolicy
-          : undefined,
+          : pp?.deliveryGatePolicy,
       riskThreshold:
         typeof body.riskThreshold === "number" && Number.isFinite(body.riskThreshold)
           ? Math.max(0, Math.min(100, Math.round(body.riskThreshold)))
-          : undefined,
+          : pp?.riskThreshold,
       sensitivePaths: Array.isArray(body.sensitivePaths)
         ? body.sensitivePaths.map((s) => String(s).trim()).filter(Boolean)
         : undefined,
@@ -71,11 +114,12 @@ export function registerRepoRoutes(ctx: ServerRouteContext): void {
       fallbackEngines: Array.isArray(body.fallbackEngines)
         ? body.fallbackEngines.filter((e): e is WorkerEngineId => Boolean(e))
         : undefined,
-      autoCleanupWorktree: body.autoCleanupWorktree ?? true,
+      autoCleanupWorktree: body.autoCleanupWorktree ?? pp?.autoCleanupWorktree ?? true,
       verificationCommands: Array.isArray(body.verificationCommands)
         ? body.verificationCommands.map((s) => String(s).trim()).filter(Boolean)
-        : [],
-      verificationStrategy: normalizeVerificationStrategy(body.verificationStrategy),
+        : detected.verificationCommands,
+      verificationStrategy:
+        normalizeVerificationStrategy(body.verificationStrategy) ?? pp?.verificationStrategy,
       setupCommands: Array.isArray(body.setupCommands)
         ? body.setupCommands.map((s) => String(s).trim()).filter(Boolean)
         : [],
@@ -84,7 +128,7 @@ export function registerRepoRoutes(ctx: ServerRouteContext): void {
       sandboxMode:
         body.sandboxMode === "off" || body.sandboxMode === "balanced" || body.sandboxMode === "strict"
           ? body.sandboxMode
-          : undefined,
+          : pp?.sandboxMode,
       forbiddenPaths: Array.isArray(body.forbiddenPaths)
         ? body.forbiddenPaths.map((s) => String(s).trim()).filter(Boolean)
         : [],
@@ -103,7 +147,7 @@ export function registerRepoRoutes(ctx: ServerRouteContext): void {
     };
     await stateStore.upsertRepo(repo);
     const syncedRepo = (await kernel.syncRepoContract(repo.id).catch(() => repo)) ?? repo;
-    return c.json({ repo: syncedRepo }, 201);
+    return c.json({ repo: withAutonomyPreset(syncedRepo) }, 201);
   });
 
   app.patch("/api/repos/:id", async (c) => {
@@ -112,8 +156,9 @@ export function registerRepoRoutes(ctx: ServerRouteContext): void {
     if (!existing) {
       return c.json({ error: "Repository not found" }, 404);
     }
-    const patch = (await c.req.json()) as Omit<
+    const rawPatch = (await c.req.json()) as Omit<
       Partial<RepoConfig>,
+      | "autonomyPreset"
       | "maxConcurrentWorkers"
       | "dailyBudgetUsd"
       | "conventions"
@@ -128,6 +173,7 @@ export function registerRepoRoutes(ctx: ServerRouteContext): void {
       | "hooks"
       | "verificationStrategy"
     > & {
+      autonomyPreset?: AutonomyPreset | null;
       verificationStrategy?: VerificationStrategy | null;
       maxConcurrentWorkers?: number | null;
       dailyBudgetUsd?: number | null;
@@ -142,9 +188,16 @@ export function registerRepoRoutes(ctx: ServerRouteContext): void {
       blueprints?: TaskBlueprint[] | null;
       hooks?: LifecycleHooksConfig | null;
     };
+    // 预设作为底，同一 PATCH 内的显式字段（含 null）优先。
+    const { autonomyPreset: presetRaw, ...explicitPatch } = rawPatch;
+    const preset = normalizeAutonomyPreset(presetRaw);
+    const patch: Omit<typeof rawPatch, "autonomyPreset"> = preset
+      ? { ...getAutonomyPresetPatch(preset), ...explicitPatch }
+      : explicitPatch;
     const updated: RepoConfig = {
       ...existing,
       ...patch,
+      autonomyPreset: preset ?? (presetRaw === null ? undefined : existing.autonomyPreset),
       name: patch.name?.trim() || existing.name,
       baseBranch: patch.baseBranch?.trim() || existing.baseBranch,
       fallbackEngines:
@@ -255,7 +308,7 @@ export function registerRepoRoutes(ctx: ServerRouteContext): void {
       updatedAt: nowIso(),
     };
     await stateStore.upsertRepo(updated);
-    return c.json({ repo: updated });
+    return c.json({ repo: withAutonomyPreset(updated) });
   });
 
   app.get("/api/repos/:id/blueprints", async (c) => {

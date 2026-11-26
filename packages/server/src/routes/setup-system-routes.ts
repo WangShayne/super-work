@@ -22,6 +22,22 @@ import {
 export function registerSetupSystemRoutes(ctx: ServerRouteContext): void {
   const { app, kernel, stateStore, scanner, notificationDispatcher, getActiveProviderName } = ctx;
 
+  /** 保存 setup_config、热切换控制面 LLM，并同步各仓库的首选引擎（configure 与 quick-start 共用）。 */
+  async function persistSetupConfig(nextConfig: SystemSetupConfig): Promise<void> {
+    await stateStore.setSystemSetting("setup_config", nextConfig);
+    if (ctx.mutableLlm) {
+      ctx.mutableLlm.reconfigure(buildControlPlaneLLMFromSetup(nextConfig));
+    }
+    for (const repo of await stateStore.listRepos()) {
+      await stateStore.upsertRepo({
+        ...repo,
+        preferredImplementEngine: nextConfig.preferredImplementEngine,
+        preferredReviewEngine: nextConfig.preferredReviewEngine,
+        updatedAt: nowIso(),
+      });
+    }
+  }
+
   app.get("/api/health", async (c) => {
     const [
       repos,
@@ -238,22 +254,44 @@ export function registerSetupSystemRoutes(ctx: ServerRouteContext): void {
       updatedAt: nowIso(),
     };
 
-    await stateStore.setSystemSetting("setup_config", nextConfig);
+    await persistSetupConfig(nextConfig);
 
-    if (ctx.mutableLlm) {
-      ctx.mutableLlm.reconfigure(buildControlPlaneLLMFromSetup(nextConfig));
-    }
+    return c.json(toPublicSetupStatus(nextConfig, scanReport, getActiveProviderName()));
+  });
 
-    const repos = await stateStore.listRepos();
-    for (const repo of repos) {
-      await stateStore.upsertRepo({
-        ...repo,
-        preferredImplementEngine: nextConfig.preferredImplementEngine,
-        preferredReviewEngine: nextConfig.preferredReviewEngine,
-        updatedAt: nowIso(),
-      });
-    }
+  // v1.8.0 零配置首跑：自动选择已登录的最佳 CLI 作为控制面大脑。
+  app.post("/api/setup/quick-start", async (c) => {
+    await c.req.json().catch(() => ({}));
+    const existing = await stateStore.getSystemSetting<SystemSetupConfig>("setup_config");
+    const scanReport = await scanner.scanAll();
+    await stateStore.setSystemSetting("last_cli_scan", scanReport);
 
+    const isReady = (id: "claude" | "codex"): boolean =>
+      scanReport.tools.some((t) => t.id === id && t.installed && t.authenticated === true);
+    const llmPreset: LlmProviderPreset = isReady("claude")
+      ? "claude_cli"
+      : isReady("codex")
+        ? "codex_cli"
+        : "heuristic";
+
+    const nextConfig: SystemSetupConfig = {
+      ...(existing ?? {
+        llmBaseUrl: "",
+        llmEffort: "low",
+        claudeProfile: {},
+        codexProfile: {},
+        opencodeProfile: {},
+        geminiProfile: {},
+        notifications: DEFAULT_NOTIFICATION_CONFIG,
+      }),
+      initialized: true,
+      llmPreset,
+      llmModel: normalizeSetupModel(llmPreset, undefined),
+      preferredImplementEngine: scanReport.recommendedImplementEngine,
+      preferredReviewEngine: scanReport.recommendedReviewEngine,
+      updatedAt: nowIso(),
+    };
+    await persistSetupConfig(nextConfig);
     return c.json(toPublicSetupStatus(nextConfig, scanReport, getActiveProviderName()));
   });
 

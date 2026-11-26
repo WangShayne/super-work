@@ -8,6 +8,35 @@ An asynchronous autonomous development workflow orchestration kernel and local d
 
 ---
 
+## v1.8.0 — Super-Agent First: The Great Simplification (Consumer Surface, Pro Engine)
+
+v1.8.0 turns `super-work` into a **consumer surface on top of an unchanged professional engine**: you state a requirement, glance at what needs you, and approve. Every advanced capability below still exists — it simply moved into a collapsible **Engine Room**.
+
+- **Single-bar HeaderBar**: `v1.8` badge + Live Health Dot · pill tabs (Home / History / Settings) · `⌘K` command palette / `ZH-EN` toggle (plus a compact repo pill on non-Home tabs). The repo switcher and the **Guarded / Smart / Autonomous** autonomy dial live in the Hero Composer's integrated context toolbar, right next to the requirement you are typing.
+- **3 spaces**:
+  - **Home** — the **Hero Composer** (implicit smart intake, optional `scope:<glob>` tokens, collapsible *Advanced ▾*), **Needs You** (three human verbs: **Approve / Answer / Unblock**) and **Live Work** cards.
+  - **History** — Timeline & Releases, plus the Board / DAG views.
+  - **Settings** — 5-item *Essentials* plus a collapsible **Developer / Engine Room** housing Contract / Gates, Playbook / Casebook, Routines / Campaigns, Worktrees / Merge Train / Simulate, and Flight Recorder / Doctor / Evals.
+- **Streamlined DeepDiveDrawer**: *Overview & Changes* + *More ▾*, with a permanent bottom **Steer** input bar.
+- **1-click Zero-Config SetupWizard** (`POST /api/setup/quick-start`) picks the best authenticated CLI (`claude` → `codex` → heuristic) as the control-plane brain, and **smart repo auto-detect** (`POST /api/repos/detect`, read-only) infers name, base branch, stack (Bun / Node / Rust / Python / Go) and verification commands.
+- **`AutonomyPreset`** (`guarded` / `smart` / `autonomous` — *Guarded / Smart / Autonomous*, i.e. how much authority you delegate to the Super-Agent) is one unified setting that expands into mode, delivery-gate policy, sandbox and verification defaults. It expands only on first or forced sync; explicit `PATCH /api/repos/:id` overrides are never overwritten by automatic re-syncs. The legacy names `copilot` / `standard` / `autopilot` are still accepted everywhere (REST, `.super-work.json`, stored repos) and map to `guarded` / `smart` / `autonomous`.
+- **Primary CLI verb**: `super-work do "<requirement>"` with `--preview`, `--wait` and `--milestone <vX.Y.Z>`.
+
+### 60-second quick start
+
+```bash
+bun install && bun run build
+bun run dev:server                                  # daemon on http://localhost:4318
+# Open the Web UI: the SetupWizard configures itself in one click (POST /api/setup/quick-start).
+# Add your repo — name, base branch and verification commands are auto-detected (POST /api/repos/detect).
+super-work do "Add a /healthz endpoint scope:packages/server/**"            # dispatch
+super-work do "Add a /healthz endpoint" --preview                           # plan only, no ticket
+super-work do "Add a /healthz endpoint" --wait                              # block until finished
+super-work do "Add a /healthz endpoint" --milestone v1.9.0                  # attach to a milestone
+```
+
+---
+
 ## Key Capabilities
 
 - **Router + Isolated Worker Architecture**:

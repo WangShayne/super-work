@@ -269,7 +269,7 @@ describe("v1.3.0 Core Modules (Smart Intake, Non-Starving Outbox, Gemini Routing
       { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
       stubHost,
     )) as McpJsonRpcResponse;
-    expect((initRes.result as { serverInfo: { version: string } }).serverInfo.version).toBe("1.7.0");
+    expect((initRes.result as { serverInfo: { version: string } }).serverInfo.version).toBe("1.8.0");
 
     const r1 = (await handleMcpJsonRpcMessage(
       {

@@ -6,6 +6,47 @@ This guide walks through first-run CLI environment scanning, Control-Plane LLM c
 
 ---
 
+## 0. v1.8.0 Quick Start: Super-Agent First
+
+v1.8.0 is *Consumer Surface, Pro Engine*: three steps get you from zero to a delivered change.
+
+1. **Set up in 1 click.** Open the Web UI; the Zero-Config SetupWizard calls `POST /api/setup/quick-start`, which picks the best authenticated CLI (`claude` → `codex` → heuristic) as the Control-Plane LLM.
+2. **Add a repo.** Pick a directory; `POST /api/repos/detect` (read-only) infers name, base branch, stack (Bun / Node / Rust / Python / Go) and verification commands. `POST /api/repos` then creates it with the `standard` `AutonomyPreset`.
+3. **State a requirement.** Type it into the Home **Hero Composer** (or run `super-work do "<requirement>"`). Smart intake routes it implicitly; append `scope:<glob>` (e.g. `scope:packages/core/**`) to pin the allowed paths.
+
+```bash
+super-work do "Add a /healthz endpoint scope:packages/server/**"
+super-work do "Add a /healthz endpoint" --preview             # plan only, no ticket
+super-work do "Add a /healthz endpoint" --wait                # block until finished
+super-work do "Add a /healthz endpoint" --milestone v1.9.0    # attach to a milestone
+super-work up [-d|--detach]                                   # start the daemon explicitly
+```
+
+### Autonomy dial (Hero Composer)
+
+| Preset | Delivery gate | Behaviour |
+|---|---|---|
+| **Guarded** (`guarded`) | `always_signoff` | The agent codes and verifies on its own, but every delivery waits for your sign-off before merge |
+| **Smart** (`smart`, default) | `risk_gated` (threshold 35) | Low-risk changes auto-ship, high-risk or sensitive changes ask you first |
+| **Autonomous** (`autonomous`) | `always_auto` | Full end-to-end authority; only pings you on real blockers (conflicts, budget, scope) |
+
+All presets use `mode: auto`, `sandboxMode: balanced`, `verificationStrategy: smart_tiered`. Presets expand only on first or forced sync; your explicit `PATCH /api/repos/:id` overrides are never overwritten by automatic re-syncs.
+
+> **Legacy names**: `copilot` → `guarded`, `standard` → `smart`, `autopilot` → `autonomous`. Old values in `.super-work.json`, REST bodies and stored repos are still accepted and normalized automatically; no migration is needed.
+
+### The 3 spaces
+
+- **Home**: Hero Composer (+ collapsible *Advanced ▾*), **Needs You**, **Live Work** cards. Needs You collapses every inbox kind into three verbs: **Approve** (sign-offs, plan approval, observe proposals, milestone ready, arena tiebreak), **Answer** (clarification requests, epic replan) and **Unblock** (mandate violations, watchdog escalations, merge conflicts, budget caps, PR follow-ups, paused campaigns).
+- **History**: Timeline & Releases, Board / DAG.
+- **Settings**: 5-item Essentials + collapsible **Developer / Engine Room** (Contract / Gates, Playbook / Casebook, Routines / Campaigns, Worktrees / Merge Train / Simulate, Flight Recorder / Doctor / Evals).
+- **DeepDiveDrawer**: *Overview & Changes* + *More ▾*, with a permanent bottom **Steer** input bar.
+- **HeaderBar** (single bar): `v1.8` badge + Live Health Dot · pill tabs (Home / History / Settings) · `⌘K` / `ZH-EN` (plus a compact repo pill on non-Home tabs).
+- **Hero Composer context toolbar**: repo switcher (+ register) · **Guarded / Smart / Autonomous** dial · *Advanced ▾*, integrated right under the requirement input.
+
+The sections below describe the full Engine Room in depth.
+
+---
+
 ## 1. First-Run Setup: CLI Environment Scan & Control-Plane LLM
 
 `super-work` cleanly separates the **Control Plane** from the **Execution Plane**:

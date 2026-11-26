@@ -3,6 +3,9 @@ import type { DeliveryChannel, PipelineTemplateId } from "./pipeline.ts";
 import type { DeliveryGatePolicy } from "./review.ts";
 import type { LifecycleHooksConfig, SandboxMode, SmokeCheckConfig, VerificationStrategy, VisualDiffMode } from "./verification.ts";
 
+/** v1.8.0: 三档自治预设，展开为 mode / deliveryGatePolicy / sandboxMode 等字段。 */
+export type AutonomyPreset = "guarded" | "smart" | "autonomous";
+
 export interface SharedPlaybookRuleSpec {
   id?: string;
   rule: string;
@@ -12,6 +15,7 @@ export interface SharedPlaybookRuleSpec {
 
 export interface RepoContractFile {
   version?: 1;
+  autonomyPreset?: AutonomyPreset;
   defaultMode?: OperatingMode;
   defaultDeliveryChannel?: DeliveryChannel;
   defaultTemplate?: PipelineTemplateId;
@@ -54,6 +58,7 @@ export interface RepoConfig {
   rootPath: string;
   baseBranch: string;
   mode: OperatingMode;
+  autonomyPreset?: AutonomyPreset;
   githubRepo?: string;
   defaultTemplate: PipelineTemplateId;
   defaultTddMode?: boolean;

@@ -77,6 +77,7 @@ function parseCliArgs(argv: string[]): ParsedArgs {
     "message",
     "gate-policy",
     "blueprint",
+    "milestone",
   ]);
   const optionalEngineFlags = new Set(["arena"]);
   const engineValues = new Set(["claude", "codex", "opencode", "gemini", "mock"]);

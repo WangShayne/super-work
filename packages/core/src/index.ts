@@ -31,3 +31,6 @@ export * from "./digest.ts";
 export * from "./milestone.ts";
 export * from "./kernel.ts";
 export * from "./engine-health.ts";
+export * from "./autonomy-preset.ts";
+export * from "./inbox-taxonomy.ts";
+export * from "./repo-autodetect.ts";

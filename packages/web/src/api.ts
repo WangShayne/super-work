@@ -1,4 +1,6 @@
 import type {
+  AutonomyPreset,
+  RepoAutoDetectResult,
   BackupArchiveInfo,
   BackupRestoreResult,
   BatchResolveInboxResult,
@@ -130,7 +132,17 @@ export const api = {
     verificationStrategy?: VerificationStrategy;
     defaultDeliveryChannel?: DeliveryChannel;
     hooks?: LifecycleHooksConfig;
+    autonomyPreset?: AutonomyPreset;
   }) => request<{ repo: RepoConfig }>("/api/repos", { method: "POST", body: JSON.stringify(payload) }),
+
+  detectRepo: (rootPath: string) =>
+    request<{ detected: RepoAutoDetectResult }>("/api/repos/detect", {
+      method: "POST",
+      body: JSON.stringify({ rootPath }),
+    }).then((r) => r.detected),
+
+  quickStartSetup: () =>
+    request<PublicSetupStatus>("/api/setup/quick-start", { method: "POST", body: "{}" }),
 
   patchRepo: (
     id: string,

@@ -9,6 +9,8 @@ export interface SettingsTabBarProps {
   setSettingsTab: (tab: SettingsTab) => void;
   playbook: PlaybookEntry[];
   casebook: CasebookEntry[];
+  /** Restrict the bar to a subset of tabs (Engine Room splits them into two groups). */
+  visibleTabs?: SettingsTab[];
 }
 
 export function SettingsTabBar({
@@ -16,11 +18,13 @@ export function SettingsTabBar({
   setSettingsTab,
   playbook,
   casebook,
+  visibleTabs,
 }: SettingsTabBarProps) {
   const { t } = useI18n();
+  const show = (tab: SettingsTab) => !visibleTabs || visibleTabs.includes(tab);
   return (
     <div className="flex items-center gap-1 text-xs -mb-px">
-      <button
+      {show("runtime") && <button
         type="button"
         onClick={() => setSettingsTab("runtime")}
         className={`px-3 py-2 border-b-2 font-medium transition ${
@@ -30,8 +34,8 @@ export function SettingsTabBar({
         }`}
       >
         {t("modal.repoSettings.tab.runtime")}
-      </button>
-      <button
+      </button>}
+      {show("contract") && <button
         type="button"
         onClick={() => setSettingsTab("contract")}
         className={`inline-flex items-center gap-1.5 px-3 py-2 border-b-2 font-medium transition ${
@@ -42,8 +46,8 @@ export function SettingsTabBar({
       >
         <FileJson2 className="w-3.5 h-3.5" />
         {t("modal.repoSettings.tab.contract")}
-      </button>
-      <button
+      </button>}
+      {show("playbook") && <button
         type="button"
         onClick={() => setSettingsTab("playbook")}
         className={`inline-flex items-center gap-1.5 px-3 py-2 border-b-2 font-medium transition ${
@@ -54,8 +58,8 @@ export function SettingsTabBar({
       >
         <BookOpen className="w-3.5 h-3.5" />
         {t("modal.repoSettings.tab.playbook")} ({playbook.length})
-      </button>
-      <button
+      </button>}
+      {show("casebook") && <button
         type="button"
         onClick={() => setSettingsTab("casebook")}
         className={`inline-flex items-center gap-1.5 px-3 py-2 border-b-2 font-medium transition ${
@@ -66,7 +70,7 @@ export function SettingsTabBar({
       >
         <Database className="w-3.5 h-3.5" />
         {t("modal.repoSettings.tab.casebook")} ({casebook.length})
-      </button>
+      </button>}
     </div>
   );
 }

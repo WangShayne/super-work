@@ -589,7 +589,7 @@ describe("v1.2.0 End-to-End Capabilities (A Campaigns + B MergeTrain/Barrier + C
       expect(svcJson.status.dataDir).toBe(dir);
 
       const mcpInfo = (await (await fetch(`${baseUrl}/api/mcp`)).json()) as { version: string };
-      expect(mcpInfo.version).toBe("1.7.0");
+      expect(mcpInfo.version).toBe("1.8.0");
 
       const toolsList = (await (
         await fetch(`${baseUrl}/api/mcp`, {

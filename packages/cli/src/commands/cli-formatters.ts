@@ -121,9 +121,16 @@ export function formatTranscriptLines(rawJsonl: string, limit = 40): string[] {
 }
 
 export function printHelp(stdout: (line: string) => void): void {
-  stdout(`super-work v1.7.0 CLI
+  stdout(`super-work v1.8.0 CLI
 
-Usage:
+Super-Agent verbs (start here):
+  super-work do "<requirement>" [--preview] [--milestone <vX.Y.Z>] [--repo <id>] [--engine <e>] [--budget <usd>] [--wait] [--json]
+  super-work status [--repo <id>] [--auto-start] [--json]
+  super-work inbox [list | approve <id> | reject <id> | batch ...]
+  super-work approve <id> [-m <note>]
+  super-work doctor [--fix] [--auto-start] [--json]
+
+Advanced / Automation:
   super-work up [-d|--detach] [--host 127.0.0.1] [--port 4318] [--data-dir path] [--token <token>]
   super-work service [install [--no-start] | uninstall | start | stop | status | logs [--lines 80]] [--host <addr>] [--port <n>] [--data-dir <path>] [--token <token>] [--json]
   super-work reload [--force] [--skip-canary] [--auto-start] [--json]

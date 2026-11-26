@@ -10,7 +10,7 @@ export interface CasebookTabProps {
   casebookQuery: string;
   setCasebookQuery: (value: string) => void;
   repo: RepoConfig;
-  onClose: () => void;
+  onClose?: () => void;
   handleDeleteCase: (entryId: string) => Promise<void>;
   loadCasebook: (repoId: string, q?: string) => Promise<void>;
 }

@@ -6,6 +6,47 @@
 
 ---
 
+## 零、 v1.8.0 快速开始：Super-Agent First
+
+v1.8.0 的主题是*消费级界面，专业级引擎*：三步即可从零到交付一次变更。
+
+1. **1 键完成配置。** 打开 Web 界面，零配置 SetupWizard 调用 `POST /api/setup/quick-start`，自动选择已登录的最佳 CLI（`claude` → `codex` → 启发式）作为控制面 LLM。
+2. **添加仓库。** 选择目录；`POST /api/repos/detect`（只读）推断名称、基线分支、技术栈（Bun / Node / Rust / Python / Go）与验证命令；`POST /api/repos` 以 `standard` `AutonomyPreset` 创建仓库。
+3. **说出需求。** 在 Home 的 **Hero Composer** 中输入（或运行 `super-work do "<需求>"`）。智能分诊隐式完成路由；追加 `scope:<glob>`（如 `scope:packages/core/**`）可固定允许路径。
+
+```bash
+super-work do "新增 /healthz 接口 scope:packages/server/**"
+super-work do "新增 /healthz 接口" --preview             # 仅预览计划，不创建任务
+super-work do "新增 /healthz 接口" --wait                # 阻塞直至完成
+super-work do "新增 /healthz 接口" --milestone v1.9.0    # 归入里程碑
+super-work up [-d|--detach]                              # 显式启动守护进程
+```
+
+### 授权拨盘（Hero Composer）
+
+| 预设 | 交付门禁 | 行为 |
+|---|---|---|
+| **受控**（`guarded`） | `always_signoff` | 智能体自主完成编码与验证，但每次合入前都停下来等你拍板 |
+| **智能**（`smart`，默认） | `risk_gated`（阈值 35） | 低风险改动自动合入交付，高风险或敏感变更才请你确认 |
+| **全权**（`autonomous`） | `always_auto` | 端到端全权委托交付，仅在真正受阻（冲突、预算、越界）时通知你 |
+
+所有预设均使用 `mode: auto`、`sandboxMode: balanced`、`verificationStrategy: smart_tiered`。预设仅在首次或强制同步时展开；自动重同步绝不覆盖你通过 `PATCH /api/repos/:id` 设置的显式覆盖。
+
+> **旧名称**：`copilot` → `guarded`、`standard` → `smart`、`autopilot` → `autonomous`。`.super-work.json`、REST 请求体与已存储仓库中的旧值仍被接受并自动归一化，无需迁移。
+
+### 三大空间
+
+- **Home（首页）**：Hero Composer（含可折叠 *Advanced ▾*）、**Needs You**、**Live Work** 卡片。Needs You 将所有收件箱类型归并为三个动词：**Approve 批准**（签核、计划批准、观察提案、里程碑就绪、擂台裁决）、**Answer 回答**（澄清请求、Epic 重规划）、**Unblock 解阻**（授权违规、Watchdog 升级、合并冲突、预算上限、PR 跟进、战役暂停）。
+- **History（历史）**：时间线与发布（Timeline & Releases）、看板 / DAG。
+- **Settings（设置）**：5 项 Essentials + 可折叠 **Developer / Engine Room**（Contract / Gates、Playbook / Casebook、Routines / Campaigns、Worktrees / Merge Train / Simulate、Flight Recorder / Doctor / Evals）。
+- **DeepDiveDrawer**：*Overview & Changes* + *More ▾*，底部常驻 **Steer** 输入栏。
+- **HeaderBar**（单栏）：`v1.8` 徽标 + 实时健康点 · 胶囊标签页（Home / History / Settings） · `⌘K` / `ZH-EN`（非首页标签另有紧凑仓库胶囊）。
+- **Hero Composer 上下文工具栏**：仓库切换器（含注册） · **受控 / 智能 / 全权** 拨盘 · *Advanced ▾*，直接集成在需求输入框下方。
+
+以下章节深入介绍完整的 Engine Room 能力。
+
+---
+
 ## 一、 首次运行：CLI 自动扫描与控制面 LLM 配置
 
 `super-work` 采用**控制面 + 执行面**分离架构：

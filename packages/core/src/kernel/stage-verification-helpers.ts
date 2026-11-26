@@ -127,7 +127,8 @@ async function resolveGateCommands(
   commands: string[],
   options?: { isFinalDeliveryGate?: boolean },
 ): Promise<{ commandsToRun: string[]; scopedVerification?: ScopedVerificationInfo }> {
-  if (repo.verificationStrategy !== "impact_scoped") {
+  // smart_tiered 与 impact_scoped 同语义（影响范围分层验证，最终交付门禁仍全量）。
+  if (repo.verificationStrategy !== "impact_scoped" && repo.verificationStrategy !== "smart_tiered") {
     return { commandsToRun: commands };
   }
 

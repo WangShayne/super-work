@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { api } from "../api.ts";
 import { formatTicketStatus, useI18n } from "../i18n.tsx";
+import type { EngineRoomSection } from "./EngineRoomPanel.tsx";
 import type {
   ChiefActionSuggestion,
   ChiefAskResult,
@@ -33,11 +34,9 @@ interface CommandPaletteModalProps {
   tickets: Ticket[];
   inboxItems: InboxItem[];
   onSelectRepo: (repoId: string) => void;
-  onSwitchTab: (tab: "inbox" | "board" | "routines" | "metrics") => void;
+  onSwitchTab: (tab: "home" | "history" | "settings") => void;
   onInspectTicket: (ticketId: string) => void;
-  onOpenDispatch: () => void;
-  onOpenDoctor: () => void;
-  onOpenMergeTrain?: () => void;
+  onOpenEngineRoom: (section: EngineRoomSection) => void;
   onRefresh: () => void;
 }
 
@@ -51,9 +50,7 @@ export function CommandPaletteModal({
   onSelectRepo,
   onSwitchTab,
   onInspectTicket,
-  onOpenDispatch,
-  onOpenDoctor,
-  onOpenMergeTrain,
+  onOpenEngineRoom,
   onRefresh,
 }: CommandPaletteModalProps) {
   const { locale, t } = useI18n();
@@ -109,87 +106,51 @@ export function CommandPaletteModal({
   }, [tickets, qLower]);
 
   const quickCommands = useMemo(() => {
+    const go = (tab: "home" | "history" | "settings") => () => {
+      onSwitchTab(tab);
+      onClose();
+    };
+    const room = (section: EngineRoomSection) => () => {
+      onOpenEngineRoom(section);
+      onClose();
+    };
     const items = [
       {
-        id: "cmd_dispatch",
-        label: t("header.dispatchTask"),
-        hint: "Dispatch",
-        icon: Sparkles,
-        run: () => {
-          onClose();
-          onOpenDispatch();
-        },
-      },
-      {
-        id: "cmd_inbox",
-        label: `${t("nav.inbox")} (${inboxItems.filter((i) => i.status === "pending").length})`,
-        hint: "View",
+        id: "cmd_home",
+        label: `${t("nav.home")} (${inboxItems.filter((i) => i.status === "pending").length})`,
+        hint: "Home",
         icon: Inbox,
-        run: () => {
-          onSwitchTab("inbox");
-          onClose();
-        },
+        run: go("home"),
       },
-      {
-        id: "cmd_board",
-        label: t("nav.board"),
-        hint: "View",
-        icon: Kanban,
-        run: () => {
-          onSwitchTab("board");
-          onClose();
-        },
-      },
-      {
-        id: "cmd_metrics",
-        label: t("nav.metrics"),
-        hint: "View / Eval",
-        icon: Activity,
-        run: () => {
-          onSwitchTab("metrics");
-          onClose();
-        },
-      },
+      { id: "cmd_history", label: t("nav.history"), hint: "History", icon: Kanban, run: go("history") },
+      { id: "cmd_settings", label: t("nav.settings"), hint: "Settings", icon: Activity, run: go("settings") },
       {
         id: "cmd_doctor",
-        label: t("setup.tabDoctorBackup"),
-        hint: "Doctor & Restore",
+        label: t("cmd.engineRoomDoctor"),
+        hint: "Engine Room · Doctor",
         icon: Stethoscope,
-        run: () => {
-          onClose();
-          onOpenDoctor();
-        },
+        run: room("doctor"),
       },
       {
-        id: "cmd_campaigns",
-        label: t("cmd.openCampaigns"),
-        hint: "Goal Campaigns",
-        icon: Sparkles,
-        run: () => {
-          onSwitchTab("routines");
-          onClose();
-        },
+        id: "cmd_merge_train",
+        label: t("cmd.openMergeTrain"),
+        hint: "Engine Room · Merge Train",
+        icon: Bot,
+        run: room("mergeTrain"),
       },
-      ...(onOpenMergeTrain
-        ? [
-            {
-              id: "cmd_merge_train",
-              label: t("cmd.openMergeTrain"),
-              hint: "Merge Train",
-              icon: Bot,
-              run: () => {
-                onClose();
-                onOpenMergeTrain();
-              },
-            },
-          ]
-        : []),
+      {
+        id: "cmd_worktrees",
+        label: t("cmd.openWorktrees"),
+        hint: "Engine Room · Worktrees",
+        icon: Sparkles,
+        run: room("worktrees"),
+      },
     ];
     if (!qLower) return items;
     return items.filter(
       (i) => i.label.toLowerCase().includes(qLower) || i.hint.toLowerCase().includes(qLower),
     );
-  }, [qLower, inboxItems, t, onClose, onOpenDispatch, onSwitchTab, onOpenDoctor, onOpenMergeTrain]);
+  }, [qLower, inboxItems, t, onClose, onSwitchTab, onOpenEngineRoom]);
 
   if (!open) return null;
 

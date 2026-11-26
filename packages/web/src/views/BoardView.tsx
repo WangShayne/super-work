@@ -253,16 +253,16 @@ export function BoardView({
           return (
             <div
               key={lane.id}
-              className={`rounded-xl border border-zinc-800/80 border-t-2 ${lane.accent} bg-zinc-900/40 flex flex-col min-h-[70vh]`}
+              className={`rounded-xl border border-zinc-800/80 border-t-2 ${lane.accent} bg-zinc-900/40 flex flex-col h-[calc(100vh-17rem)] min-h-[360px] max-h-[900px]`}
             >
-              <div className="px-3.5 py-3 border-b border-zinc-800/60 flex items-center justify-between">
+              <div className="px-3.5 py-3 border-b border-zinc-800/60 flex items-center justify-between shrink-0">
                 <span className="text-xs font-semibold text-zinc-200">{t(lane.titleKey)}</span>
                 <span className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">
                   {laneTickets.length}
                 </span>
               </div>
 
-              <div className="p-2.5 space-y-2.5 flex-1">
+              <div className="p-2.5 space-y-2.5 flex-1 min-h-0 overflow-y-auto overscroll-contain">
                 {laneTickets.length === 0 ? (
                   <div className="text-[11px] text-zinc-600 text-center py-8">{t("board.empty")}</div>
                 ) : (
