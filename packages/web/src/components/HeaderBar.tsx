@@ -1,4 +1,4 @@
-import { Clock, Cpu, FolderGit2, Home, Languages, Plus, Settings } from "lucide-react";
+import { Clock, FolderGit2, Home, Languages, Plus, Settings } from "lucide-react";
 import type { ReactNode } from "react";
 import { useI18n, type TranslationKey } from "../i18n.tsx";
 import type { EngineHealthRecord, RepoConfig, SelfReloadState, WorkerEngineId } from "../types.ts";
@@ -78,9 +78,12 @@ export function HeaderBar({
       <div className="min-h-[52px] px-4 sm:px-5 py-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
         {/* Left: brand + health */}
         <div className="flex items-center gap-2 min-w-0">
-          <div className="w-7 h-7 rounded-lg bg-indigo-500/15 border border-indigo-400/30 flex items-center justify-center text-indigo-400">
-            <Cpu className="w-3.5 h-3.5" aria-hidden="true" />
-          </div>
+          <img
+            src="/favicon.svg"
+            alt=""
+            aria-hidden="true"
+            className="w-7 h-7 rounded-lg shrink-0 shadow-sm shadow-indigo-500/20"
+          />
           <span className="font-semibold tracking-tight text-zinc-100 text-sm">super-work</span>
           <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-300/90 border border-indigo-500/25">
             v1.8.3

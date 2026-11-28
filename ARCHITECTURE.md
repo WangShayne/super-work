@@ -1,62 +1,83 @@
-[English](./ARCHITECTURE.md) | [简体中文](./ARCHITECTURE.zh-CN.md)
+<p align="center">
+  <strong>English</strong> · <a href="./ARCHITECTURE.zh-CN.md">简体中文</a> · <a href="./README.md">README</a> · <a href="./USAGE.md">Usage Guide</a>
+</p>
 
 # `super-work` Architecture & Core Contracts
 
-Grounded in the design principles of DeepSeek Harness team's *"Exploring Super-agent Design: Towards a More Autonomous Agent System"*, this document specifies the layered architecture, state machine transitions, and hexagonal contracts of `super-work`.
+Grounded in the DeepSeek Harness team's essay *"Exploring Super-agent Design: Towards a More Autonomous Agent System"*, this document specifies the Dual-Harness architecture, ticket state machine, core invariants, and release evolution of `super-work` (`v1.8.3`).
 
-> **Design Principle**: The primary bottleneck is **human attention bandwidth**, not single-turn LLM capability. `super-work` decouples persistent lightweight triage/supervision from isolated coding execution, ensuring external side effects are strictly gated through an idempotent `Transactional Outbox`.
+> **Design Axiom**: The primary bottleneck in AI-assisted engineering is **human attention bandwidth**, not single-turn LLM intelligence. `super-work` decouples persistent lightweight governance/triage from sandboxed coding execution, gating every external side effect through deterministic verification and an idempotent `Transactional Outbox`.
 
 ---
 
-## 1. System Overview
+## Table of Contents
+
+1. [System Topology — Dual-Harness Architecture](#1-system-topology--dual-harness-architecture)
+2. [Ticket Stage Pipeline State Machine](#2-ticket-stage-pipeline-state-machine)
+3. [Core Architectural Contracts](#3-core-architectural-contracts)
+4. [Release Evolution Log (`v0.4` → `v1.8.3`)](#4-release-evolution-log-v04--v183)
+
+---
+
+## 1. System Topology — Dual-Harness Architecture
 
 ```mermaid
 flowchart TB
-    subgraph Sources["Event Sources"]
-        WebInput["Local Web Command Center"]
-        GhPoller["GhCliPollingSource (gh CLI)"]
-        ExtHook["Future Adapters (Webhooks / IM Bots)"]
+    subgraph Surfaces["Entry Surfaces & Clients"]
+        WebUI["Web Command Center (@super-work/web)"]
+        CLI["CLI & stdio Bridge (@super-work/cli)"]
+        MCP["Native MCP Server (27 Tools · 3 Resources)"]
+        HooksIn["GhCliPollingSource + Signed GitHub / ChatOps Webhooks"]
     end
 
-    subgraph ControlPlane["Control Plane (@super-work/core)"]
-        Intake["EventIntakeRouter & Thread Subscriptions"]
-        Assessor["MasterAssessor (ControlPlaneLLM)"]
-        Scheduler["SuperWorkKernel & Stage Pipeline"]
-        Watchdog["TwoTierWatchdog (L1 Probes + L2 Diagnosis)"]
-        Outbox["OutboxProcessor (Transactional Outbox)"]
+    subgraph Server["HTTP / SSE Daemon (@super-work/server)"]
+        HonoApp["Hono REST Router + Auth Guard"]
+        SSEBus["Filtered SSE Bus + Per-Ticket Replay Buffer"]
     end
 
-    subgraph MemoryState["State & Tiered Memory"]
-        SQLite["SqliteStateStore (bun:sqlite WAL + FTS5)"]
-        SpillStore["FsArtifactStore (Spill Blobs)"]
+    subgraph ControlPlane["Outer Governance Harness (@super-work/core)"]
+        Intake["Smart Intake Router + Read-Only Repo Probes"]
+        Registry["Unified Peer ModelProfile Pool & Role Bindings"]
+        Scheduler["SuperWorkKernel · Epics · Campaigns · Milestones · Routines"]
+        Watchdog["Adaptive Watchdog 2.0 + Tiered Engine Circuit Breaker"]
+        RiskOutbox["Risk Gate (0-100) · OutboxProcessor · Speculative Merge Train"]
     end
 
-    subgraph DataPlane["Isolated Execution Plane (@super-work/drivers)"]
-        MandateGuard["Mandate Guardrails & GitWorktreeProvider"]
-        Claude["ClaudeCodeDriver"]
-        Codex["CodexDriver"]
-        OpenCode["OpenCodeDriver"]
-        Gemini["GeminiCliDriver"]
-        Mock["MockWorkerDriver"]
+    subgraph Storage["State & Tiered Memory (@super-work/drivers)"]
+        SQLite["SqliteStateStore (bun:sqlite WAL + FTS5 + Hot Backup)"]
+        Spill["FsArtifactStore (JSONL Transcripts · Diffs · PNG Captures)"]
     end
 
-    Sources --> Intake
-    Intake -->|"New thread"| Assessor
-    Intake -->|"Subscribed thread"| Scheduler
-    Assessor -->|"Ticket + Mandate"| Scheduler
+    subgraph ExecutionPlane["Pluggable Inner Harnesses (@super-work/drivers)"]
+        Worktree["GitWorktreeProvider + OS Sandbox (Seatbelt / bwrap) + Gates"]
+        CLITrack["Native CLI Harness: Claude · Codex · OpenCode · Gemini"]
+        APITrack["Built-in API Harness: ApiWorkerDriver (DeepSeek / OpenAI / Anthropic / Ollama)"]
+        DeliveryExec["GhOutboxExecutor + Milestone Release + BunSelfHostRunner Canary"]
+    end
+
+    Surfaces <--> HonoApp
+    WebUI <--> SSEBus
+    HonoApp <--> Intake
+    HonoApp <--> Scheduler
+    Scheduler <--> Registry
+    Intake --> Scheduler
     Scheduler <--> SQLite
-    Scheduler <--> SpillStore
-    Scheduler --> MandateGuard
-    MandateGuard --> Claude
-    MandateGuard --> Codex
-    MandateGuard --> OpenCode
-    MandateGuard --> Gemini
-    MandateGuard --> Mock
-    Watchdog -.->|"Stream & Diff health checks"| MandateGuard
-    Watchdog -.->|"Hint / Switch Engine / Escalate"| Scheduler
-    Scheduler -->|"After clean Rebase"| Outbox
-    Outbox -->|"Idempotent Push / PR / Comment"| GhPoller
+    Scheduler <--> Spill
+    Scheduler --> Worktree
+    Worktree --> CLITrack
+    Worktree --> APITrack
+    Watchdog -.->|"Stream / Diff / Quota Probes"| Worktree
+    Watchdog -.->|"Extend / Hint / Switch / Escalate"| Scheduler
+    Scheduler -->|"Verified & Rebased"| RiskOutbox
+    RiskOutbox --> DeliveryExec
 ```
+
+### Package Dependency Boundary
+- **`@super-work/core`**: Pure TypeScript domain types, orchestration state machines, Mandate/Risk/Playbook evaluators, and JSON-RPC 2.0 MCP protocol (`0` UI or driver runtime dependencies; exports `./types` subpath for type-only consumers).
+- **`@super-work/drivers`**: Concrete adapters (`SqliteStateStore`, `FsArtifactStore`, `GitWorktreeProvider`, `Seatbelt`/`bwrap` OS sandbox, CLI & HTTP Control-Plane LLMs, CLI & `ApiWorkerDriver` workers, `GhOutboxExecutor`, `BunSelfHostRunner`, `ServiceManager`).
+- **`@super-work/server`**: Hono REST routes (`routes/*`), `LiveEventBuffer` SSE broadcaster, HMAC webhook endpoints, and static Web bundle host.
+- **`@super-work/cli`**: Terminal client (`super-work do`, `inbox`, `steer`, `milestone`, `doctor`, `service`) and `super-work mcp` stdio transport.
+- **`@super-work/web`**: React 19 + Vite + Tailwind v4 UI. Imports `@super-work/core/types` **type-only** (`devDependency`), ensuring zero Node/core runtime code enters browser chunks (all chunks `< 500 kB`).
 
 ---
 
@@ -64,160 +85,108 @@ flowchart TB
 
 ```mermaid
 stateDiagram-v2
-    [*] --> triaging: Trigger ingested
+    [*] --> triaging: Trigger / Intake ingested
     triaging --> proposed: observe mode
     proposed --> queued: Inbox approved
-    triaging --> queued: auto mode (no overlap)
-    triaging --> waiting_deps: auto mode (overlapping Mandate)
+    triaging --> queued: auto mode (disjoint Mandate)
+    triaging --> waiting_deps: auto mode (overlapping Mandate or explicit dependsOn)
 
-    waiting_deps --> queued: Dependencies delivered
-    waiting_deps --> needs_human: Dependency failed/cancelled
+    waiting_deps --> queued: Upstream dependencies delivered
+    waiting_deps --> needs_human: Upstream dependency failed / cancelled
 
     queued --> planning: standard / strict template
+    queued --> spec_testing: fast + tddMode
     queued --> implementing: fast template
 
     planning --> awaiting_plan_approval: strict template gate
-    awaiting_plan_approval --> queued: Plan approved (next stage implement)
-    planning --> queued: standard template (next stage implement)
+    awaiting_plan_approval --> queued: Plan approved
+    planning --> queued: Advance to spec_test or implement
+    planning --> needs_human: Worker clarification_request
 
-    implementing --> queued: Mandate diff ok -> review or rebase
-    implementing --> needs_human: Mandate violation reverted
-    implementing --> queued: Watchdog INJECT_HINT or SWITCH_ENGINE
-    implementing --> needs_human: Watchdog ESCALATE_HUMAN
+    spec_testing --> queued: Failing spec tests locked -> implement
+
+    implementing --> queued: Mandate + Gates green -> review or rebase
+    implementing --> implementing: Mid-turn Live Steer (zero retry penalty)
+    implementing --> queued: Gate failure / Watchdog INJECT_HINT or SWITCH_ENGINE
+    implementing --> needs_human: Mandate violation / clarification / retries exhausted
 
     reviewing --> queued: Approved -> rebase
-    reviewing --> queued: Rejected -> implement with feedback
+    reviewing --> queued: Blocker or major findings -> rework implement
     reviewing --> needs_human: Review retries exhausted
 
-    rebasing --> outbox_pending: Rebase clean -> enqueue Outbox
-    rebasing --> queued: Conflict -> implement self-heal
-    rebasing --> needs_human: Conflict retries exhausted
+    rebasing --> outbox_pending: Rebase + Gates green -> Risk Gate / Outbox
+    rebasing --> queued: 3-Way conflict self-heal retry
+    rebasing --> needs_human: Conflict escalation (pre_rebase_conflict preserved)
 
-    needs_human --> queued: Human approval / Thread follow-up
-    outbox_pending --> delivered: OutboxExecutor succeeded
+    needs_human --> queued: Human decision / Expand Mandate / Thread instruction
+    needs_human --> cancelled: Rejected or cancelled
+    outbox_pending --> delivered: Local Merge / Merge Train / GitHub PR sent
     delivered --> [*]
+    cancelled --> [*]
 ```
 
 ---
 
-## 3. Core Contracts & Mechanisms
+## 3. Core Architectural Contracts
 
-### 3.1 `Mandate` & Concurrency Scope Governance
-Defined in [mandate.ts](./packages/core/src/mandate.ts):
-- **Immutable Scope**: Each `Ticket` receives a `Mandate` specifying `allowedPaths`, `forbiddenPaths` (always merging `DEFAULT_FORBIDDEN_PATHS`: `.env`, `.env.*`, `**/.env`, `**/.env.*`, `**/*.pem`, `**/*.key`), `allowNetwork`, `allowExternalSideEffects: false`, `maxCostUsd`, `maxDurationSec`, and `maxStageRetries`.
-- **Pre-dispatch Serialization**: `mandateScopesOverlap(a, b)` checks wildcard and directory-prefix intersections against active non-terminal tickets in the same repository. Overlapping tickets automatically enter `dependsOn` (`waiting_deps`); disjoint scopes run concurrently in separate worktrees.
-- **Dual Guardrails**:
-  - **Pre-turn**: Worker drivers map stage permissions to CLI flags (`plan` / `review` run in read-only/plan mode; `implement` blocks `Bash(git push*)`, `Bash(gh pr *)`, `Bash(gh issue *)`).
-  - **Post-turn**: `validateChangedFilesAgainstMandate(...)` inspects `GitWorktreeProvider.getChangedFiles(...)`. Violations are reverted via `revertPaths(...)` and escalated as `mandate_violation` items in the Attention Inbox.
+### 3.1 Dual-Harness Execution & Peer `ModelProfile` Registry
+Defined in [model-registry.ts](./packages/core/src/model-registry.ts), [control-plane-symmetric.ts](./packages/drivers/src/llm/control-plane-symmetric.ts), [api-worker-driver.ts](./packages/drivers/src/workers/api-worker-driver.ts), and [model-discovery.ts](./packages/drivers/src/llm/model-discovery.ts):
+- Every CLI engine (`kind: "cli"`, `cliEngine: "claude" | "codex" | "opencode" | "gemini"`) and HTTP model (`kind: "api"`, `apiProtocol: "deepseek" | "openai" | "anthropic" | "ollama"`) is a peer **`ModelProfile`** in `SystemSetupConfig.modelProfiles`.
+- Any ready `ModelProfile` can serve **Control** (`controlModelId`, or `"heuristic"`), **Implement** (`implementModelId`, or `"auto"`), or **Cross-Review** (`reviewModelId`, or `"auto"` heterogeneous selection).
+- API keys are persisted only in local SQLite (`PublicModelProfile` masks keys and never echoes raw secrets); `POST /api/setup/models` (alias `/api/setup/model`) probes `/models`, `/v1/models`, `/model`, `/v1/model` (+ Ollama `/api/tags`) with key redaction.
+- Router prompts ([worker-mandate-rule.ts](./packages/drivers/src/llm/worker-mandate-rule.ts)) and Worker prompts ([memory.ts](./packages/core/src/memory.ts)) enforce a strict **Mandate Side-Effect Rule**: Workers never receive or execute `git push`, `gh pr create`, or release `git tag` instructions.
 
-### 3.2 Unified `WorkerDriver` & Cross-Engine Handover
-Defined in [ports.ts](./packages/core/src/ports.ts) and implemented in `packages/drivers/src/workers/`:
-- All worker drivers emit normalized `WorkerStreamEvent` streams (`session_started`, `thought`, `tool_use`, `tool_result`, `text`, `usage`, `completed`, `error`).
-- **Same-engine resume**: Captures `nativeSessions[engine]` (`session_id` for `ClaudeCodeDriver`, `thread_id` for `CodexDriver`, `sessionID` for `OpenCodeDriver`) and resumes via `--resume` / `exec resume` / `--session`.
-- **Cross-engine handover**: Between stages (e.g., `ClaudeCodeDriver` for `implement` → `CodexDriver` or `OpenCodeDriver` for `review`) or after a `SWITCH_ENGINE` recovery, `MemoryManager` synthesizes concise `InlineMemory` handover notes without leaking giant raw transcripts into the next model's context window.
+### 3.2 Immutable `Mandate`, Worktree Isolation & OS Sandboxes
+Defined in [mandate.ts](./packages/core/src/mandate.ts) and [os-sandbox.ts](./packages/drivers/src/sandbox/os-sandbox.ts):
+- **Pre-dispatch Scope Serialization**: `mandateScopesOverlap(a, b)` serializes overlapping tickets via `dependsOn` (`waiting_deps`) while running disjoint scopes in parallel `git worktree` directories (mirroring monorepo `packages/*` symlinks and running `setupCommands`).
+- **OS-Level & Post-Turn Guardrails**: macOS `sandbox-exec` (Seatbelt) and Linux `bwrap` confine writes to the active worktree, lock `IMMUTABLE_REPO_PATHS` (`super-work.json`) and TDD `lockedTestPaths` read-only, scrub secret env vars, and preserve `localhost:*` loopback in `balanced` mode (`strict` disables network during gates). Post-turn `validateChangedFilesAgainstMandate` immediately reverts `forbiddenViolations` while quarantining ordinary `scopeViolations` in-place for zero-reburn `expandMandate` approval.
 
-### 3.3 `Inline & Spill` + `Chain of Recall`
-Implemented in [memory.ts](./packages/core/src/memory.ts), [sqlite-state-store.ts](./packages/drivers/src/storage/sqlite-state-store.ts), and [fs-artifact-store.ts](./packages/drivers/src/storage/fs-artifact-store.ts):
-- **Inline**: Compact `goal`, `acceptanceCriteria`, `planSummary`, `stageNotes`, `threadUpdates`, and `activeHint` stored on the `Ticket`.
-- **Spill**: Full JSONL worker transcripts and unified `git diff` patches persisted as files under `<dataDir>/artifacts/<ticketId>/` and metadata-linked in SQLite `artifacts`.
-- **Chain of Recall**: `SqliteStateStore.recallChain(ticketId)` reconstructs `Trigger -> Thread -> Ticket -> StageRuns -> SpillArtifacts`, augmented by sanitized `bun:sqlite` FTS5 search (`tokenizeFtsQuery`) across past tickets and stage notes.
+### 3.3 Smart Intake, Read-Only Repo Probes & Multi-Scale Orchestration
+Defined in [intake.ts](./packages/core/src/intake.ts), [readonly-repo-prober.ts](./packages/drivers/src/workspace/readonly-repo-prober.ts), [milestone-coordinator.ts](./packages/core/src/kernel/milestone-coordinator.ts), and [campaign-coordinator.ts](./packages/core/src/kernel/campaign-coordinator.ts):
+- **Two-Layer Probing**: `< 50 ms` deterministic symbol/slice/git pre-probes plus a bounded 2-round read-only tool loop jailed to `repo.rootPath` (blocking `.env*`, `*.pem`, `*.key`, and `forbiddenPaths`).
+- **Unified Routing**: `POST /api/intake` routes natural-language requests (with explicit `scope:<glob>` extraction) into `single_ticket`, topological `epic_dag` (unified staging branch `super-work/epic/<id>` or cross-repo `HandoverDigest` barrier), or quantitative `goal_campaign` (monotonic regression rollback + plateau fuse).
 
-### 3.4 Two-Tier `Watchdog`
-Implemented in [watchdog.ts](./packages/core/src/watchdog.ts):
-- **L1 Deterministic Probes (Zero LLM Cost)**: Detects `hard_budget_exceeded` (cost/duration ceiling), `repeated_error` (`>= 3` consecutive normalized error signatures), `diff_oscillation` (`A -> B -> A` worktree diff hash cycles), `silence_timeout`, and `budget_burn` (`>= 80%` cost spent with zero file edits).
-- **L2 Semantic Diagnosis**: Invoked only upon an L1 `WatchdogSignal` (and within `maxStageRetries`). `ControlPlaneLLM.diagnoseWatchdog(...)` returns `CONTINUE`, `INJECT_HINT`, `SWITCH_ENGINE`, or `ESCALATE_HUMAN`.
+### 3.4 Normalized `WorkerDriver` Stream, Live SSE Replay & Mid-Turn Steer
+Defined in [ports.ts](./packages/core/src/ports.ts), [live-event-buffer.ts](./packages/server/src/live-event-buffer.ts), and [liveStream.ts](./packages/web/src/utils/liveStream.ts):
+- Drivers emit normalized `WorkerStreamEvent` frames (`session_started`, `thought`, `tool_use`, `tool_result`, `text`, `usage`, `completed`, `error`), preserving native session IDs for zero-loss same-engine resume and synthesizing compact `InlineMemory` notes for cross-engine handover.
+- `LiveEventBuffer` keeps the last `60` meaningful execution events across `40` recent tickets (LRU) and replays matching events immediately after `GET /api/events` `connected` (honoring `repoId` and `ticketId` + child-subtask filters).
+- `steerTicket` (`abort("live_steer")`) interrupts an active turn without incrementing `stageRetries` or tripping engine health, injects `[LIVE STEER]`, and resumes cleanly.
 
-### 3.5 `Transactional Outbox` & Rebase Gate
-Implemented in [outbox.ts](./packages/core/src/outbox.ts) and [gh-cli-source.ts](./packages/drivers/src/sources/gh-cli-source.ts):
-- Before delivery, `SuperWorkKernel` runs `GitWorktreeProvider.rebaseOntoBase(...)`. Merge conflicts trigger a self-heal `implement` retry or a `merge_conflict` Inbox item.
-- Clean rebases enqueue an idempotent `OutboxEntry` (`idempotency_key` unique constraint in SQLite WAL). `OutboxProcessor.processDueEntries()` atomically claims due rows via `claimNextOutboxEntries` and executes `GhOutboxExecutor` (pushing & opening a GitHub PR when remote + `gh` are configured, or recording local branch readiness for local-only repos).
-- **Worktree Lifecycle & GC**: When `repo.autoCleanupWorktree` is enabled (default), terminal `delivered` and `cancelled` tickets automatically reclaim their isolated worktree directory while retaining branch commits (`GET /api/tickets/:id` resolves diffs cleanly across Live Worktree → Branch Diff → Spill `diff` artifact). Stale or orphan directories can also be inspected and reclaimed via `/api/worktrees/gc`.
-- **Deterministic Verification Gate**: When `repo.verificationCommands` is configured, `SuperWorkKernel` runs every command inside the worktree after `implement` and `rebase`, persisting full output as a `test_log` Spill artifact and emitting `verification_completed`. Failures automatically re-queue `implement` with diagnostic context or escalate after `maxStageRetries`.
-- **Dual-Channel Delivery & Unified Epic Staging (`v0.4.0`)**: Epics default to a unified staging branch `super-work/epic/<epicId>` (with optional `per_subtask` fallback). After all subtasks merge into the staging branch, `finalizeUnifiedEpic` runs a final base-branch rebase and global verification gate (with 1 auto-fixup retry round) before opening a single consolidated PR or atomic `local_merge`.
-- **Crash Recovery & Graded Mandate Expansion**: `SuperWorkKernel.recoverInterruptedRuns()` recovers orphaned active tickets and `processing` outbox entries without losing worktree state, `nativeSessions`, or `stageRetries`; `validateChangedFilesAgainstMandate` separates `forbiddenViolations` (reverted immediately) from `scopeViolations` (preserved pending Inbox `expandMandate` approval without re-running the worker).
-- **PR Follow-up Loop, Repo Quotas & CLI**: `GhCliPollingSource` ingests PR reviews and `gh run view --log-failed` outputs while skipping `[super-work]` comments, triggering same-branch incremental updates (`GhOutboxExecutor`, capped at 3 rounds); `tick()` enforces per-repo `maxConcurrentWorkers` and soft `dailyBudgetUsd` caps alongside `/api/metrics` and `@super-work/cli`.
-- **Repo Contracts (`super-work.json`), Self-Evolving Playbook & Worktree Warmup (`v0.5.0`)**: `GitWorktreeProvider.loadRepoContract` / `writeRepoContract` syncs shared engineering settings (`verificationCommands`, `setupCommands`, `forbiddenPaths`, `conventions`, shared `playbook`) from `super-work.json` while isolating personal runtime knobs in SQLite; `prepareWorkspace` executes `setupCommands` cleanly on fresh worktrees; closed-loop post-failure deliveries (`maybeDistillClosedLoopLesson`) and Inbox resolution notes (`distillHumanNoteToRule`) populate `playbook_entries` (`formatPlaybookContext` caps prompt injection at Top 8 rules / `<= 1200` chars).
-- **Structured Adversarial Review, Safe `--no-ff` Revert & High-Signal Push**: `selectReviewEngine` prefers heterogeneous real engines (never falling back to `mock` for real code); `parseReviewReport` enforces `blocker`/`major` rework thresholds while passing `nit`-only reviews with persisted JSON `review_report` artifacts; `local_merge` uses `--no-ff` and records `mergedCommitSha` for non-destructive `git revert -m 1` via `revertMergedCommit`; `NotificationDispatcher` filters low-signal churn and delivers Inbox/delivery/failure alerts to macOS desktop notifications and Feishu/Slack/Discord/HMAC-signed Webhooks alongside `SUPER_WORK_TOKEN`-protected filtered `/api/events`.
+### 3.5 `Inline & Spill` Tiered Memory, Playbook Hygiene & Episodic Casebook
+Defined in [memory.ts](./packages/core/src/memory.ts), [playbook-hygiene.ts](./packages/core/src/playbook-hygiene.ts), and [sqlite-state-store.ts](./packages/drivers/src/storage/sqlite-state-store.ts):
+- **Inline vs Spill**: Tickets keep compact structured state inline while spilling full JSONL transcripts, unified diffs, verification logs, and PNG captures to `<dataDir>/artifacts/<ticketId>/`.
+- **Hygiene-Governed Memory**: `evaluatePlaybookRuleHygiene` blocks one-off approval/ticket-ID noise from polluting `playbook_entries` (opt-in `saveToPlaybook: true`, auditable via `GET/POST /api/playbooks/hygiene`). Delivered tickets distill `CasebookEntry` records searchable via FTS5, automatically flipping to pitfall warnings if `git revert`ed.
 
-### 3.6 `v1.0.0` GA Reliability, Code Review & Modularization Upgrades
-- **Kernel Modularization (`packages/core/src/kernel/*`)**: Orchestration subdomains (Routines, Arena Duel, Adaptive Epic Replan, Stage Checkpoints & DAG Mutation, Line Review Comments, System Doctor & SQLite Hot Backups, and `SpanRecorder`) are decomposed into clean coordinator modules behind `KernelCoordinatorContext`, preserving 100% compatibility on `SuperWorkKernel`.
-- **Confidence-Scored Delivery Risk Gate ([risk.ts](./packages/core/src/risk.ts))**: `evaluateTicketRisk(...)` scores `0–100` from diff lines, file spread, `sensitivePaths`, symbol fanout, visual pixel delta, retries/conflict history, minus verified TDD/static/smoke/review confidence deductions. Under `deliveryGatePolicy: "risk_gated"`, scores exceeding `riskThreshold` (default `35`) hold delivery in `outbox_signoff` (`"always_auto"` remains the non-breaking default).
-- **Line-Anchored Review Studio ([review-comments-coordinator.ts](./packages/core/src/kernel/review-comments-coordinator.ts))**: Synchronizes AI `ReviewFinding` records into SQLite `ticket_review_comments`, accepts multi-line human baskets (`comment_only` vs `request_changes` rewinding to `implement`), and automatically marks open comments `resolved` when the subsequent `implement` pass modifies those files and clears verification.
-- **3-Way Semantic Rebase Conflict Resolver ([conflict-resolver.ts](./packages/core/src/conflict-resolver.ts))**: Upon rebase conflicts, saves a `pre_rebase_conflict` hidden checkpoint, prepares a clean lockfile-free 3-way conflict workspace via `GitWorktreeProvider.prepareThreeWayConflictWorkspace`, runs at most 1 bounded resolution turn honoring `lockedTestPaths` + Mandate, verifies static/smoke gates, and rolls back to the checkpoint with full `ConflictSemanticContext` Inbox escalation if checks fail.
-- **Stage Spans, System Doctor, Hot Backup & Composable Blueprints ([blueprints.ts](./packages/core/src/blueprints.ts))**: Records inline `StageSpan[]` waterfalls per `StageRun`; runs `SystemDoctor` diagnostics & cleanup across SQLite integrity, orphan worktrees, expired previews, and stale checkpoint Git refs alongside `VACUUM INTO` hot backups; resolves 5 built-in + custom `super-work.json` Task Blueprints under strict `explicit > blueprint > repo` precedence.
+### 3.6 Adaptive Watchdog 2.0 & Tiered Engine Circuit Breaker
+Defined in [watchdog.ts](./packages/core/src/watchdog.ts) and [engine-health.ts](./packages/core/src/engine-health.ts):
+- **Watchdog 2.0**: L1 zero-LLM probes monitor silence, repeated errors, diff oscillation, and budget burn (auto-extending timeouts when active progress is observed); L2 diagnosis triggers `CONTINUE`, `INJECT_HINT`, `SWITCH_ENGINE`, or `ESCALATE_HUMAN`.
+- **Tiered Circuit Breaker**: Classifies failures into `15 min` transient cooldowns vs `24 h` persistent trips (`quota_exhausted`, `auth_invalid`, `model_unsupported`, `tier_ineligible`), preventing repeated dispatch onto broken engines while at least one healthy real engine remains.
 
-### 3.7 `v1.1.0` Agentic Control Plane, Live Steer & Golden Eval Platform
-- **Hybrid Read-Only Control Plane Probing ([readonly-repo-prober.ts](./packages/drivers/src/workspace/readonly-repo-prober.ts))**: Pairs Layer 1 `<50ms` deterministic symbol/slice/git pre-probes (`HeuristicControlLLM` compatible) with a bounded 2-round Layer 2 read-only tool loop (`search_symbols`, `read_file_slice`, `grep_literals`, `git_recent_commits`) on `SpecStudio`, `EpicPlanner`, `Watchdog L2`, and path-ambiguous `triageTrigger`. All probe targets are strictly jailed to `repo.rootPath` via `isProbePathAllowed` + `realpath`, blocking `forbiddenPaths`, `.env*`, `*.pem`, and `*.key`.
-- **Chief-of-Staff Omnibox & Batch Triage ([chief.ts](./packages/core/src/chief.ts))**: `runChiefOfStaffQuery` (`POST /api/chief/ask`, `super-work ask`) answers cross-repo operational questions from live tickets, metrics, FTS5 recall, and codebase probes while returning confirmation-gated `ChiefActionSuggestion[]` (never mutating automatically). Attention Inbox & `POST /api/inbox/batch-resolve` support multi-select & `Select Low-Risk` triage.
-- **Mid-Turn Live Steer, Worker `[ASK_HUMAN]` & Tool Profiler ([tool-profiler.ts](./packages/core/src/tool-profiler.ts))**: `steerTicket(...)` aborts an in-flight turn via `abort("live_steer")` without incrementing `stageRetries` or polluting `failedEngines`, preserves the worktree and `nativeSessions`, prepends `[LIVE STEER]` to `activeHint`, and resumes smoothly. `extractWorkerClarificationRequest(...)` pauses on structured `[ASK_HUMAN]` blocks (max 1 per ticket) into `clarification_request` Inbox cards—or auto-adopts `recommendedOption` in `auto` mode. `buildStageToolProfile(...)` computes zero-LLM tool frequency, errors, and FIFO-matched latency per `StageRun`.
-- **Golden Eval Suite, Atomic Backup Restore & Knowledge Bundles ([eval-coordinator.ts](./packages/core/src/kernel/eval-coordinator.ts), [knowledge-bundle-coordinator.ts](./packages/core/src/kernel/knowledge-bundle-coordinator.ts))**: `eval_cases` and `eval_runs` replay delivered tasks across multiple engines inside detached `<dataDir>/eval-worktrees/` directories with automatic `finally` cleanup and zero side effects on live tables. `SqliteStateStore.restoreFromBackup(...)` guards active runs, validates target snapshots via `PRAGMA quick_check`, creates an automatic `pre-restore` snapshot, swaps the DB file (cleaning `-wal`/`-shm`), and re-runs idempotent migrations. Repo Knowledge Bundles export/import Playbook + Casebook + Blueprints JSON cleanly; MCP upgrades to `1.1.0` with **19 tools**.
+### 3.7 Deterministic Gates, Risk Scoring, Merge Train & 3-Way Conflict Resolution
+Defined in [risk.ts](./packages/core/src/risk.ts), [merge-train.ts](./packages/core/src/merge-train.ts), and [conflict-resolver.ts](./packages/core/src/conflict-resolver.ts):
+- **Layered Verification**: Supports `impact_scoped` package/test narrowing on `implement` (with `gate_reused` fast-forward reuse on unchanged `rebase` trees), ephemeral `$PORT` runtime `smokeCheck`, and zero-dep CDP headless browser + PNG pixel diff gates.
+- **Risk Gate & Merge Train**: `evaluateTicketRisk` (`0–100`) gates `Transactional Outbox` entries under `AutonomyPreset` (`guarded` / `smart` / `autonomous`). `MergeTrain` takes a zero-overhead `Smart-Bypass` for single clean merges or speculatively stacks up to 3 `--no-ff` branches in `train-worktrees/`, bisecting failures while preserving per-ticket `git revert -m 1` SHAs.
 
-### 3.8 `v1.2.0` Goal Campaigns, Speculative Merge Train, Daemon Service & Lifecycle Contract Hardening
-- **3-Layer Structural Split ([sqlite-schema.ts](./packages/drivers/src/storage/sqlite-schema.ts), [sqlite-mappers.ts](./packages/drivers/src/storage/sqlite-mappers.ts), [kernel.ts](./packages/core/src/kernel.ts), [app.ts](./packages/server/src/app.ts))**: Extracts SQLite DDL & row mapping out of `sqlite-state-store.ts`, separates core runtime coordinators into focused `kernel/*` modules (`campaign-coordinator.ts`, `merge-train-coordinator.ts`, `lifecycle-hooks.ts`, `contract-playbook-coordinator.ts`, `epic-lifecycle-coordinator.ts`, `inbox-resolution-coordinator.ts`, `stage-execution-coordinator.ts`), and groups Hono REST/MCP/webhook handlers into `packages/server/src/routes/*`.
-- **Metric-Driven `GoalCampaign` ([campaign.ts](./packages/core/src/campaign.ts), [campaign-coordinator.ts](./packages/core/src/kernel/campaign-coordinator.ts))**: Benchmarks initial baseline metrics at `targetRef` via detached `metric-worktrees/`, dispatches sequential autonomous optimization waves onto an isolated `staging_branch` (`super-work/campaign/<id>`) or `per_wave_merge`, parses deterministic numeric output, executes **monotonic regression rollback** (`resetBranchRef`) on regressions/failures while logging pitfall lessons, and trips a 2-wave plateau / budget / max-iteration fuse into `campaign_paused` Inbox approval.
-- **Speculative Parallel Merge Train & Cross-Repo Barrier ([merge-train.ts](./packages/core/src/merge-train.ts), [merge-train-coordinator.ts](./packages/core/src/kernel/merge-train-coordinator.ts))**: Evaluates `local_merge` deliveries under repo locks. Single-entry queues matching unchanged `baseBranch` HEAD with no pending barrier take `Smart-Bypass` zero-overhead fast path; larger queues build cumulative `--no-ff` slots (max 3) inside `train-worktrees/`, fast-forwarding `baseBranch` once to the deepest passing prefix while preserving individual merge SHAs so single-ticket `git revert -m 1` stays intact, bisecting/ejecting the first failing slot (`evaluateSpeculativePrefix`). Multi-repo Epics default to `barrierGroupId` (`releaseBarrier`), eagerly persisting `HandoverDigest` upon entering `barrier_waiting` so downstream cross-repo siblings avoid deadlocks.
-- **Deterministic Hooks, Immutable `super-work.json` & `ServiceManager` ([lifecycle-hooks.ts](./packages/core/src/kernel/lifecycle-hooks.ts), [service-manager.ts](./packages/drivers/src/env/service-manager.ts))**: Enforces `IMMUTABLE_REPO_PATHS` (`super-work.json`, `**/super-work.json`) as OS-sandbox read-only (`readOnlyPaths`) and auto-reverted `forbiddenViolations` (`canExpandMandate: false`); executes blocking `pre_deliver` and non-blocking `post_deliver` / `on_escalate` hooks using `buildSanitizedWorkerEnv` (`SUPER_WORK_HOOK_*`); provides zero-dep `launchd` / `systemd --user` service units with `127.0.0.1` loopback guard, `10 MB` log rotation, and **21 MCP tools (`1.2.0`)**.
+### 3.8 Milestone Waves, Direct Squash Release & Self-Hosting Boot Canary
+Defined in [milestone.ts](./packages/core/src/milestone.ts), [milestone-coordinator.ts](./packages/core/src/kernel/milestone-coordinator.ts), [git-milestone-release.ts](./packages/drivers/src/workspace/git-milestone-release.ts), and [self-host-coordinator.ts](./packages/core/src/kernel/self-host-coordinator.ts):
+- **Wave & Direct Release**: `createMilestoneOp` schedules multi-item backlogs across non-overlapping topological waves (`direct_main` or zero-mid-signoff `milestone_branch`), **or**—when `targetVersion` is set with empty or pure release-housekeeping requirements (`isPureReleaseHousekeepingRequirement`)—transitions straight to `ready_to_release` with a `milestone_ready` Inbox card (`cancelMilestoneOp` / `POST /api/milestones/:id/cancel` cancels cleanly).
+- **Lossless Squash, Tag & Push**: `executeMilestoneReleaseImpl` pre-checks clean working trees, existing local tags, and `gh auth status` before any Git mutation; in `direct_main` mode, `squashReleaseCommit` collapses unpushed `origin/<baseBranch>..HEAD` commits into a single commit verified for 100% `HEAD^{tree}` parity before tagging (`v<version>`), pushing, and optionally creating a GitHub Release.
+- **Boot Canary Self-Reload**: Whenever a merge or milestone release updates `super-work`'s own `baseBranch`, `BunSelfHostRunner` builds and boots an ephemeral canary (`SUPER_WORK_CANARY_MODE=1`) probing `/api/health`; on pass it drains active turns, checkpoints SQLite WAL, and exits `75` for supervisor respawn — or automatically `git revert`s broken commits on failure.
 
-### 3.15 `v1.8.1` Unified Peer Model Pool & Role Binding
-- **Peer `ModelProfile` registry**: CLI (`cliEngine`: claude / codex / opencode / gemini) and API (`apiProtocol`: deepseek / openai / anthropic / ollama) models share one `ModelProfile` shape in `SystemSetupConfig.modelProfiles`. Three role bindings (`controlModelId` = `heuristic` | id, `implementModelId` / `reviewModelId` = `auto` | id) select among them; `normalizeSystemSetupConfig` resolves dangling ids to `heuristic` / `auto`. Built-in CLI profiles carry `builtinCli: true`.
-- **Delete semantics** ([setup-system-routes.ts](./packages/server/src/routes/setup-system-routes.ts), [setup-worker-helpers.ts](./packages/server/src/routes/setup-worker-helpers.ts)): `POST /api/setup/configure` accepts `deleteModelProfileIds`. `applyProfileDeletions` removes custom profiles (unknown ids are ignored, so deletes are idempotent) and throws `SetupValidationError` (HTTP 400) for `builtinCli` profiles before anything is persisted. Roles that referenced a deleted id fall back to `heuristic` / `auto`, and repos pinning it get `implementModelId` / `reviewModelId` reset to `auto` independently of `syncRepos`. Binding a role to an id deleted in the same request is rejected.
-- **`ModelRegistryStudio`** ([ModelRegistryStudio.tsx](./packages/web/src/components/setup/ModelRegistryStudio.tsx), [ModelProfileCard.tsx](./packages/web/src/components/setup/ModelProfileCard.tsx), [ModelProfileForm.tsx](./packages/web/src/components/setup/ModelProfileForm.tsx), [modelTemplates.ts](./packages/web/src/components/setup/modelTemplates.ts)): the single two-stage UI (① Model Pool cards with Auto Pool switch, `POST /api/setup/test-model`, inline edit and 2-step delete, 8 equal add-templates; ② three role selectors listing only `ready` profiles) embedded in Settings → *Models & Roles* and reused by `CustomizeSetupForm` / `SetupWizardModal`. Role changes call `configureSetup` (plus `patchRepo` for the selected repo) and never clobber `auto`.
-- **Per-task model pinning**: `HeroComposer` (*Options → Model*) and the DeepDive `SteerBar` pick from ready profiles and send `preferredModelId` (`preferredEngine: "auto"` clears a pin); the Web only imports types from `@super-work/core/types`.
-- **Foundations (earlier in v1.8.1)**:
-- **`ApiWorkerDriver` (`api` engine)**: native agent worker over DeepSeek / OpenAI-compatible / Anthropic-compatible HTTP APIs; its tool loop is jailed to the ticket worktree. `WorkerEngineId` gains `"api"`, configured by `apiWorkerProfile` (`preset`, `baseUrl`, `model`, `effort`, `apiKey`).
-- **CLI relay injection**: `claudeProfile` / `codexProfile` / `opencodeProfile` / `geminiProfile` accept an optional `baseUrl` + `apiKey`, injected per invocation as `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` / `GOOGLE_GEMINI_BASE_URL`. Raw keys are persisted server-side only; `GET /api/setup/status` exposes `hasApiKey` + `maskedApiKey` (`PublicEngineProfile`), and `clearApiKey` removes a saved key.
-- **`POST /api/setup/test-worker`** ([setup-system-routes.ts](./packages/server/src/routes/setup-system-routes.ts)): tests an API preset or CLI relay and returns `{ ok, latencyMs, message }`; a saved key is used only when `useSavedKey` is set.
-- **`syncRepos`**: `persistSetupConfig(nextConfig, syncRepos = true)` only overwrites each repo's `preferredImplementEngine` / `preferredReviewEngine` when `syncRepos !== false`, so saving credentials or notifications keeps a repo on `auto`.
-- **Versioning**: workspace packages, `GET /api/mcp` and the JSON-RPC `initialize` `serverInfo.version` reported `1.8.1` at that release (27 tools; superseded by `1.8.2`, see §3.16); Web badge was `v1.8.1`.
+---
 
-### 3.17 `v1.8.3` Cancellable Starters, SSE Replay Buffer & Live Execution Feed
-- **Replay buffer** ([live-event-buffer.ts](./packages/server/src/live-event-buffer.ts)): `createServerApp` subscribes to the kernel and keeps a per-ticket ring (60 events) across at most 40 tickets (LRU) for `stage_started`, `worker_event` (minus `usage` / `session_started`), `stage_completed`, `verification_completed`, `checkpoint_created`, `watchdog_*`, `inbox_created`, `outbox_*`. `GET /api/events` replays matches right after `connected`, reusing the live `repoId` / `ticketId` (incl. child-subtask) filter. Tests: `packages/server/test/v183-sse-replay.test.ts`.
-- **Structured parser** ([liveStream.ts](./packages/web/src/utils/liveStream.ts)): `parseKernelLiveEvent` turns SSE payloads into `LiveEventLogEntry` with optional `category/badge/headline/detail/engine/toolName/isError` (state-sync events yield `null`; `verification_completed` keeps `kind` + `raw` for `scopedVerification.ts`). `appendBoundedTicketEvent` de-duplicates replays and bounds 80/ticket, 600 total; `synthesizeStageRunActivities` rebuilds a timeline from `stageRuns`; `useKernelEvents` debounces refreshes by 100 ms.
-- **UI**: `LiveExecutionFeed` (`compact` in `MissionRow`, `full` in `StreamTab`); `MissionRow` is now a `<div>` with sibling inspect / expand buttons (no nested buttons). Composer starter logic lives in the pure reducer [starterComposer.ts](./packages/web/src/utils/starterComposer.ts). Tests: `packages/web/test/liveStream.test.ts`.
-- **Versioning**: workspace packages, `GET /api/mcp` and JSON-RPC `initialize` `serverInfo.version` report `1.8.3` (27 tools); Web badge `v1.8.3`.
+## 4. Release Evolution Log (`v0.4` → `v1.8.3`)
 
-### 3.16 `v1.8.2` Dual-Harness Clarity, Role-First Studio, Smart Recipes & Anti-Pattern Advisor
-- **Dual-Harness architecture**: an **Outer Governance Harness** (isolated worktree, mandate, deterministic gates, cross-review, Outbox delivery) is identical for every worker; it hosts pluggable **Inner Harnesses** — the **Native CLI Harness** (`kind: "cli"`, reuses the local subscription and co-trained coding tools) and the **Built-in API Harness** (`kind: "api"`, direct HTTP plus a lightweight jailed tool loop). No backend or protocol change: this is a pure Web + docs release on top of §3.15.
-- **Pure advisor** ([modelAdvisor.ts](./packages/web/src/utils/modelAdvisor.ts), tests in `packages/web/test/modelAdvisor.test.ts`): `formatModelStatusHuman` (never exposes raw kernel / login strings), `activeRolesOfProfile`, `isAutoCandidate`, `buildSmartModelRecipes` (`hybrid_best` / `cli_heterogeneous` / `pure_api` / `smart_auto`, each flagged `isActive`) and `diagnoseModelBindings` (`no_ready_models`, `same_model_self_review`, `empty_auto_pool`, `heuristic_control`, `unready_custom`, with optional `suggestedPatch`). It only uses `import type` from the Web types, so the browser bundle stays isolated from `@super-work/core`.
-- **Role-First `ModelRegistryStudio`**: [ModelRoleBoard.tsx](./packages/web/src/components/setup/ModelRoleBoard.tsx) (section ①: recipe pills, three role cards, advisor banners) sits above the dual-track pool (section ②: `ModelProfileCard` with track label, role badges, human status line, *Allow auto-rotation*, amber *Complete* action). `applyRoles(patch)` persists one or several roles in a single `configureSetup` (+ one `patchRepo`), so recipes never race.
-- **Guided form** ([ModelProfileForm.tsx](./packages/web/src/components/setup/ModelProfileForm.tsx), [modelTemplates.ts](./packages/web/src/components/setup/modelTemplates.ts)): `TEMPLATE_GROUPS` splits the 8 templates into the API and CLI tracks, `suggestions` feed `<datalist>`, new profiles default to `workerAutoPool: true`, and CLI relay URL / key sit in an expandable *Advanced* disclosure (auto-open when already configured). **Live model discovery (v1.8.2)**: `discoverModelsFromEndpoint` ([model-discovery.ts](./packages/drivers/src/llm/model-discovery.ts)) probes `/models`, `/v1/models`, `/model`, `/v1/model` (+ Ollama `/api/tags` for local endpoints) with protocol-appropriate auth headers, parses `data` / `models` / `model_list` / array / single-object payloads, and redacts keys; it is exposed as `POST /api/setup/models` (alias `/api/setup/model`, saved key hydrated via `useSavedKey`) and consumed by [FetchedModelPicker.tsx](./packages/web/src/components/setup/FetchedModelPicker.tsx) in `ModelProfileForm`.
-- **Versioning**: workspace packages, `GET /api/mcp` and the JSON-RPC `initialize` `serverInfo.version` report `1.8.2` (27 tools); Web badge `v1.8.2`.
-
-### 3.14 `v1.8.0` Super-Agent First — Consumer Surface, Pro Engine
-- **Layering**: the Web UI is a thin *consumer surface* (Home / History / Settings, 1-row 4-item HeaderBar, streamlined DeepDiveDrawer with a permanent Steer bar) over the unchanged engine; advanced capabilities live in the collapsible Settings → Developer / Engine Room. No kernel contract changed.
-- **`AutonomyPreset`** ([autonomy-preset.ts](./packages/core/src/autonomy-preset.ts)): `guarded` (`always_signoff`) / `smart` (`risk_gated`, threshold 35) / `autonomous` (`always_auto`) — *Guarded / Smart / Autonomous*, all with `mode: auto`, `sandboxMode: balanced`, `smart_tiered` verification. Expanded by `POST /api/repos` and `PATCH /api/repos/:id` via `getAutonomyPresetPatch`; explicit fields always win, and automatic re-syncs never overwrite user PATCH overrides. `normalizeAutonomyPreset` is the single input gate (REST bodies, `.super-work.json` contracts): it accepts canonical names and maps the legacy aliases `copilot` / `standard` / `autopilot` to `guarded` / `smart` / `autonomous`, so existing DB rows and contracts keep working without migration. `inferAutonomyPreset` derives the dial position for repos with no stored preset. The Web mirrors these helpers browser-purely in `utils/superAgent.ts` (type-only imports from core); the dial is rendered in the Hero Composer's context toolbar, below the single-bar HeaderBar.
-- **Zero-config onboarding**: `POST /api/setup/quick-start` ([setup-system-routes.ts](./packages/server/src/routes/setup-system-routes.ts)) scans CLIs and selects `claude_cli` → `codex_cli` → `heuristic`; `POST /api/repos/detect` ([repo-routes.ts](./packages/server/src/routes/repo-routes.ts), `detectRepoDefaults` in [repo-autodetect.ts](./packages/core/src/repo-autodetect.ts)) is read-only and returns name, base branch, stack label (bun / node / rust / python / go), verification commands, `smart_tiered` strategy and `standard` preset.
-- **Human verb taxonomy**: `classifyInboxHumanAction` ([inbox-taxonomy.ts](./packages/core/src/inbox-taxonomy.ts)) maps every inbox kind to `approve` / `answer` / `unblock`; the Web keeps a browser-pure mirror in `utils/superAgent.ts` (type-only core imports) together with `humanTicketPhase`, `formatScopeTokens` / `withScopeTokens` (explicit `scope:<glob>` tokens parsed by `extractScopeTags` in `intake.ts` into `mandate.allowedPaths`).
-- **CLI**: `super-work do "<requirement>" [--preview] [--wait] [--milestone <vX.Y.Z>]` is the primary verb over `POST /api/intake` (`previewOnly` for `--preview`).
-- **Versioning**: workspace packages, `GET /api/mcp` and the JSON-RPC `initialize` `serverInfo.version` ([mcp-protocol.ts](./packages/core/src/mcp-protocol.ts)) reported `1.8.0` at that release (27 tools; superseded by `1.8.1`, see §3.15); Web badge was `v1.8`.
-
-### 3.13 `v1.7.0` Resilience & Watchdog 2.0 Observability (Wave 2)
-- **Tiered Circuit Breaker**: `isPersistentEngineFailure` / `getCooldownMsForFailureKind` ([engine-health.ts](./packages/core/src/engine-health.ts)) — transient 15 min, persistent 24 h. Web mirrors the predicate locally in `DoctorBackupPanel.tsx` (no core runtime import) to render the *persistent trip* vs *temporary cooldown* badge.
-- **Watchdog 2.0 / Flake Retry KPIs**: `buildRunDigestReport` ([digest.ts](./packages/core/src/digest.ts)) adds `resilience.watchdogExtensions` (`watchdog_extended`) and `resilience.flakeRetries` (`flake_retried`) only when non-zero, so existing `toEqual` consumers are unaffected; Markdown (zh/en) adds a line per non-zero counter. Flight Recorder shows both beside Watchdog switches.
-- **Type-only subpath**: `@super-work/core` exports `./types` (`./src/types.ts`); `@super-work/web` declares core as a `workspace:*` devDependency (prep for Wave 3 type deduplication). The impact planner keeps resolving `core → web` through `workspace:*`.
-- **Also in v1.7.0**: Milestone Boot Canary, Flake Retry, Safe-Refactor concurrent scheduling + auto RefactorGuard, Adaptive Watchdog 2.0 (Wave 1). MCP `1.7.0` (27 tools), CLI `v1.7.0`, Web badge `v1.7`.
-
-### 3.12 `v1.6.0` Playbook Hygiene, Flight Recorder KPIs & Optional GitHub Release (Wave 2)
-- **Hygiene evaluator ([playbook-hygiene.ts](./packages/core/src/playbook-hygiene.ts))**: zero-dependency `evaluatePlaybookRuleHygiene(rule, source?, { pinned? })` flags one-off approval / continuation / ticket-run notes (case-insensitive patterns, ticket-id regex, short status-report approvals without constraint verbs) and never flags `repo_contract` or pinned rules; `auditPlaybookEntries` builds a `PlaybookHygieneReport`.
-- **Inbox opt-in**: `resolveInboxItemOp` persists a note to the Playbook only when `saveToPlaybook === true` **and** the note passes hygiene; noisy notes are skipped without failing the resolution.
-- **Governance**: `Kernel.auditPlaybookHygiene` / `pruneNoisyPlaybooks` ([contract-playbook-coordinator.ts](./packages/core/src/kernel/contract-playbook-coordinator.ts)); default mode `disable` (`enabled:false`, `suspect:true`), `delete` removes the entry, `dryRun` only reports. `runSystemDoctor` ([doctor-backup-coordinator.ts](./packages/core/src/kernel/doctor-backup-coordinator.ts)) adds a `playbook_hygiene` check (fix = disable). Surfaces: REST `GET /api/playbooks/hygiene`, `POST /api/playbooks/hygiene/prune`; CLI `playbook audit|prune [--delete]`, `doctor --prune-playbooks`; MCP `manage_playbook_hygiene`; Web Doctor card.
-- **Flight Recorder**: `RunDigestReport.gateReuse` (from `gate_reused`) and `resilience` (`engine_tripped`, `spillover_quarantined`); the Markdown adds a reuse line only when reuse occurred. `classifyEngineError` treats `free usage limit` / `subscribe to opencode` as deterministic `quota_exhausted`.
-- **Optional GitHub Release**: `executeMilestoneRelease` accepts `createGithubRelease`; it requires a version plus `createTag` and `pushRemote` and a passing `gh auth status`, all validated **before** any git mutation. After push it runs `gh release create v<version> --notes-file <tmp>` and returns `githubReleaseUrl` (transient, not persisted). A `gh` failure after push is reported without rolling back the pushed tag.
-- **MCP `1.6.0` (27 tools)**: adds `manage_playbook_hygiene`; `manage_milestones` accepts `createGithubRelease`. Web badge `v1.6`.
-
-### 3.11 `v1.5.0` Milestone Staging Branch & Clean Squash Release (Pillars A + B + C + D)
-- **Staging ([milestone-coordinator.ts](./packages/core/src/kernel/milestone-coordinator.ts), [stage-execution-coordinator.ts](./packages/core/src/kernel/stage-execution-coordinator.ts))**: with `integrationMode: "milestone_branch"`, `createMilestoneOp` sets `stagingBranch = super-work/milestone/<id>`, creates it off `repo.baseBranch` via `WorkspaceProvider.ensureBranchExists`, and stamps `targetBranch` + `always_auto` gate policy (and `startPoint` for single tickets) on every item ticket/subtask. Delivery for tickets with `milestoneId` and a non-base `targetBranch` goes through `mergeWaveToTargetStagingBranch` (no Outbox, so no `outbox_signoff`), and the self-host Boot Canary is skipped because it only fires for merges into `repo.baseBranch`. `preferredRoute` is forwarded to Smart Intake preview.
-- **Single signoff**: `syncMilestonesOp` moves the milestone to `ready_to_release` once all items are delivered and raises ONE `milestone_ready` Inbox item. `releaseMilestoneOp` forwards `stagingBranch`, `squashReleaseCommit` and `releaseCommitMessage` to `executeMilestoneRelease`.
-- **Release ([git-worktree-provider.ts](./packages/drivers/src/workspace/git-worktree-provider.ts))**: refuses a dirty tracked tree, records `preReleaseSha`, merges the staging branch `--no-ff`, deletes it, optionally bumps `package.json` versions, and when squashing runs `reset --soft <preReleaseSha>` + one commit then verifies `HEAD^{tree}` is unchanged (restoring the previous HEAD and throwing otherwise). Tag only with `createTag`, push only with `pushRemote`.
-- **Persistence**: `milestones.integration_mode` / `milestones.staging_branch` columns (additive `ensureColumn` migration); `tickets.target_branch` already existed.
-- **MCP `1.5.0` (26 tools)**: adds `manage_engine_health` (`list|reset|probe`) and extends `manage_milestones` with `integrationMode`, `preferredRoute`, `squashReleaseCommit`, `releaseCommitMessage`. Web adds the staging badge, squash opt-in, selectors and a collapsible Released History archive.
-
-### 3.10 `v1.4.0` Milestone Waves & Controlled Release (Pillars A + B + C + D)
-- **Milestone coordinator ([milestone.ts](./packages/core/src/milestone.ts), [milestone-coordinator.ts](./packages/core/src/kernel/milestone-coordinator.ts))**: `createMilestoneOp` previews each requirement through Smart Intake, `planMilestoneWaves` computes topological `waveIndex`/`dependsOnIndices` from `allowedPaths` overlap, and items are dispatched with cross-wave `dependsOn` (items behind a goal campaign are dispatched lazily). `syncMilestonesOp` runs from the scheduler tick, maps ticket/epic/campaign status onto items and, once all are `delivered`, synthesizes bilingual release notes (`synthesizeMilestoneReleaseNotes` + `buildRunDigestReport`), records a `milestone_ready` FlightEvent and raises a `milestone_ready` Inbox item. `releaseMilestoneOp` is **explicit-only** (REST `POST /api/milestones/:id/release`, CLI, Inbox signoff) and delegates to `WorkspaceProvider.executeMilestoneRelease`, where version bump, annotated tag and push are independently opt-in.
-- **Persistence ([sqlite-schema.ts](./packages/drivers/src/storage/sqlite-schema.ts), [git-worktree-provider.ts](./packages/drivers/src/workspace/git-worktree-provider.ts))**: new `milestones` table, `tickets.milestone_id` column migration, and `executeMilestoneRelease` (clean-tree guard, `chore(release): bump version to v<version>` commit on `baseBranch`).
-- **Pillars A/C/D** (scoped verification gate, surgical symbol/line map + hotspot radar, SQLite Flight Recorder + Run Digest) feed the same release notes and digest telemetry. MCP `1.4.0` exposes **25 tools** (`manage_milestones`, `get_run_digest`); Web adds a lazy `MilestonePanel`, a Milestone dispatch tab and Inbox release-notes preview.
-
-### 3.9 `v1.3.0` Self-Hosting Readiness, Smart Intake & `GeminiCliDriver`
-- **Unified Smart Requirement Intake ([intake.ts](./packages/core/src/intake.ts), [router.ts](./packages/core/src/router.ts))**: Accepts raw natural-language requirements (`POST /api/intake`, `/api/intake/preview`, `super-work intake`, MCP `dispatch_requirement`), pairs `ReadOnlyRepoProber` context with `ControlPlaneLLM.planRequirementIntake` / deterministic `heuristicPlanRequirementIntake`, and routes cleanly into narrowed `single_ticket`, multi-package `epic_dag`, or metric-validated `goal_campaign`.
-- **Self-Hosting Contract & Safe Boot Canary + Drain Reload ([self-host-coordinator.ts](./packages/core/src/kernel/self-host-coordinator.ts), [self-host-runner.ts](./packages/drivers/src/env/self-host-runner.ts), [scripts/dev.ts](./scripts/dev.ts))**: Syncs `defaultMode` and `defaultDeliveryChannel` from `super-work.json` at daemon startup. Whenever a non-doc-only `local_merge` lands on `selfRepoRoot` `baseBranch`, `BunSelfHostRunner` runs `bun run build` plus a cold-boot ephemeral canary server (`SUPER_WORK_CANARY_MODE=1`, probing `GET /api/health`); on pass, `SuperWorkKernel` stops dispatching new runs (`isDraining()`), waits for active runs/flushes to drain, checkpoints SQLite WAL (`PRAGMA wal_checkpoint(TRUNCATE)`), and exits with `RELOAD_EXIT_CODE = 75` for supervisor respawn (`scripts/dev.ts` / `launchd` / `systemd`). On failure, `handleSelfHostPostMergeOp` automatically `git revert`s the commit, keeps the live daemon healthy, and escalates a pending Inbox item.
-- **Native 4-Engine Pool, Loopback Sandbox, Monorepo Symlinks & Non-Starving Outbox ([gemini-cli-driver.ts](./packages/drivers/src/workers/gemini-cli-driver.ts), [os-sandbox.ts](./packages/drivers/src/sandbox/os-sandbox.ts), [sqlite-state-store.ts](./packages/drivers/src/storage/sqlite-state-store.ts))**: Adds `GeminiCliDriver` (`-p -o stream-json --skip-trust --approval-mode plan|yolo`, buffered delta streaming), preserves `localhost:*` loopback in Seatbelt `balanced` mode (while locking down `strict`), mirrors monorepo `packages/*` into detached worktree `node_modules/`, cleans MergeTrain checkpoint refs upon delivery, eliminates Outbox `local_merge` barrier starvation via SQL `NOT IN` exclusions, and upgrades MCP to `1.3.0` with **23 tools**.
+- **`v0.4.0 – v0.9.0` (Foundational Kernel & Ecosystem)**: Dual-channel `Transactional Outbox` (`--no-ff` `local_merge` + `git revert -m 1` & GitHub PR follow-up loops), `super-work.json` repo contracts, self-evolving Playbook & FTS5 Casebook, Routines, Arena Duel, Adaptive Epic Re-plan, OS Seatbelt/`bwrap` sandboxes, CDP visual gates, Stage Checkpoints, Interactive DAG Studio, HMAC Webhooks, and zero-SDK Native MCP Server.
+- **`v1.0.0` (GA Modularization & Review Studio)**: Decomposed kernel subdomains into `packages/core/src/kernel/*` coordinators; shipped `0–100` `evaluateTicketRisk` gate, Line-Anchored Review Studio (`ticket_review_comments`), 3-Way Semantic Conflict Resolver, `StageSpan` waterfalls, `SystemDoctor`, `VACUUM INTO` backups, and Task Blueprints.
+- **`v1.1.0` (Agentic Control Plane & Golden Evals)**: Added two-layer `ReadOnlyRepoProber`, `⌘K` Chief-of-Staff (`POST /api/chief/ask`), batch Inbox triage, mid-turn `Live Steer`, structured `[ASK_HUMAN]` clarification, `StageToolProfile` telemetry, Golden Eval replay (`eval-worktrees/`), atomic DB restore, and Knowledge Bundles (**19 MCP tools**).
+- **`v1.2.0` (Goal Campaigns, Merge Train & OS Service)**: Three-layer storage/kernel/server split; metric-driven `GoalCampaign` loops with monotonic rollback; Speculative Parallel `MergeTrain` + Cross-Repo Release Barrier; immutable `super-work.json` + deterministic lifecycle hooks; `launchd` / `systemd --user` `ServiceManager` (**21 MCP tools**).
+- **`v1.3.0` (Self-Hosting Canary, Smart Intake & `GeminiCliDriver`)**: Unified `POST /api/intake` router, `BunSelfHostRunner` Boot Canary + WAL drain + exit-`75` hot reload (auto-revert on failure), `GeminiCliDriver`, monorepo worktree symlinks, and non-starving Outbox claims (**23 MCP tools**).
+- **`v1.4.0` (Milestone Waves, Scoped Gates & Flight Recorder)**: Impact-scoped verification gate, topological `Milestone` wave scheduler + bilingual Release Notes synthesizer, surgical symbol/line context + Hotspot Radar, and SQLite Flight Recorder + Run Digest (**25 MCP tools**).
+- **`v1.5.0` (Milestone Staging Branch & Lossless Squash)**: Added `integrationMode: "milestone_branch"` (`super-work/milestone/<id>`), tree-verified `squashReleaseCommit`, Engine Circuit Breaker (`GET/POST /api/system/engines`), Spillover Shield, and Released History archive (**26 MCP tools**).
+- **`v1.6.0` (Playbook Hygiene, Gate Reuse KPIs & GitHub Release)**: Added `evaluatePlaybookRuleHygiene` + `manage_playbook_hygiene`, explicit opt-in `saveToPlaybook`, rebase gate-reuse & resilience KPIs in Flight Recorder, deterministic `quota_exhausted` classification, and pre-validated `createGithubRelease` (**27 MCP tools**).
+- **`v1.7.0` (Tiered Breaker, Watchdog 2.0 KPIs & `@super-work/core/types`)**: Tiered 15m transient vs 24h persistent engine breaker, Milestone Boot Canary, Safe-Refactor auto-guards, Watchdog 2.0 extension & flake-retry digest counters, and zero-runtime `@super-work/core/types` Web isolation.
+- **`v1.8.0` (Super-Agent First — Consumer Surface, Pro Engine)**: Single-bar `HeaderBar`, 3 spaces (`Home` / `History` / `Settings` + collapsible `Engine Room`), `Guarded / Smart / Autonomous` (`AutonomyPreset`) dial, 1-click Zero-Config Setup & repo auto-detect, `Approve / Answer / Unblock` verb taxonomy, and `super-work do` CLI.
+- **`v1.8.1` (Unified Peer Model Pool & Symmetric Drivers)**: Unified CLI & API `ModelProfile` registry (`ModelRegistryStudio`), bidirectional symmetric Control-Plane & `ApiWorkerDriver` execution, per-CLI custom relay injection, `POST /api/setup/test-model`, safe profile deletion (`deleteModelProfileIds`), and per-task `preferredModelId` pinning.
+- **`v1.8.2` (Dual-Harness Clarity, Smart Recipes & `/models` Discovery)**: Role-First `ModelRoleBoard`, 1-click Smart Recipes, pure `modelAdvisor` Anti-Pattern Advisor, progressive CLI relay disclosure, and live upstream `/models` & `/model` discovery (`POST /api/setup/models`, `FetchedModelPicker`).
+- **`v1.8.3` (Toggleable Starters, Live Execution Feed & Direct Self-Hosted Release)**: Pure `starterComposer` toggle/cancel/switch state machine, server `LiveEventBuffer` SSE replay on connect, structured `liveStream` parser + inline `MissionRow` & `StreamTab` `LiveExecutionFeed` (phase-aware status badge + inline top-of-drawer `NeedsYouCard`), Router/Worker `git push` Mandate guardrails, 0-item / pure-housekeeping **Direct Release Milestones**, `POST /api/milestones/:id/cancel`, Home `NeedsYouCard` release controls, and `direct_main` `origin/<base>` lossless Squash.

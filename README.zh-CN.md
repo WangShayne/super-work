@@ -1,237 +1,262 @@
-[English](./README.md) | [简体中文](./README.zh-CN.md)
+<p align="center">
+  <img src="./assets/logo.png" alt="super-work logo" width="120" height="120" />
+</p>
 
-# super-work
+<h1 align="center">super-work</h1>
 
-基于 DeepSeek Harness 团队技术文章《Super-agent 设计探索：迈向更自主的 Agent 系统》构建的异步自主研发工作流编排内核与本地决策指挥舱（TypeScript / Bun Monorepo）。
+<p align="center">
+  <strong>异步自主研发工作流编排内核与本地超级智能体决策指挥舱</strong>
+</p>
 
-> **核心理念**：AI 辅助研发的核心瓶颈已经不是单次模型推理能力，而是**人类的注意力带宽**。`super-work` 将开发者从同时紧盯 3–5 个终端会话的“微操员”解放为**审批边界与结果的决策者**——轻量控制面常驻调度，执行面在隔离的工作区与不可变授权边界内自主推进。
+<p align="center">
+  <img src="https://img.shields.io/badge/version-v1.8.3-6366F1?style=flat-square" alt="Version v1.8.3" />
+  <img src="https://img.shields.io/badge/runtime-Bun_%3E%3D_1.3-18181B?style=flat-square&logo=bun" alt="Bun >= 1.3" />
+  <img src="https://img.shields.io/badge/TypeScript-Strict-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript Strict" />
+  <img src="https://img.shields.io/badge/MCP-27_Tools-10B981?style=flat-square" alt="MCP 27 Tools" />
+  <img src="https://img.shields.io/badge/Harness-CLI_%2B_API-8B5CF6?style=flat-square" alt="Dual-Harness CLI + API" />
+</p>
+
+<p align="center">
+  <a href="./README.md">English</a> · <strong>简体中文</strong> · <a href="#60-秒快速开始">快速开始</a> · <a href="./USAGE.zh-CN.md">使用指南</a> · <a href="./ARCHITECTURE.zh-CN.md">架构设计</a>
+</p>
 
 ---
 
-## v1.8.3 — 可取消的快捷 Chips、SSE 重放缓冲与可视化实时执行流
+## 为什么需要 `super-work`？
 
-- **快捷 Chips 可切换/取消**：修 Bug / 做功能 / 安全重构 / 发版 四个 Chip 始终可见，激活时带 `aria-pressed` 与 `×`，可互相切换；新增“取消 / 清空”按钮，一键重置文本、发版模式、版本号与里程碑标题（用户自定义文本和自定义选项会保留）。
-- **可读的实时执行**：SSE 中的 worker / 阶段 / 门禁事件被解析为结构化条目（如 `Bash · bun run typecheck`、`Read · packages/web/src/App.tsx`、门禁通过/失败、看门狗与交付告警），不再是原始 JSON。首页任务行显示实时计时、最新一步与内联 **实况 (n)** 控制台；抽屉 Stream 标签页提供完整执行流（过滤、自动滚屏、SSE 状态指示；无实时事件时由阶段历史还原）。
-- **`/api/events` 重放缓冲**：服务端为最近 40 个任务各保留最近 60 条关键事件，并在 `connected` 之后按 `repoId` / `ticketId` 过滤重放，刷新页面不再丢失实时轨迹。前端对重放事件去重，并将刷新防抖 100 ms。
+> **AI 辅助软件工程的核心瓶颈早已不是单轮模型智商，而是人类的注意力带宽。**
 
-## v1.8.2 — 角色优先的引导式模型 Studio：双基座清晰化、一键智能搭配与反模式顾问
+受 DeepSeek Harness 团队《*Super-agent 设计探索：迈向更自主的 Agent 系统*》启发，**`super-work`** 将开发者从同时紧盯 3–5 个终端窗口的“微操监工”解放为**设定边界与签收结果的决策者**。轻量控制面常驻后台负责分诊路由、划分隔离 `git worktree` 与 OS 沙箱护栏、运行确定性验收门禁并调度异构模型交叉盲审——**只有在真正需要人类判断的时刻才打扰你**。
 
-v1.8.2 让「大模型与角色」页面一目了然。super-work 是**双基座（Dual-Harness）**系统：一个**外层治理基座**（隔离 worktree、Mandate、门禁、评审、交付）包裹可插拔的**内层基座**——**原厂 CLI 基座**（`claude` / `codex` / `opencode` / `gemini`：复用本机订阅与协同训练的编码工具）与**内置 API 基座**（DeepSeek / OpenAI 兼容 / Anthropic 兼容 / Ollama：直连 HTTP + 轻量沙盒循环，按量付费或本地运行）。
+| 维度 | 传统多终端手动盯盘 | `super-work` 受治理的超级智能体自治 |
+| :--- | :--- | :--- |
+| **工作区安全** | Agent 直接改动当前目录，多任务互相覆盖污染 | 每单独立 `git worktree` + 不可变 `Mandate` + macOS Seatbelt / Linux `bwrap` 原生沙箱 |
+| **模型与成本策略** | 绑定单一 CLI 订阅或单一 API 工具 | **双轨平级模型池**：按角色自由混搭原厂包月 CLI（`claude`/`codex`/`opencode`/`gemini`）与直连 API（`DeepSeek`/`OpenAI`/`Anthropic`/`Ollama`） |
+| **质量把关** | 依赖模型口头声称“测试已通过” | 宿主确定性门禁（增量影响面测试、`$PORT` 动态冒烟、CDP 无头浏览器与像素级视觉对比）+ 异构模型交叉盲审 |
+| **注意力消耗** | 频繁切屏喂上下文、翻看原始 JSON/SSE 报文 | 语义化实时执行动态流 + 高信噪比 **「需要你处理」** 收件箱（`批准` · `回答` · `解除阻塞`） |
+| **交付与回滚** | 手工切分支合并或高风险直接 `git push` | 风险评分 **事务发件箱（Outbox）**、**并行投机合并列车**、一键无损 **里程碑 Squash/打 Tag/推送** 与 **一键安全 Revert** |
 
-- **角色优先 Studio**：先看三张角色卡（控制 / 实现 / 交叉审查，附白话职责与推荐轨道），再看模型池；模型卡带「原厂 CLI 基座 / 内置 API 基座」轨道标签、角色徽章（控制 / 编码 / 审查 / 自动候选）与白话状态文案，不再显示原始登录字符串。
-- **一键智能搭配**：基于当前*已就绪*配置实时生成——包月双 CLI 异构审查、API 控场 + 包月 CLI 编码、纯 API 自治、全池智能自动路由——一次请求同时应用三个角色。
-- **反模式顾问**：识别实现与审查同模型、已有就绪模型却仍用启发式控制、自动池为空、自定义配置未补全，并提供一键修复。
-- **引导式新增表单**：模板按两条轨道分组，提供模型名称建议，API 必填项带标记（Ollama / localhost 显示免密提示），可选的 CLI 中转地址 / 密钥折叠到「高级」中。
+---
 
-## v1.8.1 — 统一大模型配置池：CLI 与 API 平级、角色指派（大模型与角色 Studio）
+## 核心架构 —— 双基座（Dual-Harness）模型
 
-v1.8.1 让你**为任意角色自由选择任意模型**。本机 CLI（`claude` / `codex` / `opencode` / `gemini`）与 API 模型（DeepSeek / OpenAI 兼容 / Anthropic 兼容 / Ollama）是同一个**配置池**里平级的 **`ModelProfile`**，可分别指派给*控制*、*实现*与*评审*三个角色：
+`super-work` 将**确定性的外层治理基座**与**可插拔的内层编码基座**解耦：既守住确定性的安全与门禁上限，又完整保留原厂 CLI 的协同训练编码能力与包月性价比。
 
-- **大模型与角色 Studio**（设置 → *大模型与角色*，以及安装向导的*自定义*；统一的 `ModelRegistryStudio` 组件，无重复表单）。**阶段 ① 配置池**：每个 CLI / API 配置都是一张平级卡片，含就绪徽标、自定义 Base URL / 密钥的 CLI 显示 `+ 中转` 徽标、卡片级**参与自动工作池**开关、一键**测试**（`POST /api/setup/test-model`）、行内**编辑**与两步行内**删除**（仅自定义配置），以及**扫描本机 CLI**与**新增模型配置**（8 个平级模板：4 种 API 协议 + 4 个 CLI 引擎）。**阶段 ② 角色指派**：三个选择器（控制 / 实现 / 交叉审查）仅列出*已就绪*配置（控制另含*本地启发式*，实现 / 审查另含*自动*），修改后立即保存。**一键获取模型列表（v1.8.2）**：新增 / 编辑表单中的*获取可选模型*按钮会实时探测服务商的 `/models` / `/model` 接口（`POST /api/setup/models`），直接点选真实模型 ID，无需凭记忆手输；API 配置与 CLI 自定义中转均支持。
-- **删除 API**：`POST /api/setup/configure` 支持 `deleteModelProfileIds: string[]`。自定义配置会被移除；内置 CLI 配置（`builtinCli`）受保护（HTTP 400）。曾指向被删配置的角色指派（含仓库级 `implementModelId` / `reviewModelId`）回退为 `heuristic` / `auto`。
-- **模型选择器**：首页*选项 → 模型*与 DeepDive 的 Steer 栏均从已就绪配置中选择，并发送 `preferredModelId`。
+```mermaid
+flowchart TB
+  subgraph Surfaces["多端交互入口"]
+    UI["Web 决策指挥舱 (React + Tailwind v4)"]
+    CLI["super-work CLI (super-work do)"]
+    MCP["零外部 SDK 原生 MCP 服务 (27 工具 · HTTP + stdio)"]
+    WH["双向签名 Webhook (GitHub · ChatOps · 移动审批卡)"]
+  end
 
-v1.8.1 早先已交付的基础能力：
+  subgraph Outer["外层治理基座 (@super-work/core)"]
+    Router["Smart Intake 智能分诊 + 只读代码探针"]
+    Sandbox["隔离 Git Worktree + 不可变 Mandate + OS 硬沙箱"]
+    Gates["确定性质量门禁 (增量测试 · 运行时冒烟 · CDP 视觉回归)"]
+    Review["异构模型交叉盲审 + 确定性风险评分 (0-100)"]
+    Delivery["事务发件箱 · 投机合并列车 · 里程碑发版 · Boot Canary 自举重载"]
+  end
 
-- **`ApiWorkerDriver`（`api` 引擎）**：原生 Agent Worker，支持 DeepSeek、OpenAI 兼容（OpenAI、OpenRouter、OneAPI、SiliconFlow、Qwen、Ollama）与 Anthropic 兼容 API，工具循环被限制在工单 worktree 内。
-- **CLI 自定义中转**：`claude` / `codex` / `opencode` / `gemini` 均可配置可选的 `baseUrl` + `apiKey`，按次调用注入（`ANTHROPIC_BASE_URL`、`OPENAI_BASE_URL`、`GOOGLE_GEMINI_BASE_URL`），不修改本机 CLI 配置。
-- **`POST /api/setup/test-worker`**：一键测试 API 预设或 CLI 中转的连通性，返回 `{ ok, latencyMs, message }`；已保存的密钥仅以掩码形式展示。
-- **异构搭配**：实现与评审可使用不同配置（例如 Claude Code 实现、DeepSeek API 配置评审）；已存密钥仅以掩码展示，并支持清除密钥。
-- **`syncRepos: false`**：`POST /api/setup/configure` 现在可在保存凭据或通知时不覆盖仓库的 `preferredImplementEngine`（保留 `auto`）。
+  subgraph Inner["可插拔内层编码基座 (@super-work/drivers)"]
+    TrackCLI["原厂 CLI 基座: Claude Code · Codex · OpenCode · Gemini CLI"]
+    TrackAPI["内置 API 基座: DeepSeek · OpenAI 兼容 · Anthropic 兼容 · 本地 Ollama"]
+  end
 
-## v1.8.0 — Super-Agent First：大简化（消费级界面，专业级引擎）
-
-v1.8.0 将 `super-work` 重塑为**架在不变的专业引擎之上的消费级界面**：你只需说出需求、扫一眼“需要你”的事项、点击批准。下列所有高级能力依然存在，只是被收纳进可折叠的 **Engine Room（引擎室）**。
-
-- **单栏 HeaderBar**：`v1.8.2` 徽标 + 实时健康点 · 胶囊标签页（Home / History / Settings） · `⌘K` 命令面板 / `ZH-EN` 切换（非首页标签另有紧凑仓库胶囊）。仓库切换器与 **受控 / 智能 / 全权**（Guarded / Smart / Autonomous）授权拨盘集成在 Hero Composer 的上下文工具栏中，紧贴你正在输入的需求。
-- **三大空间**：
-  - **Home（首页）** —— **Hero Composer**（隐式智能分诊、可选 `scope:<glob>` 令牌、可折叠 *Advanced ▾*）、**Needs You**（三个人类动词：**Approve 批准 / Answer 回答 / Unblock 解阻**）与 **Live Work** 实时任务卡片。
-  - **History（历史）** —— 时间线与发布（Timeline & Releases），以及看板 / DAG 视图。
-  - **Settings（设置）** —— 5 项 *Essentials* 精要设置，外加可折叠的 **Developer / Engine Room**：Contract / Gates、Playbook / Casebook、Routines / Campaigns、Worktrees / Merge Train / Simulate、Flight Recorder / Doctor / Evals。
-- **精简 DeepDiveDrawer**：*Overview & Changes* + *More ▾*，底部常驻 **Steer** 输入栏。
-- **1 键零配置 SetupWizard**（`POST /api/setup/quick-start`）自动选择已登录的最佳 CLI（`claude` → `codex` → 启发式）作为控制面大脑；**智能仓库自动检测**（`POST /api/repos/detect`，只读）推断名称、基线分支、技术栈（Bun / Node / Rust / Python / Go）与验证命令。
-- **`AutonomyPreset`**（`guarded` / `smart` / `autonomous`，即 **受控 / 智能 / 全权**，表示你委托给超级智能体的权限大小）是统一配置项，展开为运行模式、交付门禁策略、沙箱与验证默认值。仅在首次或强制同步时展开；自动重同步绝不覆盖用户通过 `PATCH /api/repos/:id` 设置的显式覆盖。旧名称 `copilot` / `standard` / `autopilot` 在 REST、`.super-work.json` 与已存储仓库中仍被接受，并分别映射为 `guarded` / `smart` / `autonomous`。
-- **主 CLI 动词**：`super-work do "<需求>"`，支持 `--preview`、`--wait` 与 `--milestone <vX.Y.Z>`。
-
-### 60 秒快速开始
-
-```bash
-bun install && bun run build
-bun run dev:server                                  # 守护进程 http://localhost:4318
-# 打开 Web 界面：SetupWizard 一键自动配置（POST /api/setup/quick-start）。
-# 添加仓库——名称、基线分支与验证命令自动检测（POST /api/repos/detect）。
-super-work do "新增 /healthz 接口 scope:packages/server/**"          # 派发
-super-work do "新增 /healthz 接口" --preview                         # 仅预览计划，不创建任务
-super-work do "新增 /healthz 接口" --wait                            # 阻塞直至完成
-super-work do "新增 /healthz 接口" --milestone v1.9.0                # 归入里程碑
+  Surfaces --> Router
+  Router --> Sandbox
+  Sandbox --> TrackCLI
+  Sandbox --> TrackAPI
+  TrackCLI --> Gates
+  TrackAPI --> Gates
+  Gates --> Review
+  Review --> Delivery
 ```
 
 ---
 
-## 核心能力
+## 60 秒快速开始
 
-- **Router + 隔离 Worker 双层架构**：
-  - **控制面（`EventIntakeRouter` & `MasterAssessor`）**：统一接收入站触发器（`web`、`github_issue`、`github_pr`、`github_ci`、`cli`），具备 **两层只读代码探针系统（`ReadOnlyRepoProber`：`search_symbols`/`read_file_slice`/`grep_literals`/`git_recent_commits`，严格越界防护与 `.env*` 脱敏，2 轮有界循环）**，提供派单前 **Pre-Flight Spec Studio 预勘探与澄清（`POST /api/specs/clarify` 与 `--clarify`，注入 1-hop / 2+ hop 符号影响面分析）**，注入仓库契约（`super-work.json`）、**命中追踪与衰减自净的 Playbook 经验库**及**混合加权历史判例库（Casebook）**，支持 **跨仓库联合 Epic 与 `--depends-on` 依赖编排（含 1-hop 语义依赖自动串行）**、**自适应引擎多臂老虎机路由（`--engine auto`）与低置信双引擎 Auto-Arena 触发护栏**、**红绿先测试守卫（`--tdd` + `SPEC_TEST_CHALLENGE` 单次回退重审）**、**交互式 DAG 拓扑画布与热修改断点（`--pause-before-run`）**、**回合中零惩罚实时纠偏（Live Steer：`POST /api/tickets/:id/steer`）**、**Worker `[ASK_HUMAN]` 结构化歧义提问（单任务限 1 次，`auto` 模式自动采纳推荐项防卡死）**、**零 LLM 工具调用画像（`StageToolProfile`）**、**阶段 Git 检查点时间旅行 Re-steer**、**定时探测晋升巡航（Probe-to-Promote）**，以及守护进程重启断点自愈。
-  - **执行面（`WorkerDriver` & `GitWorktreeProvider`）**：在独立的 `git worktree` 分支中调度外部 Coding Agent（`ClaudeCodeDriver`、`CodexDriver`、`OpenCodeDriver`、`GeminiCliDriver`、`MockWorkerDriver`，并在 Monorepo 工作树自动镜像 `packages/*` 符号链接），通过 **OS 原生安全沙箱（`sandboxMode`：`balanced` | `strict` | `off`，基于 macOS Seatbelt / Linux `bwrap`，`balanced` 下阻断外网的同时保留 `localhost:*` 本地测试回环 + `readOnlyPaths` 测试文件内核级只读锁 + 自动清洗密钥环境变量）** 约束写边界，支持 **`setupCommands` 预热**、**结构化对抗盲审**、**临时服务运行时冒烟 + 零依赖 CDP 无头浏览器门禁（支持交互 `steps` 与纯 TS 像素级视觉回归对比 `visualDiffMode`）**、隐藏 Git ref 阶段检查点与 Worktree GC。
-- **原生 MCP 服务器与双向签名 Webhook**：
-  - **零外部 SDK 的原生 MCP 服务（`v1.7.0`）**：同时提供 Streamable HTTP（`GET/POST /api/mcp`）与 `super-work mcp` stdio 桥接（本地守护进程离线时自动拉起），暴露 **27 个工具**（`manage_playbook_hygiene`、`manage_engine_health`、`dispatch_requirement`、`manage_self_host`、`clarify_spec`、`dispatch_ticket`、`dispatch_epic`、`list_tickets`、`get_ticket_detail`、`list_inbox`、`resolve_inbox`、`batch_resolve_inbox`、`steer_ticket`、`ask_chief`、`manage_evals`、`manage_campaigns`、`manage_merge_train`、`search_memory_and_casebook`、`trigger_routine`、`manage_preview`、`analyze_impact`、`manage_checkpoints`、`mutate_dag_node`、`submit_review_comments`、`system_doctor`、`manage_milestones`、`get_run_digest`）与 **3 个资源**（`superwork://health`、`superwork://repos`、`superwork://inbox/pending`）。
-  - **双向签名 Webhook 与移动端审批卡**：接收 HMAC-SHA256 验签的 GitHub Webhook（`POST /api/webhooks/github`，`X-Hub-Signature-256`）与 ChatOps 回调（`POST /api/webhooks/chatops`），并在飞书/Slack/Discord/通用 JSON 推送中附带 **防爬虫预览误触发的签名远程审批卡片（`GET/POST /api/webhooks/action`）**，同时支持 macOS 原生通知。
-- **韧性与 Watchdog 2.0 可观测性（`v1.7.0` Wave 2）**：
-  - **分级引擎熔断**：瞬时故障冷却 15 分钟，持久确定性故障（`model_unsupported`、`tier_ineligible`、`auth_invalid`、`quota_exhausted`）冷却 24 小时。Web Doctor 面板以「持久熔断（需重置/探测）」徽标区分于临时冷却徽标。同期（Wave 1）还包含里程碑启动 Canary、Safe-Refactor 并发调度 + 自动 RefactorGuard、自适应 Watchdog 2.0。
-  - **Watchdog 2.0 与 Flake 重试 KPI**：`RunDigestReport.resilience` 新增可选的 `watchdogExtensions`（`watchdog_extended`）与 `flakeRetries`（`flake_retried`）计数，仅在非零时写入，并显示于双语摘要 Markdown 与飞行记录器面板。
-  - **`@super-work/core/types` 子路径**：仅类型导出（`./src/types.ts`）；`@super-work/web` 以 `workspace:*` devDependency 引用 `@super-work/core`，core 运行时代码不会进入 Vite 产物。
-  - MCP `1.7.0` 仍为 **27 个工具**；CLI 横幅 `v1.7.0`；Web 徽标 `v1.7`。
-- **Playbook 卫生治理、飞行记录器韧性/复用 KPI 与可选 GitHub Release（`v1.6.0` Wave 2）**：
-  - **Playbook 防污染**：`evaluatePlaybookRuleHygiene` / `auditPlaybookEntries` 识别一次性的审批、续跑与工单运行笔记（如 `human approved continuation`、`approve local_merge`、`tkt_…` 工单 ID），且永不标记 `repo_contract` 与置顶规则。Inbox 备注**仅在显式勾选**（`saveToPlaybook: true`）时写入 Playbook，并仍会经过卫生检查；噪声备注会被跳过，但不会导致 Inbox 处理失败。
-  - **全表面治理**：`GET /api/playbooks/hygiene[?repoId=]`、`POST /api/playbooks/hygiene/prune`（`{ repoId?, dryRun?, mode?: "disable" | "delete" }`，默认 `disable`）、CLI `super-work playbook audit` / `playbook prune [--delete]` / `doctor --prune-playbooks`、MCP `manage_playbook_hygiene`、System Doctor 的 `playbook_hygiene` 检查项，以及 Web Doctor 卡片中的一键**禁用噪声规则**按钮。
-  - **飞行记录器 KPI**：`RunDigestReport.gateReuse`（`gate_reused` 事件与节省时间）与 `resilience`（`engineTrips`、`spilloverQuarantines`），体现在摘要 Markdown 与 Web 飞行记录器面板中（合并展示校验门节省并附明细）。
-  - **引擎熔断**：`free usage limit` / `subscribe to opencode` 错误被判定为确定性的 `quota_exhausted`。
-  - **可选 GitHub Release**：`createGithubRelease`（REST `POST /api/milestones/:id/release`、CLI `super-work milestone release <id> --tag --push --github-release`、MCP `manage_milestones`、Web 勾选框）。要求目标版本、同时开启打标签与推送，并且 `gh` 已登录；所有校验均在**任何 git 变更之前**完成，默认关闭。
-  - MCP `1.6.0` 共 **27 个工具**（新增 `manage_playbook_hygiene`）；Web 徽标 `v1.6`。
-- **里程碑暂存分支、干净 Squash 发布与归档界面（`v1.5.0`，支柱 A + B + C + D）**：
-  - **支柱 A — 引擎熔断器**（`engine_health`、`GET/POST /api/system/engines`、MCP `manage_engine_health`），**支柱 B — 溢出护盾**，**支柱 C — 第二代影响门禁**，**支柱 D — `milestone_branch` 单次签收暂存分支**（见下）。
-  - **`integrationMode: "milestone_branch"`**（`POST /api/milestones`、`super-work milestone create --integration milestone_branch [--route auto|single_ticket]`、MCP `manage_milestones`）：各项自动 rebase 并合入 `super-work/milestone/<id>`，**中途零人工签收**（Boot Canary 仅在合入基线分支时触发）。全部交付后里程碑进入 `ready_to_release` 并只推送一张 `milestone_ready` 收件箱卡片；发布时把暂存分支 `--no-ff` 合入基线分支并删除。
-  - **可选无损 Squash**（`squashReleaseCommit`、`releaseCommitMessage`、CLI `--squash`）：把合并与版本升级压成单个发布提交，并校验文件树一致（`HEAD^{tree}` 不变），不一致则回滚并报错。标签与推送仍需显式开启。
-  - Web：`v1.5` 徽标、集成模式与路由选择器、暂存分支徽标、Squash 勾选，以及可折叠的**已发布里程碑**归档（版本、发布提交 SHA、中英文发布说明）；MCP `1.5.0` 共 **26 个工具**。
-- **里程碑批量波次编排与受控发布合成器（`v1.4.0`，支柱 A + B + C + D）**：
-  - **支柱 A — 影响范围增量验证门禁**：验证门禁只运行受工单 diff 影响的包，并记录节省耗时遥测，加速 Monorepo 交付。
-  - **支柱 B — 里程碑（`/api/milestones`、`super-work milestone`、MCP `manage_milestones`）**：一次提交多条需求，每条经智能直投路由；`planMilestoneWaves` 计算拓扑波次（`allowedPaths` 不重叠者同波并行，重叠者串行并写入跨波 `dependsOn`）。全部交付后里程碑进入 `ready_to_release`，基于 HandoverDigest、风险分与 Run Digest 遥测自动合成中英双语发布说明，并推送 `milestone_ready` 收件箱卡片。**发布绝不自动触发**：仅在 REST / CLI / 收件箱显式签发后才会升级 `package.json` 版本（`--bump`）、打标签（`--tag`，默认关闭）或推送（`--push`，默认关闭）。
-  - **支柱 C — 外科手术式符号与行号地图注入 + Doctor 热点雷达**，为 Worker 提供更精准的上下文。
-  - **支柱 D — 持久化 SQLite 飞行记录仪与双语运行摘要（`GET /api/digest`、MCP `get_run_digest`）**。
-  - Web：看板懒加载 `MilestonePanel`、派单弹窗第 4 个「里程碑批量编排」标签页、收件箱发布说明预览；MCP `1.4.0` 共 **25 个工具**。
-- **智能需求统一直投（Smart Intake）与自举金丝雀热演进（`v1.3.0`）**：
-  - **智能需求直投（`POST /api/intake` & `/api/intake/preview`）**：支持只丢一句话自然语言需求，控制面结合只读代码探针自动判断直建Scoped单工单（`single_ticket`）、跨模块 `Epic DAG`（`epic_dag`）还是量化 `GoalCampaign`（`goal_campaign`），已集成于 Web 默认派单页、CLI `super-work intake --wait` 与 MCP `dispatch_requirement`。
-  - **Boot Canary + 排空平滑重启 + 坏提交自动 Revert（`BunSelfHostRunner`）**：当 `super-work` 自身仓库主干发生本地合入后，自动构建并在随机临时端口冷启探活 `/api/health`；探活通过即暂停新轮调度、排空在途任务、刷新 SQLite WAL 并平滑退出触发监控进程拉起（退出码 `75`）；若构建或探活失败则自动 `git revert` 坏提交，确保在线守护进程持续可用并推送待决告警至收件箱。
-- **指标驱动目标战役（GoalCampaign）与并行投机合并列车（`v1.2.0`）**：
-  - **自治目标战役闭环**：开战先测指标基线（`metricCommand`），支持在隔离暂存分支 `super-work/campaign/<id>`（`staging_branch`）或逐轮合入（`per_wave_merge`）模式下多轮迭代探索；一旦退化或未达增量立即执行**单调分支回退并沉淀教训**，连续 2 轮滞涨、达到轮次上限或预算触顶时自动熔断至 `campaign_paused` 审批卡等待人工提示续跑与最终交付。
-  - **并行投机合并列车与跨仓释放屏障**：单任务且 `baseBranch` HEAD 一致且无挂起屏障时走 **Smart-Bypass 零开销快速通道**；多任务并发交付时最多 3 槽位在独立 `train-worktrees/` 内累加 `--no-ff` 预合与门禁验证，一次性 Fast-Forward 至最长通过前缀同时保留每张工单独立的 Merge Commit（**保证一键 `git revert -m 1` 粒度不丢**），并自动二分定位与驱逐失败槽位；跨仓库 Epic 默认通过 `barrierGroupId` 启用联合释放屏障（进入 `barrier_waiting` 时即刻生成 `HandoverDigest`，消除跨仓依赖死锁）。
-- **系统级常驻守护服务、生命周期 Hooks 与不可变契约（`v1.2.0`）**：
-  - **零外部依赖守护进程（`super-work service`）**：原生管理 macOS `launchd`（`ai.superwork.daemon`）与 Linux `systemd --user`（`super-work.service`）常驻服务，默认绑定安全回环 `127.0.0.1:4318`（暴露非回环 `--host` 强制要求配置 `SUPER_WORK_TOKEN`），自动智能解析 `.super-work` 目录并支持 `10 MB` 日志轮转。
-  - **确定性生命周期 Hooks 与不可变 `super-work.json`**：支持在仓库设置与契约配置阻塞型 `pre_deliver` 及异步尽责型 `post_deliver` / `on_escalate` 脚本（基于脱敏环境与 `SUPER_WORK_HOOK_*` 上下文变量），同时通过 `IMMUTABLE_REPO_PATHS`（`super-work.json`）在 Seatbelt/`bwrap` 中强制对 Worker 只读且对写入自动回滚（禁止扩权）。
-- **可组合任务蓝图与风险评分置信度交付门禁**：内置 5 套 **Task Blueprints**（`tdd-bugfix`、`ui-visual-polish`、`safe-refactor`、`backend-feature`、`docs-chore`）并支持在 `super-work.json` 扩展自定义 `blueprints`（严格遵循 `explicit > blueprint > repo` 优先级）。所有非汇总任务入库前通过 **`evaluateTicketRisk`** 对 Diff 体积、`sensitivePaths`、符号波及扇出、视觉差异比例、重试次数、冲突解决与校验置信度给出 `0–100` 确定性评分；当启用 `risk_gated` 策略且超过 `riskThreshold` 时，自动生成带风险因子拆解的 `outbox_signoff` Inbox 审批卡。
-- **行级锚定审查工作台与 3-Way 语义冲突自动消解**：
-  - **Line-Anchored Review Studio**：将 AI 结构化审校结论持久化同步至 `ticket_review_comments`，在 Diff Studio 支持按代码行点击 `+` 批注、汇入 **Review Basket**（区分「仅保存批注」与「打回修改 `request_changes`」），并在后续修改触达对应文件且通过校验后自动流转为 `resolved`。
-  - **3-Way 语义变基冲突解析**：Rebase 遇冲突时先打隐藏快照 `pre_rebase_conflict`，通过 `prepareThreeWayConflictWorkspace` 提取共同祖先、上游最新提交摘要及双边 `ours`/`theirs` 差异摘要构建无锁干净工作区，在单回合限定内调用编码引擎协同消解冲突（全程受 `lockedTestPaths` 只读与全量门禁保护）；若仍失败则无损回退快照并升级附带完整语义上下文的 `merge_conflict` 审批卡。
-- **阶段瀑布流监控、系统诊断（System Doctor）、原子热恢复、黄金评测台与知识包迁移**：
-  - 内联记录 `StageSpan` 阶段分片耗时与 `StageToolProfile` 工具热点画像；提供 **`System Doctor`** 多维巡检自愈、基于 **`VACUUM INTO`** 的零锁 SQLite 热备份，以及校验完整性的 **原子热恢复（`POST /api/system/backups/:id/restore` & `super-work backup restore`，自动打 `pre-restore` 保险快照）**；内置隔离 `eval-worktrees/` 的 **Golden Eval Suite** 多引擎回放评测台与可移植 **知识包（Playbook + Casebook + Blueprints）** 导出/导入。
-- **`⌘K` 双模式幕僚长全局面板与收件箱批量处理**：
-  - 顶部 **`⌘K` (`Ctrl+K`)** 集成工单/FTS5 瞬时检索与 **`?` 问幕僚只读问答（`POST /api/chief/ask` & `super-work ask`，结合探针证据给出需人工确认的执行建议卡）**；收件箱支持多选及 **「仅选低风险」一键批量批准/驳回（`POST /api/inbox/batch-resolve` & `super-work inbox batch`）**。
-- **工程契约（`super-work.json`）、视觉截图 Spill 与实时工作树预览**：仓库契约承载 `verificationCommands`、`setupCommands`、`smokeCheck`（含 `browserCheck`）、`previewCommand`、`forbiddenPaths`、`conventions`、`deliveryGatePolicy`、`sensitivePaths`、`blueprints` 与共享 `playbook`，个人 `sandboxMode` 等运行态配置保存在本地 SQLite；门禁日志与 PNG `screenshot` 视觉截图持久化为 Spill 产物（`GET /api/artifacts/:id/raw`），**`WorktreePreviewManager`** 支持按需启动带 20m TTL 与最多 3 路 LRU 淘汰的工作树实时预览服务并在清理/撤销时自动销毁。
-- **双通道 `Transactional Outbox` 与安全一键回滚**：支持 **PR 推送/增量更新** 与 **本地 `--no-ff` 原子合入主干**，并在 Web 与 CLI 提供 **安全反向提交回滚（`git revert -m 1`）**。
-- **分级不可变 `Mandate` 护栏、并发配额与每日预算柔性熔断**：
-  - 派单前通过 `mandateScopesOverlap` 检测活跃任务的授权路径重合度；支持单仓 `maxConcurrentWorkers` 与 `dailyBudgetUsd` 每日花费上限（触顶后跑完进行中 Stage 并暂停排队推送 `budget_cap` 审批卡）。
-  - 事后基于 `git diff` 校验改动路径：触及 `.env*`、`*.pem`、`*.key` 等禁区立即回滚禁止扩权；仅超出 `allowedPaths` 的普通文件**保留在 Worktree 挂起**，支持收件箱 **「一键扩权并继续」**（免重烧 Token 直接验证流转）。
-- **五合一控制入口（四层 Web 指挥舱 + 一等公民 `super-work` CLI）**：
-  1. **Attention Inbox（决策收件箱）**：聚合 `observe_proposal`、`plan_approval`、`watchdog_escalation`、`mandate_violation`、`merge_conflict`、`outbox_signoff`、`budget_cap`、`pr_followup`、`arena_tiebreak`、`epic_replan` 与 `clarification_request` 审批项，支持多选及低风险批量审批、Arena 截图预览与 Live Preview 快捷拉起。
-  2. **Mission Board（态势泳道 & 拓扑 DAG 看板）**：五列实时并发泳道 + 内嵌 **交互式 DAG Studio**（SVG 贝塞尔曲线拓扑、暂停/恢复/重跑断点与实时节点热手术），展示引擎、TDD 锁、Auto-Arena、PR、作用域与预算进度。
-  3. **Scheduled Routines（自治巡航）**：支持一键预设模板与 Cron/周期巡检配置，通过 Probe-to-Promote 在静默健康退出与实质修复晋升间自动闭环。
-  4. **Metrics & Budget（效能与预算面板）**：追踪今日预算消耗、交付成功率、总花费、各引擎耗时/通过率、**引擎 × 任务分类 Bandit 评分矩阵** 与 **Golden Eval 黄金基准回放评测台**。
-  5. **Deep Dive Drawer & `@super-work/cli`**：支持面板下钻流式轨迹、**Live Steer 实时纠偏**、**工具调用画像**、**一键存为黄金用例**、**文件级 Diff Studio + Arena 双候选切换 + 内联视觉证据 + 检查点时间轴 + Live Preview + 一键回滚**、`Chain of Recall` & 历史判例；终端支持 `super-work mcp`、`ask`、`steer`、`inbox batch`、`eval`、`backup restore`、`bundle export/import`、`dispatch --clarify --tdd --pause-before-run --engine auto --arena --wait`、`impact`、`checkpoint`、`dag`、`preview`、`routine`、`casebook`、`playbook prune` 等完整指令。
+### 环境要求
+- **[Bun](https://bun.sh)** `>= 1.3` 与 **`git`**（被接管的本地仓库需至少包含一次初始 `git commit` / 有效 `HEAD`）
+- *可选编码引擎*：任一已登录本机 CLI（`claude`、`codex`、`opencode`、`gemini`），或任一 DeepSeek / OpenAI / Anthropic 兼容 API Key，或本地 `Ollama`（如需自动提 GitHub PR / Release 可选装 `gh`）
+
+### 1. 安装、构建与启动
+
+```bash
+git clone https://github.com/WangShayne/super-work.git
+cd super-work
+
+bun install
+bun run build
+bun run dev
+# 守护进程 API + SSE: http://127.0.0.1:4318
+# Web 决策指挥舱:     http://localhost:5173
+```
+
+### 2. 零配置引导
+1. 打开 `http://localhost:5173` —— 首次运行向导会自动扫描本机已登录 CLI，**一键完成控制 / 编码 / 审查模型配置**（`POST /api/setup/quick-start`）。
+2. 添加任意本地 Git 仓库 —— 系统只读探测项目技术栈（Bun / Node / Rust / Python / Go）、基准分支与测试门禁命令并自动填好（`POST /api/repos/detect`）。
+
+### 3. 下达第一条任务
+
+可直接在首页 **Hero Composer** 输入自然语言需求，或通过命令行一键派发：
+
+```bash
+# 指定授权范围派发任务
+super-work do "新增 /healthz 健康检查接口并附带延迟统计 scope:packages/server/**"
+
+# 仅预览智能拆单与路由计划，不实际创建工单
+super-work do "将鉴权中间件重构为可组合守卫" --preview
+
+# 阻塞等待流式输出直至门禁验收与交付完成
+super-work do "修复设置页深色模式对比度细节" --wait
+
+# 将需求归入指定版本发布里程碑
+super-work do "为运行摘要新增 CSV 导出支持" --milestone v1.9.0
+```
 
 ---
 
-## Monorepo 分包结构
+## 六大核心能力
+
+### 1. 消费级简洁首页，专业级可折叠引擎室
+- **首页工作台（Home）**：
+  - **Hero Composer**：自然语言智能直投，常驻可切换/可二次点击取消的快捷模板胶囊（`修复 Bug` · `构建功能` · `安全重构` · `发布版本` + 一键 `取消 / 清空`），支持 `scope:<glob>` 范围标记与 `受控 / 智能 / 全权` 自治等级拨盘。
+  - **需要你处理（Needs You）**：所有人工介入统一收敛为 **批准（Approve）**、**回答（Answer）**、**解除阻塞（Unblock）** 三类动作，支持低风险一键批量签批。
+  - **进行中的工作与 SSE 断线重放**：运行中任务卡片直接展示实时跳秒计时器、结构化工具/思考/门禁动作标题与行内可展开 **「实况 (n)」** 面板；服务端内置环形事件回放缓冲（`GET /api/events`），中途刷新或新开页面不丢进度、无需翻看原始 SSE JSON。
+- **详情抽屉（DeepDive Drawer）**：顶部内嵌待拍板交互卡片与阶段感知状态徽标（`实时推送中` / `等待你拍板` / `执行已结束`），支持按 `全部 / 工具 / 思考 / 阶段门禁` 过滤轨迹、文件级 Diff Studio + 行级审查篮（Review Basket）、隐藏 Ref 检查点时间旅行、实时工作树预览与底部常驻 **Live Steer** 实时纠偏栏。
+- **历史与可折叠引擎室（Engine Room）**：发布与工单时间线、交互式泳道/SVG **DAG Studio**、5 项精要设置、`⌘K` **幕僚长只读探针问答**，以及收纳契约门禁、经验/判例库、巡航/战役、工作树/合并列车、飞行记录仪与 System Doctor 的开发者引擎室。
+
+### 2. 双轨平级大模型池与角色优先 Studio
+- **CLI 与 API 完全平级**：本机 CLI（`claude`、`codex`、`opencode`、`gemini`）与 API 模型（`DeepSeek`、`OpenAI 兼容`、`Anthropic 兼容`、`本地 Ollama`）作为同级 `ModelProfile` 统一纳管。
+- **三角色自由分工 + 一键智能搭配**：独立绑定 **控制模型**（分诊/拆单/看门狗）、**工作实现模型**（隔离编码）与 **交叉审查模型**（独立盲审），内置 *API 控场 + 包月 CLI 编码*、*包月双 CLI 异构搭配*、*纯 API 自治*、*全池自动路由* 四套实时方案。
+- **反模式顾问与 `/models` 实时探测**：自动识别“编码与审查同模型自审盲区”并提供一键异构修复；新增/编辑模型支持一键探测上游 `/models` 与 `/model` 接口点选真实模型 ID，并支持为单个 CLI 注入独立中转网关而不改动本机全局配置。
+
+### 3. 纵深隔离护栏与多层确定性质量门禁
+- **隔离 `git worktree` 运行池**：自动镜像 Monorepo 依赖符号链接、执行 `setupCommands` 预热、管控单仓并发配额与每日美元预算上限，终态自动回收目录。
+- **不可变 `Mandate` 与 OS 原生硬沙箱**：通过 macOS Seatbelt / Linux `bwrap` 锁定写边界并屏蔽 `.env*`、`*.pem`、`*.key` 与只读 `super-work.json`；支持 `--tdd` 红绿测试文件内核级只读锁。普通越界修改保留在工作树内，支持收件箱 **「一键扩权并继续」** 免重烧 Token。
+- **三层自动化验收**：基于 Diff 波及面的 **增量门禁（`impact_scoped`）**、自动分配空闲端口的 **运行时服务冒烟门禁（`smokeCheck`）**，以及零第三方依赖的 **CDP 无头浏览器控制台与 PNG 像素级视觉回归门禁（`browserCheck`）**。
+
+### 4. 多尺度自主编排与自适应自愈
+- **Smart Intake 智能路由**：结合只读代码探针（`ReadOnlyRepoProber`）自动将一句话需求路由为单工单（`single_ticket`）、跨模块/跨仓并发 `Epic DAG`（自动生成 `HandoverDigest` 契约摘要），或量化指标驱动的 **目标战役（`goal_campaign`）**（退化自动单调回退）。
+- **定时探测晋升巡航（Probe-to-Promote Routines）**：按 Cron 或固定周期在隔离工作树巡检——无异常静默清理退出、绝不制造垃圾工单；仅在完成实质修复或发现高优隐患时晋升工单。
+- **Watchdog 2.0 与分级熔断自愈**：实时监测流静默、重复报错与代码横跳，对有效推进自适应延时，对引擎故障执行分级熔断冷却（瞬时故障 15 分钟 / 额度或鉴权故障 24 小时自动换引擎接力），并在变基冲突时启动 **3-Way 语义冲突消解器**。
+
+### 5. 风险评分交付、一键里程碑发版与自举金丝雀热演进
+- **0–100 风险评分门禁 + 并行投机合并列车**：综合 Diff 规模、敏感路径、符号影响扇出与视觉差异计算风险分，驱动 **事务发件箱（Outbox）** 与最多 3 槽位累加验证的 **Speculative Merge Train**（单单快通 Smart-Bypass、失败槽位二分剔除，完整保留每单 `git revert -m 1` 一键回滚能力）。
+- **里程碑波次编排与直接发版**：支持多需求拓扑波次推进（`direct_main` 或零中途打扰的 `milestone_branch`），也支持主干就绪后直接创建发布里程碑——在首页待发布卡片内直接勾选 **同步版本号 / 树一致性无损 Squash / 创建注释 Tag / 推送远端 `origin` / 创建 GitHub Release** 一键完成发版。
+- **Boot Canary 自举热重载（`BunSelfHostRunner`）**：当改动合入 `super-work` 自身主干时，自动构建并在随机端口冷启金丝雀实例探活 `/api/health`；探活通过后排空在途任务、刷盘 SQLite WAL 并平滑热重启，若构建或探活失败则自动 `git revert` 坏提交保障在线服务不断流。
+
+### 6. 越用越聪明的仓库记忆与 27 工具原生 MCP
+- **自净化经验与判例沉淀**：**Playbook 经验库**内置噪声卫生审计（自动拦截一次性审批备注污染并支持一键清理），**Casebook 历史判例库**支持 SQLite FTS5 混合召回并在工单回滚时自动翻转为反面避坑警示，配合隔离 **Golden Eval 黄金评测台** 与 **`VACUUM INTO` 零锁在线热备份/原子恢复**。
+- **原生生态互联**：零外部 SDK 的 **MCP JSON-RPC 2.0 服务**（`GET/POST /api/mcp` 与 `super-work mcp` stdio 桥接）暴露 **27 个工具与 3 个资源**，并支持 GitHub HMAC 入站 Webhook、飞书/Slack/Discord 通知及防爬虫误触的移动端签名拍板卡片。
+
+---
+
+## 三档自治预设（Autonomy Presets）
+
+可在首页输入框工具栏随时按仓库切换委托权限：
+
+| 预设档位 | 运行与门禁策略 | 何时打扰你 | 适用场景 |
+| :--- | :--- | :--- | :--- |
+| **受控（Guarded）** | `auto` + `always_signoff` | 每次合入主干 / 建 PR 前均停下等你签字（含异常阻塞） | 核心生产仓库、首次接入新代码库 |
+| **智能（Smart，默认）** | `auto` + `risk_gated` | 低风险改动通过全量门禁与盲审后自动合入；高风险或触及敏感路径时请你拍板 | 日常主力研发 —— 兼顾吞吐效率与安全护栏 |
+| **全权（Autonomous）** | `auto` + `always_auto` | 端到端全自动交付；**仅**在真实受阻（冲突、越界、超预算）时通知你 | 测试完备的成熟仓库、夜间无人值守推进 |
+
+---
+
+## CLI 与 MCP 速查
+
+### 常用 CLI 指令
+
+```bash
+super-work do "<需求描述>" [--preview] [--wait] [--milestone vX.Y.Z]
+super-work status                              # 查看守护进程、可用引擎与队列快照
+super-work inbox list                          # 查看待拍板的收件箱事项
+super-work inbox batch --low-risk --approve    # 一键批量批准低风险待决项
+super-work steer <ticketId> "<纠偏指令>"       # 回合中无损实时纠偏并续跑
+super-work milestone list                      # 查看活跃与历史发布里程碑
+super-work milestone release <id> --bump --squash --tag --push
+super-work ask "当前有哪些阻塞风险？"          # 幕僚长只读代码与态势探针问答
+super-work doctor [--fix] [--prune-playbooks]  # 系统体检、孤儿目录回收与噪声规则清理
+super-work service install|start|stop|status   # 管理 macOS launchd / Linux systemd 常驻服务
+```
+
+### 接入 MCP 客户端（Claude Code / Cursor / Antigravity）
+
+```json
+{
+  "mcpServers": {
+    "super-work": {
+      "command": "bun",
+      "args": ["run", "/absolute/path/to/super-work/packages/cli/src/index.ts", "mcp"]
+    }
+  }
+}
+```
+
+也可直接连接 Streamable HTTP 端点：`http://127.0.0.1:4318/api/mcp`。
+
+---
+
+## Monorepo 分包结构与开发命令
 
 ```text
 super-work/
+├── assets/             # 品牌视觉资产 (高清透明 logo.png、纯矢量 logo.svg)
 ├── packages/
-│   ├── core/       # @super-work/core    — 零 UI 编排内核、Mandate、Memory、Watchdog、Outbox 与端口契约
-│   ├── drivers/    # @super-work/drivers — bun:sqlite + FTS5、FsArtifactStore、GitWorktreeProvider、LLM 与 CLI 驱动
-│   ├── cli/        # @super-work/cli     — 一等公民命令行客户端（up/status/dispatch/epic/inbox/logs）
-│   ├── server/     # @super-work/server  — Hono HTTP/SSE API 守护进程与静态看板托管
-│   └── web/        # @super-work/web     — React + Vite + Tailwind v4 本地决策指挥舱
-└── scripts/dev.ts  # 服务端与前端并行开发启动脚本
+│   ├── core/           # @super-work/core    — 零 UI 编排内核、Mandate、记忆、看门狗、Outbox、MCP 协议
+│   ├── drivers/        # @super-work/drivers — bun:sqlite + FTS5、GitWorktreeProvider、OS 沙箱、CLI 与 API 驱动
+│   ├── server/         # @super-work/server  — Hono HTTP/SSE 守护进程、实时回放缓冲、Webhook 与静态前端托管
+│   ├── cli/            # @super-work/cli     — 一等公民命令行客户端与 stdio MCP 桥接器
+│   └── web/            # @super-work/web     — React 19 + Vite + Tailwind v4 决策指挥舱（零 core 运行时打包）
+└── scripts/dev.ts      # 前后端并行开发与自举热重载（exit 75）守护启动器
+```
+
+```bash
+bun test              # 运行全量单元、SQLite/FTS5、Watchdog、真实 Git Worktree E2E 与 API 测试
+bun run typecheck     # 全工作区 5 个包严格 TypeScript 类型检查
+bun run build         # 构建生产前端静态产物至 packages/web/dist（单分包均 < 500 kB）
+bun run setup         # 终端交互式 CLI 环境扫描与模型引导配置
 ```
 
 ---
 
-## 环境要求与快速开始
+## 环境变量（全部可选）
 
-### 前置依赖
-- [Bun](https://bun.sh) `>= 1.3`
-- `git`（被接管的本地仓库需至少有一次初始提交 / 有效 `HEAD`，否则 `git worktree add` 无法创建工作树分支）
-- 可选 Worker / 事件源 CLI（需在 `PATH` 中）：`claude`（Claude Code）、`codex`（Codex CLI）、`opencode`（OpenCode CLI）、`gemini`（Gemini CLI）、`gh`（GitHub CLI）
-
-### 常用命令
-
-```bash
-# 1. 安装工作区依赖
-bun install
-
-# 2. 运行全部单元测试、驱动解析、SQLite/FTS5、Watchdog、E2E 内核与 API 测试
-bun test
-
-# 3. 全工作区 TypeScript 严格类型检查
-bun run typecheck
-
-# 4. 运行首次启动 CLI 环境扫描与控制面大模型配置（也可启动后直接在 Web 向导中配置）
-bun run setup
-
-# 5. 构建生产环境 Web 看板静态产物至 packages/web/dist
-bun run build
-
-# 6. 一键启动守护进程 (http://localhost:4318) 与 Vite 看板 (http://localhost:5173)
-bun run dev
-```
-
-也可单独启动前后端：
-```bash
-bun run dev:server   # 监听 4318 端口的 Hono 守护进程 (--watch)
-bun run dev:web      # 监听 5173 端口的 Vite 开发服务器（自动代理 /api -> 4318）
-```
-
-> **首次运行向导与自举提示**：首次启动打开看板时，系统会自动扫描本机 CLI（`claude`、`codex`、`opencode`、`gh`、`git`、`bun`）并弹出配置向导帮助你选择控制面 LLM；对任意仓库派发 `git worktree` 任务前，请确保该仓库已有至少一次初始 `git commit`（`HEAD`）。完整操作手册见 [USAGE.zh-CN.md](./USAGE.zh-CN.md)。
-
----
-
-## 环境变量（可选）
-
-未配置任何外部 API Key 时，控制面默认启用内置的 `HeuristicControlLLM` 本地启发式评估器，开箱即可跑通完整编排流程。模板见 [.env.example](./.env.example)。
+无需配置任何环境变量即可启动——所有模型配置与密钥均可在 Web「大模型与角色」Studio 中可视化管理并掩码持久化于本地 SQLite，未配置外部模型时自动使用离线零消耗的 `HeuristicControlLLM`。模板见 [.env.example](./.env.example)。
 
 | 环境变量 | 说明 |
 | :--- | :--- |
-| `DEEPSEEK_API_KEY` | 启用 OpenAI 兼容控制面模型，默认接入 `https://api.deepseek.com/v1` 与 `deepseek-chat`。 |
-| `OPENAI_API_KEY` | 启用 OpenAI 兼容控制面模型，默认接入 `https://api.openai.com/v1` 与 `gpt-4o-mini`。 |
-| `SUPER_WORK_LLM_API_KEY` / `_BASE_URL` / `_MODEL` | 自定义 OpenAI 兼容控制面接口密钥、地址与模型名称。 |
-| `SUPER_WORK_ENABLE_CLI_LLM=1` | 在无 API Key 时允许控制面降级调用无工具模式的本地 `claude -p --tools ""`。 |
-| `SUPER_WORK_DATA_DIR` | 运行时 `super-work.db`、Spill 产物与 `worktrees/` 存储目录（默认 `./.super-work`）。 |
-| `SUPER_WORK_TOKEN` | 可选 Bearer / URL Query 鉴权令牌；配置后保护所有 `/api/*` REST、MCP 与 SSE 接口（HMAC 验签的 `/api/webhooks/*` 除外）。 |
-| `SUPER_WORK_ACTION_SECRET` | 用于签名移动端一键审批卡片（`/api/webhooks/action`）并校验 ChatOps 回调（`X-Super-Work-Signature`）的 HMAC 密钥。 |
-| `GITHUB_WEBHOOK_SECRET` | 用于校验 GitHub 入站 Webhook（`POST /api/webhooks/github`，`X-Hub-Signature-256`）的 HMAC 密钥。 |
-| `PORT` | 守护进程 HTTP/SSE 监听端口（默认 `4318`）。 |
-| `HOST` | 守护进程监听地址（默认 `127.0.0.1`；绑定非回环地址强制校验 `SUPER_WORK_TOKEN`）。 |
+| `DEEPSEEK_API_KEY` | 自动注入 DeepSeek 控制面配置（默认 `https://api.deepseek.com/v1` · `deepseek-chat`）。 |
+| `OPENAI_API_KEY` | 自动注入 OpenAI 控制面配置（默认 `https://api.openai.com/v1` · `gpt-4o-mini`）。 |
+| `SUPER_WORK_LLM_API_KEY` / `_BASE_URL` / `_MODEL` | 自定义 OpenAI 兼容控制面接口密钥、地址与模型覆盖。 |
+| `SUPER_WORK_ENABLE_CLI_LLM=1` | 无 API Key 时允许控制面降级复用无工具受限模式的本机 `claude -p --tools ""`。 |
+| `SUPER_WORK_DATA_DIR` | `super-work.db`、Spill 产物与 `worktrees/` 存储目录（默认 `./.super-work`）。 |
+| `PORT` / `HOST` | 守护进程监听端口与地址（默认 `127.0.0.1:4318`；绑定非回环地址强制要求 `SUPER_WORK_TOKEN`）。 |
+| `SUPER_WORK_TOKEN` | 保护所有 `/api/*` REST、MCP 与 SSE 端点的 Bearer / Query 鉴权令牌。 |
+| `GITHUB_WEBHOOK_SECRET` / `SUPER_WORK_ACTION_SECRET` | `POST /api/webhooks/github` 入站验签与移动端一键审批卡片（`/api/webhooks/action`）签名密钥。 |
 
 ---
 
-## REST、MCP、Webhook 与 SSE 接口概览
+## REST 与 SSE 接口速览
 
-- `GET /api/health` — 服务健康状态、当前控制面 LLM 提供者、可用 Worker 引擎（`claude`、`codex`、`opencode`、`gemini`、`mock`）、`selfReload` 状态及实时 `activePreviews` 计数
-- `POST /api/intake/preview`、`POST /api/intake` — 智能统一需求直投预演与自动路由派单（`single_ticket` | `epic_dag` | `goal_campaign`）
-- `POST /api/chief/ask` — 基于实时态势、记忆召回与只读代码探针的幕僚长只读问答，附带需人工点击确认的 `ChiefActionSuggestion[]`
-- `GET /api/repos`、`POST /api/repos`、`PATCH /api/repos/:id`、`GET /api/repos/:id/blueprints`、`POST /api/repos/:id/contract/sync`、`POST /api/repos/:id/contract/export`、`GET /api/repos/:id/knowledge-bundle`、`POST /api/repos/:id/knowledge-bundle/import` — 注册仓库、配置 `sandboxMode`、`deliveryGatePolicy`（`always_auto`/`risk_gated`/`always_signoff`）、`riskThreshold`、`sensitivePaths`，查询 **Task Blueprints**、双向同步 `super-work.json` 并导出/导入知识包
-- `GET /api/repos/:id/playbook`、`POST /api/repos/:id/playbook`、`PATCH /api/playbook/:entryId`、`DELETE /api/playbook/:entryId`、`POST /api/repos/:id/playbook/prune` — 管理并一键清理陈旧/失效的经验库（Playbook）规则
-- `GET /api/repos/:id/casebook?q=...`、`DELETE /api/casebook/:entryId` — 检索已交付历史判例（Casebook）与回滚警示记录
-- `GET /api/routines`、`POST /api/routines`、`PATCH /api/routines/:id`、`DELETE /api/routines/:id`、`POST /api/routines/:id/run`、`GET /api/routines/runs` — 管理定时自治巡检例程（Probe-to-Promote）与运行健康时间线
-- `GET /api/campaigns`、`POST /api/campaigns`、`GET /api/campaigns/:id`、`POST /api/campaigns/:id/start`、`POST /api/campaigns/:id/pause`、`POST /api/campaigns/:id/deliver`、`DELETE /api/campaigns/:id` — 创建并操控指标驱动 **目标战役（Goal Campaigns）**，追踪波次收益与单调回退
-- `GET /api/metrics?repoId=...` — 获取今日预算消耗、交付成功率、各引擎效能统计及 `engineMatrix` 分类矩阵评分
-- `POST /api/repos/:id/impact` — 基于零依赖符号图分析改动文件的 1-hop 直接影响与 2+ hop 传递影响面
-- `POST /api/specs/clarify` — 按需执行 Pre-Flight Spec Studio 预勘探（含只读 `ReadOnlyRepoProber` 探针轨迹），输出推荐派单模式、模板、授权路径、验收标准、影响面提示与选择题澄清清单
-- `POST /api/triggers` — 接入外部或模拟事件触发器（`github_issue`、`github_pr`、`github_ci`、`cli`）
-- `GET /api/tickets`、`POST /api/tickets`、`GET /api/tickets/:id`、`POST /api/tickets/:id/message`、`POST /api/tickets/:id/steer`、`POST /api/tickets/:id/cancel`、`POST /api/tickets/:id/cleanup-worktree`、`POST /api/tickets/:id/deliver`、`POST /api/tickets/:id/revert`、`PATCH /api/tickets/:id/dag-node` — 派单（支持 `--blueprint`、`--gate-policy`、`--tdd`、`--pause-before-run`、`--engine auto`）、回合中零惩罚 **Live Steer**、DAG 节点断点与热编辑、Stage Span 与 `StageToolProfile` 画像、风险评分与安全 `git revert`
-- `GET /api/evals/cases`、`POST /api/evals/cases/from-ticket/:ticketId`、`DELETE /api/evals/cases/:id`、`GET /api/evals/runs`、`POST /api/evals/run` — 沉淀已交付工单为 **黄金评测用例** 并在独立 `eval-worktrees/` 内进行多引擎隔离回放对比
-- `GET /api/tickets/:id/review-comments`、`POST /api/tickets/:id/review-comments`、`PATCH /api/review-comments/:commentId` — 查询行级 Review 批注、提交 Review Basket（`comment_only` / `request_changes`）并更新解决状态
-- `GET /api/tickets/:id/checkpoints`、`GET /api/tickets/:id/checkpoints/:cpId/diff`、`POST /api/tickets/:id/checkpoints/:cpId/restore` — 查看隐藏 Git Ref 检查点快照、增量 diff 与原地 Re-steer / Fork 时间旅行
-- `POST /api/epics/preview`、`POST /api/epics` — 预览并派发复杂需求 Epic 子任务 DAG 拓扑
-- `GET /api/previews`、`POST /api/previews`、`POST /api/previews/:id/renew`、`DELETE /api/previews/:id` — 启动、查看、续期（+20m TTL）与停止受控 Live Worktree 实时预览实例
-- `GET /api/worktrees`、`POST /api/worktrees/gc` — 查看 Worktree 运行池与一键回收终态/孤儿工作树目录
-- `GET /api/system/doctor`、`POST /api/system/doctor/fix`、`GET /api/system/backups`、`POST /api/system/backups`、`POST /api/system/backups/:id/restore`、`GET /api/system/service`、`GET /api/system/reload`、`POST /api/system/reload` — 运行 System Doctor 诊断清理、`VACUUM INTO` 热备份、带安全快照的原子恢复、OS 守护服务查询及自举金丝雀热重载
-- `GET /api/inbox`、`POST /api/inbox/:id/resolve`、`POST /api/inbox/batch-resolve` — 审批、驳回或低风险批量处理 Attention Inbox 待决项（含 `campaign_paused`、高风险 `outbox_signoff`、3-Way `merge_conflict`、`clarification_request`、DAG 执行断点与 `SPEC_TEST_CHALLENGE`）
-- `GET /api/tickets/:id/recall`、`GET /api/memory/search?q=...`、`GET /api/artifacts/:id`、`GET /api/artifacts/:id/raw` — 获取 `Chain of Recall` 全链路、FTS5 记忆检索、Spill 文本产物及原生 PNG `screenshot` / `visual_diff` 视觉对比读取
-- `GET /api/outbox`、`GET /api/merge-train`、`POST /api/merge-train/flush`、`POST /api/merge-train/:id/eject` — 查询 `Transactional Outbox` 外发队列，管理并行投机合并列车与跨仓释放屏障
-- `GET /api/mcp`、`POST /api/mcp` — 原生 MCP JSON-RPC 2.0 Streamable HTTP 端点（`v1.7.0`，配合 `super-work mcp` stdio 桥接；提供 **27 个工具** 与 3 个资源）
-- `GET /api/playbooks/hygiene`、`POST /api/playbooks/hygiene/prune` — 审计 Playbook 噪声（一次性审批/工单运行笔记），默认禁用、可选删除噪声规则；支持 `dryRun`
-- `POST /api/webhooks/github`、`GET /api/webhooks/action`、`POST /api/webhooks/action`、`POST /api/webhooks/chatops` — HMAC 验签 GitHub 入站事件、防爬虫误触的签名移动端审批卡片页及 ChatOps 交互回调
-- `GET /api/setup/status`、`POST /api/setup/scan`、`POST /api/setup/test-llm`、`POST /api/setup/configure`、`POST /api/notifications/test` — CLI 扫描、控制面大模型、Webhook 安全密钥及 macOS / Webhook 主动通知配置与测试
-- `GET /api/events?repoId=...&ticketId=...` — 实时 Server-Sent Events（SSE）事件流（支持按仓库或含 Epic 子任务的 Ticket 精准过滤，含 `campaign_updated`、`merge_train_updated`、`lifecycle_hook_executed`、`preview_updated`、`review_comment_updated` 与 `eval_run_updated`）
+| 领域模块 | 核心端点 |
+| :--- | :--- |
+| **智能分诊与幕僚** | `POST /api/intake`、`POST /api/intake/preview`、`POST /api/specs/clarify`、`POST /api/chief/ask`、`POST /api/triggers` |
+| **工单与并发编排** | `GET/POST /api/tickets`、`GET /api/tickets/:id`、`POST /api/tickets/:id/{steer,message,deliver,revert,cancel}`、`POST /api/epics{/preview}` |
+| **审查、快照与预览** | `GET/POST /api/tickets/:id/review-comments`、`GET /api/tickets/:id/checkpoints`、`POST /api/tickets/:id/checkpoints/:cpId/restore`、`GET/POST/DELETE /api/previews` |
+| **收件箱、发件箱与合并列车** | `GET /api/inbox`、`POST /api/inbox/:id/resolve`、`POST /api/inbox/batch-resolve`、`GET /api/outbox`、`GET /api/merge-train`、`POST /api/merge-train/{flush,:id/eject}` |
+| **里程碑、战役与巡航** | `GET/POST /api/milestones`、`POST /api/milestones/:id/{release,cancel}`、`GET/POST /api/campaigns`、`GET/POST /api/routines`、`POST /api/routines/:id/run` |
+| **仓库、记忆与评测** | `GET/POST /api/repos`、`POST /api/repos/detect`、`PATCH /api/repos/:id`、`POST /api/repos/:id/contract/{sync,export}`、`GET/POST /api/playbooks/hygiene{/prune}`、`GET /api/memory/search`、`GET/POST /api/evals/{cases,run}` |
+| **模型池、自检与遥测** | `GET /api/health`、`GET /api/setup/status`、`POST /api/setup/{quick-start,scan,configure,test-model,models}`、`GET/POST /api/system/{doctor,doctor/fix,engines,backups,reload}`、`GET /api/metrics`、`GET /api/digest` |
+| **实时流、MCP 与 Webhook** | `GET /api/events`（SSE + 按工单重放缓冲）、`GET/POST /api/mcp`（JSON-RPC 2.0）、`POST /api/webhooks/{github,chatops}`、`GET/POST /api/webhooks/action` |
 
-完整操作说明与工作流实战指南见 [USAGE.zh-CN.md](./USAGE.zh-CN.md)（英文版 [USAGE.md](./USAGE.md)）；架构设计与核心契约见 [ARCHITECTURE.zh-CN.md](./ARCHITECTURE.zh-CN.md)（英文版 [ARCHITECTURE.md](./ARCHITECTURE.md)）。
+---
+
+## 延伸文档
+
+- **完整操作与实战手册**：[USAGE.zh-CN.md](./USAGE.zh-CN.md) · [USAGE.md](./USAGE.md)
+- **架构设计、核心契约与版本演进志**：[ARCHITECTURE.zh-CN.md](./ARCHITECTURE.zh-CN.md) · [ARCHITECTURE.md](./ARCHITECTURE.md)

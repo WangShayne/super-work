@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" fill="none">
+  <defs>
+    <linearGradient id="sw-bg" x1="20" y1="12" x2="108" y2="116" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#171923" />
+      <stop offset="100%" stop-color="#090A0F" />
+    </linearGradient>
+    <linearGradient id="sw-border" x1="16" y1="8" x2="112" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#6366F1" />
+      <stop offset="55%" stop-color="#7C3AED" />
+      <stop offset="100%" stop-color="#4F46E5" />
+    </linearGradient>
+    <linearGradient id="sw-branch-l" x1="64" y1="102" x2="54" y2="30" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#4F46E5" />
+      <stop offset="55%" stop-color="#6366F1" />
+      <stop offset="100%" stop-color="#818CF8" />
+    </linearGradient>
+    <linearGradient id="sw-branch-r" x1="64" y1="102" x2="76" y2="30" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#5B21B6" />
+      <stop offset="50%" stop-color="#8B5CF6" />
+      <stop offset="100%" stop-color="#A78BFA" />
+    </linearGradient>
+    <linearGradient id="sw-spine" x1="64" y1="104" x2="64" y2="28" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#6366F1" />
+      <stop offset="55%" stop-color="#7C3AED" />
+      <stop offset="100%" stop-color="#6366F1" />
+    </linearGradient>
+    <radialGradient id="sw-emerald-glow" cx="64" cy="29" r="20" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#10B981" stop-opacity="0.55" />
+      <stop offset="60%" stop-color="#10B981" stop-opacity="0.18" />
+      <stop offset="100%" stop-color="#10B981" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+  <rect x="6" y="6" width="116" height="116" rx="30" fill="url(#sw-bg)" stroke="url(#sw-border)" stroke-width="3.5" />
+  <path d="M 64 100 C 56 86, 36 78, 36 62 C 36 47, 52 38, 64 29" stroke="url(#sw-branch-l)" stroke-width="11" stroke-linecap="round" />
+  <path d="M 64 100 C 72 86, 92 78, 92 62 C 92 47, 76 38, 64 29" stroke="url(#sw-branch-r)" stroke-width="11" stroke-linecap="round" />
+  <path d="M 64 102 C 64 89, 77 83, 77 71 C 77 58, 51 56, 51 43 C 51 35, 58 32, 64 29" stroke="url(#sw-spine)" stroke-width="11.5" stroke-linecap="round" />
+  <rect x="58" y="95" width="12" height="9" rx="3" fill="#6366F1" />
+  <circle cx="64" cy="29" r="20" fill="url(#sw-emerald-glow)" />
+  <circle cx="64" cy="29" r="11.5" fill="#0B1312" stroke="#10B981" stroke-width="3" />
+  <circle cx="64" cy="29" r="6.5" fill="#10B981" />
+</svg>

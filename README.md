@@ -1,237 +1,262 @@
-[English](./README.md) | [简体中文](./README.zh-CN.md)
+<p align="center">
+  <img src="./assets/logo.png" alt="super-work logo" width="120" height="120" />
+</p>
 
-# super-work
+<h1 align="center">super-work</h1>
 
-An asynchronous autonomous development workflow orchestration kernel and local decision command center built in TypeScript / Bun Monorepo, inspired by DeepSeek Harness team's design essay *"Exploring Super-agent Design: Towards a More Autonomous Agent System"*.
+<p align="center">
+  <strong>Autonomous Software Engineering Orchestrator &amp; Local Super-Agent Command Center</strong>
+</p>
 
-> **Core Philosophy**: The bottleneck in AI-assisted engineering is **human attention bandwidth**, not single-turn model intelligence. `super-work` shifts developers from manually micromanaging 3–5 interactive coding sessions to acting as **reviewers and boundary authorizers**—keeping a lightweight control plane always on while dispatching isolated coding workers behind immutable guardrails.
+<p align="center">
+  <img src="https://img.shields.io/badge/version-v1.8.3-6366F1?style=flat-square" alt="Version v1.8.3" />
+  <img src="https://img.shields.io/badge/runtime-Bun_%3E%3D_1.3-18181B?style=flat-square&logo=bun" alt="Bun >= 1.3" />
+  <img src="https://img.shields.io/badge/TypeScript-Strict-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript Strict" />
+  <img src="https://img.shields.io/badge/MCP-27_Tools-10B981?style=flat-square" alt="MCP 27 Tools" />
+  <img src="https://img.shields.io/badge/Harness-CLI_%2B_API-8B5CF6?style=flat-square" alt="Dual-Harness CLI + API" />
+</p>
+
+<p align="center">
+  <strong>English</strong> · <a href="./README.zh-CN.md">简体中文</a> · <a href="#60-second-quick-start">Quick Start</a> · <a href="./USAGE.md">Usage Guide</a> · <a href="./ARCHITECTURE.md">Architecture</a>
+</p>
 
 ---
 
-## v1.8.3 — Cancellable Starter Chips, SSE Replay Buffer & Visual Live Execution Feed
+## Why `super-work`?
 
-- **Starter chips are toggles**: Fix a bug / Build a feature / Safe refactor / Cut a release stay visible, show `aria-pressed` + an `×` when active, switch cleanly between each other, and an explicit **Clear** pill resets text, release mode, version and milestone title (custom text and custom Options are preserved).
-- **Readable live execution**: SSE worker/stage/gate events are parsed into structured entries (`Bash · bun run typecheck`, `Read · packages/web/src/App.tsx`, gate pass/fail, watchdog and delivery alerts) instead of raw JSON. Home mission rows show a ticking timer, the latest step, and an inline **Live (n)** console; the drawer's Stream tab gets a full feed with filters, auto-scroll and a live SSE indicator (reconstructed from stage history when no live events exist).
-- **`/api/events` replay buffer**: the server keeps the last 60 meaningful events for each of the 40 most recent tickets and replays them (honoring `repoId` / `ticketId` filters) right after `connected`, so a page refresh no longer loses the live trail. The web client de-duplicates replays and debounces refreshes by 100 ms.
+> **The bottleneck in AI-assisted engineering is no longer single-turn model intelligence — it is human attention bandwidth.**
 
-## v1.8.2 — Role-First Guided Model Studio: Dual-Harness Clarity, Smart Recipes & Anti-Pattern Advisor
+Inspired by the DeepSeek Harness team's essay *"Exploring Super-agent Design: Towards a More Autonomous Agent System"*, **`super-work`** shifts developers from babysitting 3–5 interactive terminal tabs to acting as **boundary setters and outcome reviewers**. A lightweight always-on control plane routes work, enforces OS-sandboxed `git worktree` boundaries, runs deterministic verification gates, conducts heterogeneous cross-model reviews, and interrupts you **only** when a decision genuinely needs your judgment.
 
-v1.8.2 makes **Models & Roles** self-explanatory. super-work is a **Dual-Harness** system: one **Outer Governance Harness** (isolated worktree, mandate, gates, review, delivery) wraps pluggable **Inner Harnesses** — the **Native CLI Harness** (`claude` / `codex` / `opencode` / `gemini`: reuses your local subscription and co-trained coding tools) and the **Built-in API Harness** (DeepSeek / OpenAI- / Anthropic-compatible / Ollama: direct HTTP plus a lightweight sandboxed loop; pay-as-you-go or local).
+| Dimension | Multi-Tab Agent Babysitting | `super-work` Governed Autonomy |
+| :--- | :--- | :--- |
+| **Workspace safety** | Agents edit your working tree directly and collide | Every ticket runs in an isolated `git worktree` + macOS Seatbelt / Linux `bwrap` sandbox |
+| **Model & cost strategy** | Locked into one vendor CLI or one API tool | **Dual-Harness Model Pool**: mix subscription CLIs (`claude`, `codex`, `opencode`, `gemini`) and HTTP APIs (`DeepSeek`, `OpenAI`, `Anthropic`, `Ollama`) per role |
+| **Quality assurance** | Self-reported "tests pass" claims | Deterministic host gates (impact-scoped tests, `$PORT` runtime smoke, CDP headless browser + pixel visual diff) + blind cross-model review |
+| **Human attention** | Constant prompt babysitting and raw log scrolling | Structured live execution feed + high-signal **Needs You** inbox (`Approve` · `Answer` · `Unblock`) |
+| **Delivery & rollback** | Manual branch juggling or risky direct pushes | Risk-scored **Transactional Outbox**, **Speculative Merge Train**, 1-click lossless **Milestone Squash/Tag/Push**, and **1-Click Safe Revert** |
 
-- **Role-First Studio**: the three role cards (Control / Implement / Cross-Review, each with a plain-language duty and a recommended track) come first; the model pool follows, with *Native CLI* / *Built-in API* track labels, per-card role badges (Control / Implement / Review / Auto candidate) and human-readable status text instead of raw login strings.
-- **1-click Smart Recipes**: built live from your *ready* profiles — Dual-CLI heterogeneous review, API control + subscription CLI coding, Pure API, Smart auto-routing — applied to all three roles in a single request.
-- **Anti-Pattern Advisor**: flags same-model self-review, heuristic-only control while models are ready, an empty Auto pool and unfinished custom profiles, with 1-click fixes.
-- **Guided add-form**: templates grouped into the two tracks, model-name suggestions, required markers on API fields (keyless hint for Ollama / localhost), and the optional CLI relay URL / key collapsed behind an *Advanced* disclosure.
+---
 
-## v1.8.1 — Unified Model Pool: CLI & API Peers, Role Binding (Models & Roles Studio)
+## Architecture — The Dual-Harness Model
 
-v1.8.1 lets you pick **any model you like** for **any role**. Local CLIs (`claude` / `codex` / `opencode` / `gemini`) and API models (DeepSeek / OpenAI-compatible / Anthropic-compatible / Ollama) are equal peer **`ModelProfile`s** in one **Model Pool**, bound to the *Control*, *Implement* and *Review* roles:
+`super-work` separates **deterministic outer governance** from **pluggable inner coding harnesses**, giving you deterministic safety ceilings without sacrificing native CLI coding quality or flat-rate subscription economics.
 
-- **Models & Roles Studio** (Settings → *Models & Roles*, and the Setup Wizard's *Customize*; one `ModelRegistryStudio` component, no duplicated forms). **Stage ① Model Pool**: peer cards for every CLI and API profile with a ready badge, a `+ Relay` badge for CLIs with a custom Base URL / key, a per-card **Auto Pool** switch, a 1-click **Test** (`POST /api/setup/test-model`), inline **Edit** and a 2-step inline **Delete** (custom profiles only), plus **Rescan CLI** and **+ Add Model** (8 equal templates: 4 API protocols + 4 CLI engines). **Stage ② Role Binding**: three selectors (Control / Implement / Cross-Review) that list only *ready* profiles (plus *Heuristic* for Control and *Auto* for Implement / Review) and save immediately. **One-click model discovery (v1.8.2)**: the Add/Edit form's *Fetch Models* button probes the provider's live `/models` / `/model` endpoint (`POST /api/setup/models`) so you pick from real model IDs instead of typing them; it works for API profiles and CLI custom relays.
-- **Delete API**: `POST /api/setup/configure` accepts `deleteModelProfileIds: string[]`. Custom profiles are removed; built-in CLI profiles (`builtinCli`) are protected (HTTP 400). Role bindings (and repo-level `implementModelId` / `reviewModelId`) that pointed at a deleted profile fall back to `heuristic` / `auto`.
-- **Model picker**: Home *Options → Model* and the DeepDive steer bar pick from ready profiles and send `preferredModelId`.
+```mermaid
+flowchart TB
+  subgraph Surfaces["Entry Surfaces"]
+    UI["Web Command Center (React + Tailwind v4)"]
+    CLI["super-work CLI (super-work do)"]
+    MCP["Zero-SDK MCP Server (27 Tools · HTTP + stdio)"]
+    WH["Signed Webhooks (GitHub · ChatOps · Mobile Cards)"]
+  end
 
-Foundations introduced earlier in v1.8.1:
+  subgraph Outer["Outer Governance Harness (@super-work/core)"]
+    Router["Smart Intake Router + Read-Only Repo Probes"]
+    Sandbox["Isolated Git Worktree + Immutable Mandate + OS Sandbox"]
+    Gates["Deterministic Gates (Impact Tests · Smoke · CDP Visual Diff)"]
+    Review["Heterogeneous Cross-Review + Risk Scoring (0-100)"]
+    Delivery["Transactional Outbox · Merge Train · Milestone Release · Boot Canary"]
+  end
 
-- **`ApiWorkerDriver` (`api` engine)**: a native agent worker over DeepSeek, OpenAI-compatible (OpenAI, OpenRouter, OneAPI, SiliconFlow, Qwen, Ollama) and Anthropic-compatible APIs. Its tool loop is jailed to the ticket worktree.
-- **CLI custom relays**: each of `claude` / `codex` / `opencode` / `gemini` accepts an optional `baseUrl` + `apiKey` that is injected per invocation (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `GOOGLE_GEMINI_BASE_URL`) without touching your local CLI config.
-- **`POST /api/setup/test-worker`**: one-call connectivity test for an API preset or a CLI relay, returning `{ ok, latencyMs, message }`. Saved keys are only ever shown masked.
-- **Heterogeneous pairing**: Implement and Review can use different profiles (e.g. Claude Code implements, a DeepSeek API profile reviews); saved keys are only shown masked, with clear-key support.
-- **`syncRepos: false`**: `POST /api/setup/configure` can now save credentials or notifications without overwriting a repo's `preferredImplementEngine` (so `auto` is preserved).
+  subgraph Inner["Pluggable Inner Harnesses (@super-work/drivers)"]
+    TrackCLI["Native CLI Harness: Claude Code · Codex · OpenCode · Gemini CLI"]
+    TrackAPI["Built-in API Harness: DeepSeek · OpenAI · Anthropic · Local Ollama"]
+  end
 
-## v1.8.0 — Super-Agent First: The Great Simplification (Consumer Surface, Pro Engine)
-
-v1.8.0 turns `super-work` into a **consumer surface on top of an unchanged professional engine**: you state a requirement, glance at what needs you, and approve. Every advanced capability below still exists — it simply moved into a collapsible **Engine Room**.
-
-- **Single-bar HeaderBar**: `v1.8.2` badge + Live Health Dot · pill tabs (Home / History / Settings) · `⌘K` command palette / `ZH-EN` toggle (plus a compact repo pill on non-Home tabs). The repo switcher and the **Guarded / Smart / Autonomous** autonomy dial live in the Hero Composer's integrated context toolbar, right next to the requirement you are typing.
-- **3 spaces**:
-  - **Home** — the **Hero Composer** (implicit smart intake, optional `scope:<glob>` tokens, collapsible *Advanced ▾*), **Needs You** (three human verbs: **Approve / Answer / Unblock**) and **Live Work** cards.
-  - **History** — Timeline & Releases, plus the Board / DAG views.
-  - **Settings** — 5-item *Essentials* plus a collapsible **Developer / Engine Room** housing Contract / Gates, Playbook / Casebook, Routines / Campaigns, Worktrees / Merge Train / Simulate, and Flight Recorder / Doctor / Evals.
-- **Streamlined DeepDiveDrawer**: *Overview & Changes* + *More ▾*, with a permanent bottom **Steer** input bar.
-- **1-click Zero-Config SetupWizard** (`POST /api/setup/quick-start`) picks the best authenticated CLI (`claude` → `codex` → heuristic) as the control-plane brain, and **smart repo auto-detect** (`POST /api/repos/detect`, read-only) infers name, base branch, stack (Bun / Node / Rust / Python / Go) and verification commands.
-- **`AutonomyPreset`** (`guarded` / `smart` / `autonomous` — *Guarded / Smart / Autonomous*, i.e. how much authority you delegate to the Super-Agent) is one unified setting that expands into mode, delivery-gate policy, sandbox and verification defaults. It expands only on first or forced sync; explicit `PATCH /api/repos/:id` overrides are never overwritten by automatic re-syncs. The legacy names `copilot` / `standard` / `autopilot` are still accepted everywhere (REST, `.super-work.json`, stored repos) and map to `guarded` / `smart` / `autonomous`.
-- **Primary CLI verb**: `super-work do "<requirement>"` with `--preview`, `--wait` and `--milestone <vX.Y.Z>`.
-
-### 60-second quick start
-
-```bash
-bun install && bun run build
-bun run dev:server                                  # daemon on http://localhost:4318
-# Open the Web UI: the SetupWizard configures itself in one click (POST /api/setup/quick-start).
-# Add your repo — name, base branch and verification commands are auto-detected (POST /api/repos/detect).
-super-work do "Add a /healthz endpoint scope:packages/server/**"            # dispatch
-super-work do "Add a /healthz endpoint" --preview                           # plan only, no ticket
-super-work do "Add a /healthz endpoint" --wait                              # block until finished
-super-work do "Add a /healthz endpoint" --milestone v1.9.0                  # attach to a milestone
+  Surfaces --> Router
+  Router --> Sandbox
+  Sandbox --> TrackCLI
+  Sandbox --> TrackAPI
+  TrackCLI --> Gates
+  TrackAPI --> Gates
+  Gates --> Review
+  Review --> Delivery
 ```
 
 ---
 
-## Key Capabilities
+## 60-Second Quick Start
 
-- **Router + Isolated Worker Architecture**:
-  - **Control Plane (`EventIntakeRouter` & `MasterAssessor`)**: Triages incoming triggers (`web`, `github_issue`, `github_pr`, `github_ci`, `cli`) with a **Two-Layer Read-Only Control Plane Probe (`ReadOnlyRepoProber`)**—combining `<50ms` deterministic symbol/slice/git pre-probes with a bounded 2-round read-only tool loop (`search_symbols`, `read_file_slice`, `grep_literals`, `git_recent_commits`, strictly jailed against `.env*` and `forbiddenPaths`)—offers an on-demand **Pre-Flight Spec Studio (`POST /api/specs/clarify` & `--clarify`)** enriched with **1-hop / 2+ hop Symbol Impact Radius**, injects repo conventions (`super-work.json`), **decay-governed Playbook guardrails** (with hit tracking, stale/zombie/suspect classification & pruning), and **hybrid-recalled Episodic Casebook** (with revert-warning flipping), orchestrates **Cross-Repo Epics & explicit `--depends-on` chains** (with **1-hop automatic semantic dependency serialization**), executes **Adaptive Engine Bandit Routing (`--engine auto`)** with **Dual Auto-Arena escalation guardrails**, **Scheduled Probe-to-Promote Routines**, **Red-Green Spec-Test Guard (`--tdd` & single-rewind `SPEC_TEST_CHALLENGE`)**, **Interactive DAG Studio & Live Node Surgery (`--pause-before-run`)**, **Mid-Turn Live Steer (`POST /api/tickets/:id/steer` & `super-work steer`)**, **Worker `[ASK_HUMAN]` Structured Clarification** (capped at 1 pause per ticket, auto-falling back to `recommendedOption` in `auto` mode), **Zero-LLM `StageToolProfile` Telemetry**, **Worktree Stage Checkpoints & Time-Travel Re-steer**, **same-branch PR review/CI auto-followup loops**, and **lossless crash/restart recovery (`recoverInterruptedRuns`)**.
-  - **Execution Plane (`WorkerDriver` & `GitWorktreeProvider`)**: Schedules external coding agents (`ClaudeCodeDriver`, `CodexDriver`, `OpenCodeDriver`, `GeminiCliDriver`, plus `MockWorkerDriver`) inside isolated `git worktree` branches (with automatic monorepo workspace `packages/*` symlink mirroring) wrapped by an **OS Native Sandbox (`sandboxMode`: `"balanced"` | `"strict"` | `"off"` via macOS Seatbelt / Linux `bwrap`—preserving `localhost:*` loopback in `balanced` while locking internet egress and secrets—plus read-only `readOnlyPaths` spec-test lock)**, with **fresh-worktree `setupCommands` warmup hooks**, native session resume, **structured adversarial cross-engine reviews**, **Ephemeral Runtime Smoke Gate (`smokeCheck`) + Zero-Dep CDP Headless Browser Gate (`smokeCheck.browserCheck` with interactive `steps` and zero-dep PNG Pixel Visual Diff `visualDiffMode`)**, hidden-ref worktree stage checkpoints, and automatic/one-click worktree GC.
-- **Native MCP Server & Bidirectional Webhooks**:
-  - **`@modelcontextprotocol`-free Native MCP Server (`v1.7.0`)**: Exposes **27 tools** (`manage_playbook_hygiene`, `manage_engine_health`, `dispatch_requirement`, `manage_self_host`, `clarify_spec`, `dispatch_ticket`, `dispatch_epic`, `list_tickets`, `get_ticket_detail`, `list_inbox`, `resolve_inbox`, `batch_resolve_inbox`, `steer_ticket`, `ask_chief`, `manage_evals`, `manage_campaigns`, `manage_merge_train`, `search_memory_and_casebook`, `trigger_routine`, `manage_preview`, `analyze_impact`, `manage_checkpoints`, `mutate_dag_node`, `submit_review_comments`, `system_doctor`, `manage_milestones`, `get_run_digest`) & **3 resources** (`superwork://health`, `superwork://repos`, `superwork://inbox/pending`) over Streamable HTTP (`GET/POST /api/mcp`) and the `super-work mcp` stdio bridge (auto-spawning the local daemon when offline).
-  - **Signed Webhooks & Mobile Action Cards**: Accepts HMAC-verified inbound GitHub webhooks (`POST /api/webhooks/github` via `X-Hub-Signature-256`) and ChatOps callbacks (`POST /api/webhooks/chatops`), dispatches adaptive Feishu/Slack/Discord/JSON notifications with **signed crawler-safe remote approval links (`GET/POST /api/webhooks/action`)**, plus native macOS desktop notifications.
-- **Resilience & Watchdog 2.0 Observability (`v1.7.0` Wave 2)**:
-  - **Tiered Engine Circuit Breaker**: transient failures cool down for 15 min, persistent deterministic failures (`model_unsupported`, `tier_ineligible`, `auth_invalid`, `quota_exhausted`) for 24 h. The Web Doctor panel shows a *Persistent trip — manual reset/probe required* badge versus a temporary-cooldown badge. Alongside it ship the Milestone Boot Canary, Safe-Refactor concurrent scheduling with auto RefactorGuard, and Adaptive Watchdog 2.0 (Wave 1).
-  - **Watchdog 2.0 & Flake Retry KPIs**: `RunDigestReport.resilience` gains optional `watchdogExtensions` (`watchdog_extended`) and `flakeRetries` (`flake_retried`) counters, populated only when non-zero and rendered in the bilingual digest Markdown and the Flight Recorder panel.
-  - **`@super-work/core/types` subpath**: type-only export (`./src/types.ts`); `@super-work/web` lists `@super-work/core` as a `workspace:*` devDependency so no core runtime code reaches the Vite bundle.
-  - MCP `1.7.0` keeps **27 tools**; CLI banner `v1.7.0`; Web badge `v1.7`.
-- **Playbook Hygiene, FlightRecorder Resilience/Reuse KPIs & Optional GitHub Release (`v1.6.0` Wave 2)**:
-  - **Playbook anti-pollution**: `evaluatePlaybookRuleHygiene` / `auditPlaybookEntries` flag one-off approval, continuation and ticket-run notes (e.g. `human approved continuation`, `approve local_merge`, ticket ids such as `tkt_…`) while never flagging `repo_contract` or pinned rules. Inbox notes are saved to the Playbook **only on explicit opt-in** (`saveToPlaybook: true`) and are still hygiene-checked; a noisy note is skipped without failing the resolution.
-  - **Governance across every surface**: `GET /api/playbooks/hygiene[?repoId=]`, `POST /api/playbooks/hygiene/prune` (`{ repoId?, dryRun?, mode?: "disable" | "delete" }`, default `disable`), CLI `super-work playbook audit` / `playbook prune [--delete]` / `doctor --prune-playbooks`, MCP `manage_playbook_hygiene`, a System Doctor `playbook_hygiene` check and a Web Doctor card with a one-click **Disable Noisy Rules** button.
-  - **Flight Recorder KPIs**: `RunDigestReport.gateReuse` (`gate_reused` events and saved time) and `resilience` (`engineTrips`, `spilloverQuarantines`), shown in the digest Markdown and the Web Flight Recorder panel (combined gate savings with breakdown).
-  - **Engine circuit breaker**: `free usage limit` / `subscribe to opencode` errors are classified as deterministic `quota_exhausted`.
-  - **Optional GitHub Release**: `createGithubRelease` (REST `POST /api/milestones/:id/release`, CLI `super-work milestone release <id> --tag --push --github-release`, MCP `manage_milestones`, Web checkbox). It requires a target version plus both tag and push, and an authenticated `gh`; all checks run **before** any git mutation. Default is off.
-  - MCP `1.6.0` exposes **27 tools** (adds `manage_playbook_hygiene`); Web badge `v1.6`.
-- **Milestone Staging Branch, Clean Squash Release & Archive UI (`v1.5.0`, Pillars A + B + C + D)**:
-  - **Pillar A — Engine Circuit Breaker** (`engine_health`, `GET/POST /api/system/engines`, MCP `manage_engine_health`), **Pillar B — Spillover Shield**, **Pillar C — 2nd-gen Impact Gate** and **Pillar D — `milestone_branch` single-signoff staging** (below).
-  - **`integrationMode: "milestone_branch"`** (`POST /api/milestones`, `super-work milestone create --integration milestone_branch [--route auto|single_ticket]`, MCP `manage_milestones`): items rebase and auto-merge onto `super-work/milestone/<id>` with **zero mid-flight signoffs** (Boot Canary only fires for merges into the base branch). When all items are delivered the milestone becomes `ready_to_release` with ONE `milestone_ready` Inbox card; releasing merges the staging branch into the base branch (`--no-ff`) and deletes it.
-  - **Optional lossless squash** (`squashReleaseCommit`, `releaseCommitMessage`, CLI `--squash`): collapses the merge plus version bump into one release commit and verifies tree parity (`HEAD^{tree}` unchanged) or aborts. Tag and push stay opt-in.
-  - Web: `v1.5` badge, integration-mode and route selectors, staging-branch badge, squash opt-in and a collapsible **Released History** archive (version, release commit SHA, EN/ZH notes). MCP `1.5.0` exposes **26 tools**.
-- **Milestone Backlog Waves & Controlled Release Synthesizer (`v1.4.0`, Pillars A + B + C + D)**:
-  - **Pillar A — Impact-Scoped Incremental Verification Gate**: the verification gate runs only the packages impacted by a ticket's diff (with time-saved telemetry), keeping delivery fast on monorepos.
-  - **Pillar B — Milestones (`/api/milestones`, `super-work milestone`, MCP `manage_milestones`)**: submit a multi-requirement backlog; each requirement is routed by Smart Intake, `planMilestoneWaves` assigns topological waves (non-overlapping `allowedPaths` share a wave, overlapping ones are serialized with cross-wave `dependsOn`). When every item is delivered the milestone becomes `ready_to_release`, bilingual (zh/en) Release Notes are synthesized from HandoverDigests, risk scores and Run Digest telemetry, and a `milestone_ready` Inbox card is raised. **Release is never automatic**: only an explicit REST / CLI / Inbox signoff bumps `package.json` versions (`--bump`), tags (`--tag`, default off) or pushes (`--push`, default off).
-  - **Pillar C — Surgical Symbol & Line Map Injection + Doctor Hotspot Radar** for sharper worker context.
-  - **Pillar D — Persistent SQLite Flight Recorder & Bilingual Run Digest (`GET /api/digest`, MCP `get_run_digest`)**.
-  - Web: lazy-loaded `MilestonePanel` on the Board, a 4th "Milestone" tab in the dispatch modal, and release-notes preview in the Inbox. MCP `1.4.0` exposes **25 tools**.
-- **Smart Requirement Intake & Self-Hosting Boot Canary + Drain Reload (`v1.3.0`)**:
-  - **Smart Requirement Intake (`POST /api/intake` & `/api/intake/preview`)**: Drop any natural-language requirement; `super-work` probes affected files via `ReadOnlyRepoProber` and automatically routes into a scoped `single_ticket`, multi-package `epic_dag`, or metric-driven `goal_campaign` (available as the default Web modal tab, `super-work intake --wait`, and MCP `dispatch_requirement`).
-  - **Self-Evolution Reload (`BunSelfHostRunner`)**: On local merges into `super-work`'s own `baseBranch`, automatically builds and boots a disposable canary server on an ephemeral port (`GET /api/health`); if healthy, **drains** active runs, checkpoints SQLite WAL, and triggers clean supervisor respawn (exit `75`); if build or health fails, **automatically `git revert`s** the broken merge commit, keeps the live daemon healthy, and escalates a pending Inbox item.
-- **Metric-Driven Goal Campaigns & Speculative Parallel Merge Train (`v1.2.0`)**:
-  - **Autonomous `GoalCampaign` Optimization Loops**: Evaluates a quantitative `metricCommand` baseline, iterates multi-wave improvements on an isolated `staging_branch` (`super-work/campaign/<id>`) or `per_wave_merge`, performs **monotonic regression rollback** on failed/regressed waves while recording pitfall lessons, and pauses via a 2-wave plateau / budget / max-iteration circuit breaker into a `campaign_paused` Inbox card with human guidance resume & staging delivery.
-  - **Speculative Merge Train & Cross-Repo Release Barrier**: Bypasses queue overhead (`Smart-Bypass`) when a single `local_merge` branch sits on unchanged `baseBranch` HEAD without a pending barrier; otherwise stacks up to 3 queued branches cumulatively with `--no-ff` in detached `train-worktrees/`, fast-forwards `baseBranch` to the deepest passing prefix while preserving individual merge commits for **1-click `git revert -m 1`**, bisects/ejects failing slots automatically, and coordinates multi-repo Epics via `barrierGroupId` (`barrier_waiting` + eager `HandoverDigest` generation).
-- **OS Daemon Service, Deterministic Lifecycle Hooks & Immutable `super-work.json` (`v1.2.0`)**:
-  - **Zero-Dep Daemon Service (`super-work service`)**: Installs, starts, stops, tail-logs, and monitors `launchd` (`ai.superwork.daemon`) and Linux `systemd --user` (`super-work.service`) background daemons with loopback default (`127.0.0.1:4318`, token-guarded non-loopback `--host`), smart `.super-work` directory resolution, and `10 MB` log rotation.
-  - **Lifecycle Hooks & Tamper-Proof Contract**: Runs synchronous blocking `pre_deliver` and best-effort async `post_deliver` / `on_escalate` hooks (`RepoConfig.hooks` & `super-work.json`) under scrubbed `SUPER_WORK_HOOK_*` environments, while enforcing `IMMUTABLE_REPO_PATHS` (`super-work.json`) as read-only for Workers inside Seatbelt/`bwrap` and auto-reverting tampering (`canExpandMandate: false`).
-- **Composable Task Blueprints & Risk-Scored Delivery Confidence Gate**: Ships 5 built-in **Task Blueprints** (`tdd-bugfix`, `ui-visual-polish`, `safe-refactor`, `backend-feature`, `docs-chore`) plus custom `super-work.json` `blueprints` (`explicit > blueprint > repo` precedence). Every pre-delivery task computes a deterministic `0–100` **`evaluateTicketRisk`** score across diff volume, `sensitivePaths`, symbol fanout, visual pixel delta, retries, conflict resolution, and verification confidence; under `deliveryGatePolicy: "risk_gated"`, scores above `riskThreshold` automatically route to an `outbox_signoff` Inbox card with full factor breakdown.
-- **Line-Anchored Review Studio & 3-Way Semantic Rebase Conflict Resolver**:
-  - **Line-Anchored Review Studio**: Syncs structured AI findings into persistent `ticket_review_comments`, enables `+` line-level commenting & **Draft Review Basket** (`Save Comments Only` vs `Request Changes`) in Diff Studio, rewinds safely to `implement`, and auto-resolves open comments when touched files pass verification.
-  - **3-Way Semantic Conflict Resolver**: On rebase conflicts, captures a hidden `pre_rebase_conflict` checkpoint, extracts `merge-base` + `upstreamCommitSummaries` + `ours`/`theirs` hunks into a lockfile-free worktree (`prepareThreeWayConflictWorkspace`), runs a single bounded resolution turn preserving `lockedTestPaths`, and verifies all static + smoke gates (falling back cleanly to the checkpoint & `merge_conflict` Inbox card if still failing).
-- **Stage Span Waterfall, System Doctor, Atomic Hot Restore, Golden Eval Suite & Knowledge Bundles**:
-  - Records inline per-stage execution **`StageSpan`** segments (`workspace_prep`, `worker_turn`, `static_verify`, `smoke_cdp`, `visual_diff`, `git_ops`) and **`StageToolProfile`** tool heatmaps; provides **`GET/POST /api/system/doctor(/fix)`**, **`VACUUM INTO`** zero-lock SQLite hot backups, and **Atomic Hot Restore (`POST /api/system/backups/:id/restore` & `super-work backup restore`)** with `PRAGMA quick_check` validation and automatic `pre-restore` safety snapshot; supports **Golden Eval Suite** multi-engine isolated replay (`eval-worktrees/`) and portable **Repo Knowledge Bundles** (Playbook + Casebook + Blueprints JSON export/import).
-- **`⌘K` Dual-Mode Chief-of-Staff Omnibox & Batch Inbox Triage**:
-  - Header **`⌘K` (`Ctrl+K`)** palette combines instant ticket/FTS5 memory search with **`?` Ask Chief-of-Staff (`POST /api/chief/ask` & `super-work ask`)** grounded in live metrics, memory hits, and read-only repo probes plus confirmation-gated action buttons; **Attention Inbox** adds multi-select & `Select Low-Risk` batch resolution (`POST /api/inbox/batch-resolve` & `super-work inbox batch`).
-- **Deterministic Verification, Visual Spill, Live Previews & Repo Contract (`super-work.json`)**: Syncs team-shared `verificationCommands`, `setupCommands`, `smokeCheck` (including `browserCheck`), `previewCommand`, `forbiddenPaths`, `conventions`, `deliveryGatePolicy`, `sensitivePaths`, `blueprints`, and shared `playbook` rules from `super-work.json`; verification, smoke logs, and PNG `screenshot` captures persist as Spill artifacts (`GET /api/artifacts/:id/raw`), while **`WorktreePreviewManager`** launches bounded LRU-evicted Live Previews on free local ports with 20m TTL and automatic worktree/cleanup teardown.
-- **Dual-Channel `Transactional Outbox` & 1-Click Safe Revert**: Supports remote **GitHub PR creation / incremental PR updates**, PR comment replies, and **`--no-ff` Local Merge (`local_merge`)** with **1-Click Safe Revert (`git revert -m 1`)** from both Web UI and CLI.
-- **Graded `Mandate` Guardrails, Concurrency Quotas & Daily Budget Fuse**:
-  - Pre-dispatch overlap detection (`mandateScopesOverlap`) serializes overlapping scopes, while per-repo `maxConcurrentWorkers` and `dailyBudgetUsd` caps pause new queued dispatches after finishing in-flight stages and create a `budget_cap` Inbox card.
-  - Post-turn `git diff` validation immediately reverts forbidden paths (`.env*`, `*.pem`, `*.key`), while preserving out-of-scope edits (`scopeViolations`) in the worktree so the Inbox can **Expand Mandate & Continue** without re-burning worker tokens.
-- **Command Center + First-Class `super-work` CLI**:
-  1. **Attention Inbox**: High-signal approval queue for `observe_proposal`, `plan_approval`, `watchdog_escalation`, `mandate_violation`, `merge_conflict`, `outbox_signoff`, `budget_cap`, `pr_followup`, `arena_tiebreak`, `epic_replan`, and `clarification_request`—including multi-select / `Select Low-Risk` batch actions, Arena screenshots, and Live Preview buttons.
-  2. **Mission Board**: Five-column live swimlane board & embedded **Interactive DAG Studio** (SVG topology, breakpoint/pause/resume/rerun & live node surgery) with engine badges, TDD/Auto-Arena chips, PR chips, scope chips, and budget meters.
-  3. **Scheduled Routines**: Dedicated view & preset library for Probe-to-Promote autonomous patrols with active hour windows, overlap/budget guards, and health run timeline.
-  4. **Metrics & Budget View**: Tracks daily spend progress, delivery success rate, cumulative cost, per-engine telemetry, **Engine x Category Bandit Performance Matrix**, and **Golden Eval Suite** comparison board.
-  5. **Deep Dive Drawer & `@super-work/cli`**: Inspect SSE streams, **Live Steer** mid-turn redirection, **`StageToolProfile`** tool heatmaps, **Save Golden Eval**, **per-file collapsible Diff Studio + Arena candidate diff switcher + inline `screenshot` & `visual_diff` PNG artifacts + Stage Checkpoint timeline + Live Preview controls + 1-Click Safe Revert**, `Chain of Recall` & Casebook, or drive everything via CLI (`super-work mcp`, `up -d`, `status`, `ask`, `steer`, `inbox batch`, `eval`, `backup restore`, `bundle export/import`, `dispatch --clarify --tdd --pause-before-run --engine auto --arena --wait`, `epic --tdd --wait`, `impact`, `checkpoint`, `dag`, `preview`, `routine`, `casebook`, `logs -f`, `watch`, `revert`, `playbook prune`).
+### Prerequisites
+- **[Bun](https://bun.sh)** `>= 1.3` and **`git`** (managed repositories need at least one initial commit / valid `HEAD`)
+- *Optional coding engines*: any signed-in local CLI (`claude`, `codex`, `opencode`, `gemini`), any OpenAI / Anthropic / DeepSeek API key, or local `Ollama` (`gh` CLI optional for GitHub PRs & Releases)
+
+### 1. Install, Build & Launch
+
+```bash
+git clone https://github.com/WangShayne/super-work.git
+cd super-work
+
+bun install
+bun run build
+bun run dev
+# Daemon API + SSE: http://127.0.0.1:4318
+# Web Command Center: http://localhost:5173
+```
+
+### 2. Zero-Config Onboarding
+1. Open `http://localhost:5173` — the **Setup Wizard** scans your local CLIs and configures the optimal Control / Implement / Review setup in **one click** (`POST /api/setup/quick-start`).
+2. Add any local Git repository — `super-work` **auto-detects** its name, base branch, stack (Bun / Node / Rust / Python / Go), and verification commands (`POST /api/repos/detect`).
+
+### 3. Dispatch Your First Requirement
+
+Type a goal directly into the Web **Hero Composer**, or run from your terminal:
+
+```bash
+# Dispatch an autonomous task with explicit path scope
+super-work do "Add a /healthz endpoint with latency metrics scope:packages/server/**"
+
+# Preview the Smart Intake execution plan without creating a ticket
+super-work do "Refactor auth middleware into composable guards" --preview
+
+# Block and stream progress until verified & delivered
+super-work do "Fix dark-mode contrast in Settings header" --wait
+
+# Attach work to a versioned release milestone
+super-work do "Add CSV export to telemetry digest" --milestone v1.9.0
+```
 
 ---
 
-## Monorepo Package Map
+## Core Capabilities
+
+### 1. Consumer-Simple Surface, Pro Engine Room
+- **Home Workspace**:
+  - **Hero Composer**: Natural-language Smart Intake, toggleable/cancellable starter chips (`Fix a bug` · `Build a feature` · `Safe refactor` · `Cut a release`), explicit `scope:<glob>` tokens, and autonomy dial (`Guarded` / `Smart` / `Autonomous`).
+  - **Needs You Inbox**: Every human interruption maps to three clear verbs — **Approve**, **Answer**, or **Unblock** — with low-risk batch triage.
+  - **Live Work & SSE Replay**: Running missions show a live elapsed timer, structured tool/thought/gate headlines (never raw JSON dumps), and an expandable inline **Live** console backed by a server-side per-ticket SSE replay buffer (`GET /api/events`) that survives page refreshes.
+- **DeepDive Drawer**: Phase-aware live execution cockpit (`Streaming live` / `Awaiting your decision` / `Execution finished`) with category filters, inline human decision cards at the top of the drawer, per-file Diff Studio + line-anchored **Review Basket**, hidden-ref **Stage Checkpoints**, **Live Worktree Previews**, and a permanent bottom **Live Steer** bar.
+- **History & Collapsible Engine Room**: Release & ticket timelines, interactive Swimlane + SVG **DAG Studio**, 5-item Settings Essentials, `⌘K` **Chief-of-Staff** Q&A, and an expandable **Developer / Engine Room** for Contracts, Playbook/Casebook, Routines/Campaigns, Worktrees/Merge Train, Flight Recorder, System Doctor, and Golden Evals.
+
+### 2. Unified Model Pool & Role-First Studio
+- **CLI & API as Equal Peers**: Local CLIs (`claude`, `codex`, `opencode`, `gemini`) and HTTP API profiles (`DeepSeek`, `OpenAI-compatible`, `Anthropic-compatible`, `Ollama`) live as peer `ModelProfile` entries in one pool.
+- **Role-First Assignment**: Bind any ready profile to **Control** (routing, decomposition, Watchdog), **Implement** (sandboxed coding), and **Cross-Review** (independent verification) — or use **1-Click Smart Recipes** (*API Control + Subscription CLI Coding*, *Dual-CLI Heterogeneous Review*, *Pure API*, *Smart Auto-Pool*).
+- **Anti-Pattern Advisor & Live `/models` Discovery**: Automatically warns against same-model self-review blind spots with 1-click heterogeneous fixes, probes upstream `/models` & `/model` endpoints (`POST /api/setup/models`) so you click real model IDs instead of typing them, and supports per-CLI custom relay gateways without touching `~/.claude` or `~/.codex`.
+
+### 3. Defense-in-Depth Isolation & Deterministic Gates
+- **Isolated `git worktree` Pool**: Automatic monorepo `node_modules` / `packages/*` symlink mirroring, `setupCommands` warmup, concurrency quotas, daily budget caps, and automatic GC.
+- **Immutable `Mandate` & OS Native Sandboxes**: Enforces `allowedPaths` and `forbiddenPaths` (`.env*`, `*.pem`, `*.key`, immutable `super-work.json`) via macOS `sandbox-exec` (Seatbelt) and Linux `bwrap`, plus `--tdd` red-green read-only `lockedTestPaths`. Out-of-scope edits stay quarantined in the worktree so you can **Expand Mandate & Continue** without re-burning tokens.
+- **Multi-Layer Verification**: Impact-scoped static/unit gates (`impact_scoped`), ephemeral dynamic-port runtime **Smoke Gate** (`smokeCheck`), and zero-dependency **CDP Headless Browser + PNG Pixel Visual Diff Gate** (`browserCheck`).
+
+### 4. Multi-Scale Autonomous Workflows & Self-Healing
+- **Smart Requirement Intake**: Probes repository symbols and git history (`ReadOnlyRepoProber`) to route requests into a `single_ticket`, a concurrent multi-package/cross-repo `epic_dag` (with `HandoverDigest` contracts), or a quantitative `goal_campaign` loop (with monotonic regression rollback).
+- **Scheduled Probe-to-Promote `Routines`**: Cron or interval patrols inspect isolated worktrees on schedule — exiting silently with zero ticket noise when healthy, and promoting a ticket only when concrete fixes or high-signal hazards are found.
+- **Adaptive Watchdog 2.0 & Circuit Breakers**: Detects stream silence, repeated errors, and `A → B → A` diff oscillation; extends deadlines for active progress, switches engines on trips (15m transient vs 24h persistent quota/auth cooldowns), and resolves rebase conflicts via a **3-Way Semantic Conflict Resolver**.
+
+### 5. Risk-Scored Delivery, 1-Click Release & Boot Canary
+- **Deterministic Risk Gate (`0–100`)**: Scores diff size, `sensitivePaths`, symbol fan-out, visual delta, and retries before queuing into the **Transactional Outbox** (`local_merge` or `push_and_create_pr`) and **Speculative Parallel Merge Train** (up to 3 stacked slots with automatic bisection and **1-Click Safe Revert** via `git revert -m 1`).
+- **Milestone Waves & Direct Release**: Orchestrate multi-wave backlogs (`direct_main` or single-signoff `milestone_branch`), or cut a **Direct Release** from base-branch commits — complete with bilingual Release Notes synthesis, tree-verified lossless **Squash**, annotated **Git Tag**, **Remote Push**, and optional **GitHub Release** right from the Home sign-off card.
+- **Self-Hosting `BunSelfHostRunner`**: Merges into `super-work`'s own base branch build and boot a disposable **Boot Canary** on a random local port; once `/api/health` passes, active runs drain, SQLite WAL checkpoints, and the daemon hot-reloads cleanly (or auto-reverts on failure).
+
+### 6. Compounding Repo Memory & 27-Tool Native MCP
+- **Self-Cleaning Memory**: **Playbook** distills reusable engineering rules while auditing/pruning one-off approval noise (`playbook_hygiene`); **Episodic Casebook** indexes delivered solutions and flips reverted tickets into pitfall warnings via SQLite FTS5; **Golden Eval Suite** replays real tasks across engines in detached `eval-worktrees/`.
+- **Ecosystem Native**: Dependency-free **MCP JSON-RPC 2.0 Server** (`GET/POST /api/mcp` + `super-work mcp` stdio bridge) with **27 tools & 3 resources**, plus HMAC-verified GitHub webhooks, ChatOps callbacks, macOS notifications, and crawler-safe mobile approval links.
+
+---
+
+## Autonomy Presets
+
+Choose how much authority to delegate per repository from the Hero Composer toolbar:
+
+| Preset | Mode & Gate Policy | When `super-work` Interrupts You | Best For |
+| :--- | :--- | :--- | :--- |
+| **Guarded** (`受控`) | `auto` + `always_signoff` | Pauses before **every** merge/PR delivery (plus blockers) | Critical repos, onboarding a new codebase |
+| **Smart** (`智能`, default) | `auto` + `risk_gated` | Auto-ships verified low-risk work; asks on high-risk diffs or sensitive paths | Daily engineering — speed with guardrails |
+| **Autonomous** (`全权`) | `auto` + `always_auto` | Ships end-to-end; pings **only** on real blockers (conflict, scope, budget) | Trusted test-covered repos, overnight runs |
+
+---
+
+## CLI & MCP Quick Reference
+
+### Everyday CLI Commands
+
+```bash
+super-work do "<requirement>" [--preview] [--wait] [--milestone vX.Y.Z]
+super-work status                              # Daemon, engine & queue snapshot
+super-work inbox list                          # Pending human decisions
+super-work inbox batch --low-risk --approve    # Batch-approve low-risk items
+super-work steer <ticketId> "<instruction>"    # Mid-turn live redirection
+super-work milestone list                      # Inspect active & released milestones
+super-work milestone release <id> --bump --squash --tag --push
+super-work ask "What is blocking delivery?"    # Read-only Chief-of-Staff probe
+super-work doctor [--fix] [--prune-playbooks]  # System diagnostics & cleanup
+super-work service install|start|stop|status   # macOS launchd / Linux systemd daemon
+```
+
+### Connect via MCP (Claude Code / Cursor / Antigravity)
+
+```json
+{
+  "mcpServers": {
+    "super-work": {
+      "command": "bun",
+      "args": ["run", "/absolute/path/to/super-work/packages/cli/src/index.ts", "mcp"]
+    }
+  }
+}
+```
+
+Or connect directly over Streamable HTTP at `http://127.0.0.1:4318/api/mcp`.
+
+---
+
+## Monorepo Layout & Development
 
 ```text
 super-work/
+├── assets/             # Brand mark (logo.png, vector logo.svg)
 ├── packages/
-│   ├── core/       # @super-work/core    — Zero-UI orchestration kernel, Mandate, Memory, Watchdog, Outbox, Ports
-│   ├── drivers/    # @super-work/drivers — bun:sqlite + FTS5, FsArtifactStore, GitWorktreeProvider, LLM & CLI drivers
-│   ├── cli/        # @super-work/cli     — First-class CLI client (up/status/dispatch/epic/inbox/logs)
-│   ├── server/     # @super-work/server  — Hono HTTP/SSE API daemon & static web bundle server
-│   └── web/        # @super-work/web     — React + Vite + Tailwind v4 local command center
-└── scripts/dev.ts  # Concurrent dev launcher for server + web
+│   ├── core/           # @super-work/core    — Zero-UI orchestration kernel, Mandate, Memory, Watchdog, Outbox, MCP
+│   ├── drivers/        # @super-work/drivers — bun:sqlite + FTS5, GitWorktreeProvider, OS Sandbox, CLI & API drivers
+│   ├── server/         # @super-work/server  — Hono HTTP/SSE daemon, replay buffer, webhooks & static UI host
+│   ├── cli/            # @super-work/cli     — First-class CLI client & stdio MCP bridge
+│   └── web/            # @super-work/web     — React 19 + Vite + Tailwind v4 Command Center (zero core runtime bundle)
+└── scripts/dev.ts      # Concurrent server + web development supervisor (supports exit-75 self-reload)
 ```
-
----
-
-## Prerequisites & Quickstart
-
-### Prerequisites
-- [Bun](https://bun.sh) `>= 1.3`
-- `git` (repositories managed by `super-work` must have at least an initial commit / valid `HEAD` before `git worktree add` can branch from them)
-- Optional Worker / Source CLIs on `PATH`: `claude` (Claude Code), `codex` (Codex CLI), `opencode` (OpenCode CLI), `gemini` (Gemini CLI), `gh` (GitHub CLI)
-
-### Commands
 
 ```bash
-# 1. Install workspace dependencies
-bun install
-
-# 2. Run all unit, driver, database/FTS5, Watchdog, E2E kernel, and API tests
-bun test
-
-# 3. Typecheck all five workspace packages
-bun run typecheck
-
-# 4. Run interactive first-run CLI scan & Control-Plane LLM setup (or configure in the Web wizard)
-bun run setup
-
-# 5. Build production frontend bundle into packages/web/dist
-bun run build
-
-# 6. Start daemon (http://localhost:4318) + Vite dashboard (http://localhost:5173)
-bun run dev
+bun test              # Run full unit, SQLite/FTS5, Watchdog, E2E git worktree & API test suite
+bun run typecheck     # Strict TypeScript check across all 5 packages
+bun run build         # Production Vite bundle -> packages/web/dist (< 500 kB per chunk)
+bun run setup         # Interactive terminal CLI scan & model setup
 ```
-
-You can also run the backend or frontend individually:
-```bash
-bun run dev:server   # Hono daemon with --watch on port 4318
-bun run dev:web      # Vite dev server on port 5173 (proxies /api -> 4318)
-```
-
-> **First-Run Wizard & Self-hosting note**: On first startup, `super-work` automatically scans installed CLIs (`claude`, `codex`, `opencode`, `gh`, `git`, `bun`) and pops up the setup wizard in the Web UI to configure your Control-Plane LLM. Before dispatching worktree tasks against any repository, ensure it has at least an initial `git commit` (`HEAD`). See [USAGE.md](./USAGE.md) for the complete user guide.
 
 ---
 
 ## Environment Variables (Optional)
 
-When no API key is configured, the control plane automatically uses the built-in `HeuristicControlLLM` so local evaluation and workflows run with zero external setup. See [.env.example](./.env.example).
+No environment variables are required to start — `super-work` persists model profiles encrypted/masked in local SQLite via the Web Studio and falls back to `HeuristicControlLLM` when unconfigured. See [.env.example](./.env.example).
 
 | Variable | Description |
 | :--- | :--- |
-| `DEEPSEEK_API_KEY` | Enables OpenAI-compatible control-plane LLM defaulting to `https://api.deepseek.com/v1` and `deepseek-chat`. |
-| `OPENAI_API_KEY` | Enables OpenAI-compatible control-plane LLM defaulting to `https://api.openai.com/v1` and `gpt-4o-mini`. |
+| `DEEPSEEK_API_KEY` | Auto-seeds DeepSeek control-plane LLM (`https://api.deepseek.com/v1`, `deepseek-chat`). |
+| `OPENAI_API_KEY` | Auto-seeds OpenAI control-plane LLM (`https://api.openai.com/v1`, `gpt-4o-mini`). |
 | `SUPER_WORK_LLM_API_KEY` / `_BASE_URL` / `_MODEL` | Custom OpenAI-compatible control-plane endpoint, key, and model override. |
-| `SUPER_WORK_ENABLE_CLI_LLM=1` | Allows control-plane fallback to tool-less `claude -p --tools ""` when no API key is set. |
-| `SUPER_WORK_DATA_DIR` | Directory for `super-work.db`, Spill artifacts, and `worktrees/` (default: `./.super-work`). |
-| `SUPER_WORK_TOKEN` | Optional Bearer / query token securing all REST, MCP, and SSE `/api/*` endpoints (excluding HMAC-signed `/api/webhooks/*`). |
-| `SUPER_WORK_ACTION_SECRET` | HMAC secret for signing mobile one-tap `/api/webhooks/action` links and verifying `/api/webhooks/chatops` callbacks (`X-Super-Work-Signature`). |
-| `GITHUB_WEBHOOK_SECRET` | HMAC secret verifying inbound GitHub webhooks at `POST /api/webhooks/github` (`X-Hub-Signature-256`). |
-| `PORT` | Daemon HTTP/SSE port (default: `4318`). |
-| `HOST` | Daemon bind host (default: `127.0.0.1`; non-loopback requires `SUPER_WORK_TOKEN`). |
+| `SUPER_WORK_ENABLE_CLI_LLM=1` | Allows control-plane fallback to tool-less local `claude -p --tools ""` when no API key is set. |
+| `SUPER_WORK_DATA_DIR` | Storage root for `super-work.db`, Spill artifacts, and `worktrees/` (default: `./.super-work`). |
+| `PORT` / `HOST` | HTTP/SSE bind port & host (default: `127.0.0.1:4318`; non-loopback requires `SUPER_WORK_TOKEN`). |
+| `SUPER_WORK_TOKEN` | Bearer / query token protecting all `/api/*` REST, MCP, and SSE routes. |
+| `GITHUB_WEBHOOK_SECRET` / `SUPER_WORK_ACTION_SECRET` | HMAC secrets for `POST /api/webhooks/github` and signed mobile approval cards (`/api/webhooks/action`). |
 
 ---
 
-## REST, MCP, Webhooks & SSE API Summary
+## REST & SSE API Overview
 
-- `GET /api/health` — Daemon health, active control-plane LLM provider, available worker engines (`claude`, `codex`, `opencode`, `gemini`, `mock`), `selfReload` status, worktree counts, and `activePreviews`
-- `POST /api/intake/preview`, `POST /api/intake` — Smart Unified Requirement Intake router preview and dispatch (`single_ticket` | `epic_dag` | `goal_campaign`)
-- `POST /api/chief/ask` — Read-only Chief-of-Staff operational & codebase Q&A grounded in live ticket/budget/memory state + `ReadOnlyRepoProber`, returning confirmation-gated `ChiefActionSuggestion[]`
-- `GET /api/repos`, `POST /api/repos`, `PATCH /api/repos/:id`, `GET /api/repos/:id/blueprints`, `POST /api/repos/:id/contract/sync`, `POST /api/repos/:id/contract/export`, `GET /api/repos/:id/knowledge-bundle`, `POST /api/repos/:id/knowledge-bundle/import` — Register repos, configure `sandboxMode`, `deliveryGatePolicy` (`always_auto`/`risk_gated`/`always_signoff`), `riskThreshold`, `sensitivePaths`, list built-in/custom **Task Blueprints**, sync/export `super-work.json`, and export/import portable Knowledge Bundles
-- `GET /api/repos/:id/playbook`, `POST /api/repos/:id/playbook`, `PATCH /api/playbook/:entryId`, `DELETE /api/playbook/:entryId`, `POST /api/repos/:id/playbook/prune` — View, curate, and prune stale/suspect self-evolving Playbook rules
-- `GET /api/repos/:id/casebook?q=...`, `DELETE /api/casebook/:entryId` — Browse and search delivered Episodic Casebook solutions and reverted pitfall warnings
-- `GET /api/routines`, `POST /api/routines`, `PATCH /api/routines/:id`, `DELETE /api/routines/:id`, `POST /api/routines/:id/run`, `GET /api/routines/runs` — Manage Probe-to-Promote scheduled autonomous routines and patrol run logs
-- `GET /api/campaigns`, `POST /api/campaigns`, `GET /api/campaigns/:id`, `POST /api/campaigns/:id/start`, `POST /api/campaigns/:id/pause`, `POST /api/campaigns/:id/deliver`, `DELETE /api/campaigns/:id` — Manage metric-driven multi-wave **Goal Campaigns** with monotonic regression rollback
-- `GET /api/metrics?repoId=...` — Query today's budget spend, delivery rate, per-engine telemetry, and `engineMatrix` Bandit category scores
-- `POST /api/repos/:id/impact` — Compute zero-dep TS/JS/Py/Go/Rust symbol impact radius (`directDependents` & `indirectDependents`)
-- `POST /api/specs/clarify` — On-demand Pre-Flight Spec Studio exploration returning recommended mode, template, allowed paths, criteria, impact warnings, and clarifying questions
-- `POST /api/triggers` — Ingest external or simulated triggers (`github_issue`, `github_pr`, `github_ci`, `cli`)
-- `GET /api/tickets`, `POST /api/tickets`, `GET /api/tickets/:id`, `POST /api/tickets/:id/message`, `POST /api/tickets/:id/steer`, `POST /api/tickets/:id/cancel`, `POST /api/tickets/:id/cleanup-worktree`, `POST /api/tickets/:id/deliver`, `POST /api/tickets/:id/revert`, `PATCH /api/tickets/:id/dag-node` — Direct task dispatch (`--blueprint`, `--gate-policy`, `--tdd`, `--pause-before-run`, `--engine auto`), zero-penalty mid-turn **Live Steer**, live DAG node surgery, Stage Span & Tool Profile telemetry, Risk assessments, Diff inspection, Thread follow-ups, dual-channel delivery, and atomic `git revert -m 1`
-- `GET /api/evals/cases`, `POST /api/evals/cases/from-ticket/:ticketId`, `DELETE /api/evals/cases/:id`, `GET /api/evals/runs`, `POST /api/evals/run` — Save delivered tickets as **Golden Eval** regression benchmarks and replay them across multiple engines inside detached `eval-worktrees/` with zero side effects on live tables
-- `GET /api/tickets/:id/review-comments`, `POST /api/tickets/:id/review-comments`, `PATCH /api/review-comments/:commentId` — Read, submit line-anchored review baskets (`comment_only` / `request_changes`), and resolve/reopen comments
-- `GET /api/tickets/:id/checkpoints`, `GET /api/tickets/:id/checkpoints/:cpId/diff`, `POST /api/tickets/:id/checkpoints/:cpId/restore` — Inspect hidden-ref stage checkpoints, view incremental diffs, and time-travel re-steer (`in_place` / `fork`)
-- `POST /api/epics/preview`, `POST /api/epics` — Preview and dispatch Epic sub-task dependency DAGs
-- `GET /api/previews`, `POST /api/previews`, `POST /api/previews/:id/renew`, `DELETE /api/previews/:id` — Launch, inspect, renew (+20m TTL), and tear down bounded Live Worktree Previews
-- `GET /api/worktrees`, `POST /api/worktrees/gc` — Inspect active/reclaimable worktrees and run one-click garbage collection
-- `GET /api/system/doctor`, `POST /api/system/doctor/fix`, `GET /api/system/backups`, `POST /api/system/backups`, `POST /api/system/backups/:id/restore`, `GET /api/system/service`, `GET /api/system/reload`, `POST /api/system/reload` — Run System Doctor diagnostics/cleanup, SQLite `VACUUM INTO` hot backups, verified atomic hot restores, inspect OS daemon service status/logs, and manage Boot Canary self-reloads
-- `GET /api/inbox`, `POST /api/inbox/:id/resolve`, `POST /api/inbox/batch-resolve` — Approve, reject, or batch-triage Attention Inbox decisions (including `campaign_paused`, Risk-gated `outbox_signoff`, 3-way `merge_conflict`, Worker `clarification_request`, DAG breakpoints & `SPEC_TEST_CHALLENGE`)
-- `GET /api/tickets/:id/recall`, `GET /api/memory/search?q=...`, `GET /api/artifacts/:id`, `GET /api/artifacts/:id/raw` — `Chain of Recall` lineage, FTS5 search, text Spill reader, and raw binary PNG `screenshot` / `visual_diff` reader
-- `GET /api/outbox`, `GET /api/merge-train`, `POST /api/merge-train/flush`, `POST /api/merge-train/:id/eject` — Inspect `Transactional Outbox` and manage the Speculative Parallel Merge Train & Cross-Repo Release Barrier
-- `GET /api/mcp`, `POST /api/mcp` — Native MCP JSON-RPC 2.0 Streamable HTTP endpoint (`v1.7.0`, `super-work mcp` provides stdio transport; **27 tools** & 3 resources)
-- `GET /api/playbooks/hygiene`, `POST /api/playbooks/hygiene/prune` — Audit Playbook noise (one-off approvals / ticket-run notes) and disable (default) or delete noisy rules; supports `dryRun`
-- `POST /api/webhooks/github`, `GET /api/webhooks/action`, `POST /api/webhooks/action`, `POST /api/webhooks/chatops` — HMAC-signed GitHub inbound webhooks, crawler-safe mobile remote approval HTML/action card endpoints, and ChatOps callbacks
-- `GET /api/setup/status`, `POST /api/setup/scan`, `POST /api/setup/test-llm`, `POST /api/setup/configure`, `POST /api/notifications/test` — CLI environment scan, Control-Plane LLM setup, webhook secrets, and macOS / Webhook notification settings
-- `GET /api/events?repoId=...&ticketId=...` — Real-time Server-Sent Events (SSE) stream with optional repo/ticket filtering (including `campaign_updated`, `merge_train_updated`, `lifecycle_hook_executed`, `preview_updated`, `review_comment_updated` & `eval_run_updated`)
+| Domain | Key Endpoints |
+| :--- | :--- |
+| **Intake & Specs** | `POST /api/intake`, `POST /api/intake/preview`, `POST /api/specs/clarify`, `POST /api/chief/ask`, `POST /api/triggers` |
+| **Tickets & Execution** | `GET/POST /api/tickets`, `GET /api/tickets/:id`, `POST /api/tickets/:id/{steer,message,deliver,revert,cancel}`, `POST /api/epics{/preview}` |
+| **Review, Checkpoints & Previews** | `GET/POST /api/tickets/:id/review-comments`, `GET /api/tickets/:id/checkpoints`, `POST /api/tickets/:id/checkpoints/:cpId/restore`, `GET/POST/DELETE /api/previews` |
+| **Inbox, Outbox & Merge Train** | `GET /api/inbox`, `POST /api/inbox/:id/resolve`, `POST /api/inbox/batch-resolve`, `GET /api/outbox`, `GET /api/merge-train`, `POST /api/merge-train/{flush,:id/eject}` |
+| **Milestones, Campaigns & Routines** | `GET/POST /api/milestones`, `POST /api/milestones/:id/{release,cancel}`, `GET/POST /api/campaigns`, `GET/POST /api/routines`, `POST /api/routines/:id/run` |
+| **Repos, Memory & Evals** | `GET/POST /api/repos`, `POST /api/repos/detect`, `PATCH /api/repos/:id`, `POST /api/repos/:id/contract/{sync,export}`, `GET/POST /api/playbooks/hygiene{/prune}`, `GET /api/memory/search`, `GET/POST /api/evals/{cases,run}` |
+| **Models, System & Telemetry** | `GET /api/health`, `GET /api/setup/status`, `POST /api/setup/{quick-start,scan,configure,test-model,models}`, `GET/POST /api/system/{doctor,doctor/fix,engines,backups,reload}`, `GET /api/metrics`, `GET /api/digest` |
+| **Live Stream, MCP & Webhooks** | `GET /api/events` (SSE + per-ticket replay buffer), `GET/POST /api/mcp` (JSON-RPC 2.0), `POST /api/webhooks/{github,chatops}`, `GET/POST /api/webhooks/action` |
 
-For step-by-step workflows see [USAGE.md](./USAGE.md); for architectural deep dives and core contracts see [ARCHITECTURE.md](./ARCHITECTURE.md).
+---
+
+## Documentation
+
+- **User & Workflow Guide**: [USAGE.md](./USAGE.md) · [USAGE.zh-CN.md](./USAGE.zh-CN.md)
+- **Architecture, Contracts & Release Evolution**: [ARCHITECTURE.md](./ARCHITECTURE.md) · [ARCHITECTURE.zh-CN.md](./ARCHITECTURE.zh-CN.md)
