@@ -176,6 +176,8 @@ export function formatEngineDisplayName(engine: EnginePreference, locale: Locale
       return "OpenCode";
     case "gemini":
       return "Gemini CLI";
+    case "api":
+      return locale === "zh" ? "API 直连 Worker" : "API Worker";
     case "mock":
       return locale === "zh" ? "Mock 演练" : "Mock";
   }

@@ -1,10 +1,12 @@
 import { pickNextFallbackEngine, resolveAllowedEngineWhitelist } from "../arena.ts";
+import { resolveSteerModelFields } from "../model-registry.ts";
 import { getAlternateEngine } from "../pipeline.ts";
 import type { buildStageToolProfile } from "../tool-profiler.ts";
 import type {
   RepoConfig,
   StageKind,
   StageRun,
+  SystemSetupConfig,
   Ticket,
   WatchdogDecision,
   WatchdogSignal,
@@ -133,10 +135,12 @@ export async function handleLiveSteerOp(
     discoveredSessionId && stage !== "review"
       ? { ...ticket.nativeSessions, [driverEngine]: discoveredSessionId }
       : ticket.nativeSessions;
+  const steerModel = resolveSteerModelFields(
+    await ctx.stateStore.getSystemSetting<SystemSetupConfig>("setup_config"),
+    pendingSteer,
+  );
   const switchedEngine =
-    pendingSteer.preferredEngine && pendingSteer.preferredEngine !== "auto"
-      ? pendingSteer.preferredEngine
-      : driverEngine;
+    steerModel.enginePref && steerModel.enginePref !== "auto" ? steerModel.enginePref : driverEngine;
 
   const steeredTicket: Ticket = {
     ...ticket,
@@ -144,7 +148,8 @@ export async function handleLiveSteerOp(
     steerCount: (ticket.steerCount ?? 0) + 1,
     costUsd: ticket.costUsd + stageCostUsd,
     nativeSessions: preservedSessions,
-    preferredEngine: pendingSteer.preferredEngine ?? ticket.preferredEngine,
+    preferredEngine: steerModel.enginePref ?? ticket.preferredEngine,
+    ...(steerModel.modelFields ?? {}),
     activeEngine: switchedEngine,
     inlineMemory: {
       ...ticket.inlineMemory,

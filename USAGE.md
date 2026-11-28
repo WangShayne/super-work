@@ -6,6 +6,23 @@ This guide walks through first-run CLI environment scanning, Control-Plane LLM c
 
 ---
 
+## 0a. v1.8.1: Model Pool & Role Binding
+
+Open **Settings → Models & Roles** (or the Setup Wizard's *Customize*) to reach the **ModelRegistryStudio**.
+
+**Stage ① — Model Pool (CLI & API peers)**
+
+1. Click **Rescan CLI** to detect local `claude` / `codex` / `opencode` / `gemini`. The header shows `{ready}/{total} ready`.
+2. Click **+ Add Model** and pick one of 8 equal templates: **DeepSeek**, **OpenAI / Compatible API** (OpenAI, OpenRouter, OneAPI, SiliconFlow, Qwen), **Anthropic / Compatible API**, **Local Ollama** (`http://localhost:11434/v1`), or **Claude / Codex / OpenCode / Gemini CLI**. Fill in Base URL, Model, Effort and API Key (a saved key is shown masked; tick *Clear saved key* to remove it). For a CLI profile the optional relay Base URL / API Key is injected as `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` / `GOOGLE_GEMINI_BASE_URL`.
+3. Click **Test Connection** (`POST /api/setup/test-model`) to see latency and status, then **Save Model**.
+4. On each card: toggle **Auto Pool** (include the profile in smart Worker routing), **Test**, **Edit**, or **Delete** (custom profiles only; confirm inline). Built-in CLI profiles keep their kind and engine locked and cannot be deleted.
+
+**Stage ② — Role Model Binding**
+
+Pick the **Control Model** (routing / task splitting / watchdog; *Local heuristic* costs no tokens), the **Implement Worker Model** and the **Cross-Review Model** (*Auto* routes through the Worker pool and prefers a different model for blind review). Only *ready* profiles are listed. Changes save immediately and show *Saved*; with a repo selected they also update that repo's `implementModelId` / `reviewModelId` without overwriting `auto`.
+
+Deleting a profile through `POST /api/setup/configure` (`deleteModelProfileIds`) falls any role that used it back to `heuristic` / `auto`. The Home composer's *Options → Model* and the DeepDive steer bar pick from the same ready profiles (`preferredModelId`).
+
 ## 0. v1.8.0 Quick Start: Super-Agent First
 
 v1.8.0 is *Consumer Surface, Pro Engine*: three steps get you from zero to a delivered change.
@@ -40,7 +57,7 @@ All presets use `mode: auto`, `sandboxMode: balanced`, `verificationStrategy: sm
 - **History**: Timeline & Releases, Board / DAG.
 - **Settings**: 5-item Essentials + collapsible **Developer / Engine Room** (Contract / Gates, Playbook / Casebook, Routines / Campaigns, Worktrees / Merge Train / Simulate, Flight Recorder / Doctor / Evals).
 - **DeepDiveDrawer**: *Overview & Changes* + *More ▾*, with a permanent bottom **Steer** input bar.
-- **HeaderBar** (single bar): `v1.8` badge + Live Health Dot · pill tabs (Home / History / Settings) · `⌘K` / `ZH-EN` (plus a compact repo pill on non-Home tabs).
+- **HeaderBar** (single bar): `v1.8.1` badge + Live Health Dot · pill tabs (Home / History / Settings) · `⌘K` / `ZH-EN` (plus a compact repo pill on non-Home tabs).
 - **Hero Composer context toolbar**: repo switcher (+ register) · **Guarded / Smart / Autonomous** dial · *Advanced ▾*, integrated right under the requirement input.
 
 The sections below describe the full Engine Room in depth.

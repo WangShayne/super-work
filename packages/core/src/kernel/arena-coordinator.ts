@@ -8,12 +8,14 @@ import type {
   RepoConfig,
   SpillArtifact,
   StageRun,
+  SystemSetupConfig,
   Ticket,
   WorkerEngineId,
   WorkerStreamEvent,
 } from "../types.ts";
 import { newId, nowIso } from "../utils.ts";
 import type { KernelCoordinatorContext } from "./context.ts";
+import { resolveTurnWorkerAuthAndModel } from "./stage-engine-helpers.ts";
 
 export async function cleanupArenaCandidateWorktreesOp(
   ctx: KernelCoordinatorContext,
@@ -154,6 +156,9 @@ export async function runArenaImplementStageOp(
     }
   }
 
+  const arenaSetupConfig = await ctx.stateStore
+    .getSystemSetting<SystemSetupConfig>("setup_config")
+    .catch(() => null);
   const candSpec = [
     { id: "cand_a", engine: driverA.engine, driver: driverA, branch: `super-work/${ticket.id}-cand-a` },
     { id: "cand_b", engine: driverB.engine, driver: driverB, branch: `super-work/${ticket.id}-cand-b` },
@@ -226,6 +231,7 @@ export async function runArenaImplementStageOp(
           prompt,
           mandate: ticket.mandate,
           isResume: false,
+          ...resolveTurnWorkerAuthAndModel(spec.engine, ticket, arenaSetupConfig, "implement"),
           sandboxMode: repo.sandboxMode ?? "balanced",
           rootRepoPath: repo.rootPath,
           readOnlyPaths: ticket.lockedTestPaths,

@@ -28,6 +28,7 @@ export interface CreateMilestoneInput {
   targetVersion?: string;
   requirements: string[];
   preferredEngine?: EnginePreference;
+  preferredModelId?: string;
   template?: PipelineTemplateId;
   maxBudgetUsdPerItem?: number;
   preferredRoute?: "auto" | RequirementRouteKind;
@@ -87,6 +88,7 @@ async function dispatchItem(
   opts: {
     template?: PipelineTemplateId;
     preferredEngine?: EnginePreference;
+    preferredModelId?: string;
     maxBudgetUsdPerItem?: number;
   },
 ): Promise<MilestoneItem> {
@@ -128,6 +130,7 @@ async function dispatchItem(
       epicDeliveryMode: plan.epicPlan.epicDeliveryMode,
       releaseBarrier: plan.epicPlan.releaseBarrier,
       preferredEngine: opts.preferredEngine,
+      preferredModelId: opts.preferredModelId,
       maxCostUsdPerSubtask: opts.maxBudgetUsdPerItem,
       subtasks: plan.epicPlan.subtasks,
     });
@@ -161,6 +164,7 @@ async function dispatchItem(
     allowedPaths: single.allowedPaths,
     acceptanceCriteria: single.acceptanceCriteria,
     preferredEngine: opts.preferredEngine,
+    preferredModelId: opts.preferredModelId,
     maxCostUsd: opts.maxBudgetUsdPerItem,
     dependsOn: deps,
     milestoneId: milestone.id,
@@ -194,6 +198,7 @@ export async function createMilestoneOp(
   const opts = {
     template: input.template,
     preferredEngine: input.preferredEngine,
+    preferredModelId: input.preferredModelId,
     maxBudgetUsdPerItem: input.maxBudgetUsdPerItem,
   };
 
@@ -205,6 +210,7 @@ export async function createMilestoneOp(
         requirement,
         template: input.template,
         preferredEngine: input.preferredEngine,
+        preferredModelId: input.preferredModelId,
         maxBudgetUsd: input.maxBudgetUsdPerItem,
         preferredRoute: input.preferredRoute,
         previewOnly: true,

@@ -74,6 +74,8 @@ export function registerTicketRoutes(ctx: ServerRouteContext): void {
       dependsOn?: string[];
       maxCostUsd?: number;
       preferredEngine?: EnginePreference;
+      /** v1.8.1: pin a ModelProfile id (resolves preferredEngine/activeModelId). */
+      preferredModelId?: string;
       arenaMode?: boolean;
       arenaCompetitorEngine?: WorkerEngineId;
       modelOverride?: string;
@@ -125,6 +127,7 @@ export function registerTicketRoutes(ctx: ServerRouteContext): void {
           : undefined,
         maxCostUsd: body.maxCostUsd,
         preferredEngine: body.preferredEngine,
+        preferredModelId: body.preferredModelId?.trim() || undefined,
         arenaMode: Boolean(body.arenaMode),
         arenaCompetitorEngine: body.arenaCompetitorEngine,
         modelOverride: body.modelOverride,
@@ -259,6 +262,7 @@ export function registerTicketRoutes(ctx: ServerRouteContext): void {
     const body = (await c.req.json().catch(() => ({}))) as {
       instruction?: string;
       preferredEngine?: EnginePreference;
+      preferredModelId?: string;
     };
     if (!body.instruction?.trim()) {
       return c.json({ error: "instruction is required" }, 400);
@@ -267,6 +271,7 @@ export function registerTicketRoutes(ctx: ServerRouteContext): void {
       const ticket = await kernel.steerTicket(id, {
         instruction: body.instruction.trim(),
         preferredEngine: body.preferredEngine,
+        preferredModelId: body.preferredModelId?.trim() || undefined,
       });
       void kernel.tick();
       return c.json({ ticket });
@@ -368,6 +373,7 @@ export function registerTicketRoutes(ctx: ServerRouteContext): void {
         releaseBarrier: body.releaseBarrier,
         barrierGroupId: body.barrierGroupId,
         preferredEngine: body.preferredEngine,
+        preferredModelId: body.preferredModelId?.trim() || undefined,
         modelOverride: body.modelOverride,
         effortOverride: body.effortOverride,
         maxCostUsdPerSubtask: body.maxCostUsdPerSubtask,
@@ -515,6 +521,7 @@ export function registerTicketRoutes(ctx: ServerRouteContext): void {
         tddMode: body.tddMode,
         deliveryGatePolicy: body.deliveryGatePolicy,
         maxBudgetUsd: body.maxBudgetUsd,
+        preferredModelId: body.preferredModelId?.trim() || undefined,
         previewOnly: Boolean(body.previewOnly),
         metricCommand: body.metricCommand,
         metricRegex: body.metricRegex,

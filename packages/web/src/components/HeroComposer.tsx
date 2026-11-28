@@ -12,14 +12,13 @@ import {
   Sparkles,
 } from "lucide-react";
 import { api } from "../api.ts";
-import { formatEngineDisplayName, useI18n, type TranslationKey } from "../i18n.tsx";
+import { useI18n, type TranslationKey } from "../i18n.tsx";
 import type {
   AutonomyPreset,
-  EnginePreference,
+  PublicModelProfile,
   RepoConfig,
   RequirementIntakePlan,
   RequirementRouteKind,
-  WorkerEngineId,
 } from "../types.ts";
 import {
   AUTONOMY_PRESETS,
@@ -37,7 +36,8 @@ interface HeroComposerProps {
   selectedRepoId: string;
   onSelectRepo: (id: string) => void;
   onChangeAutonomyPreset: (repoId: string, preset: AutonomyPreset) => void;
-  availableEngines: WorkerEngineId[];
+  /** Peer model profiles; only `ready` ones are offered in Options → Model. */
+  modelProfiles: PublicModelProfile[];
   onSubmitted: (route: RequirementRouteKind | "milestone") => Promise<void> | void;
   onOpenAddRepo: () => void;
 }
@@ -72,11 +72,11 @@ export function HeroComposer({
   selectedRepoId,
   onSelectRepo,
   onChangeAutonomyPreset,
-  availableEngines,
+  modelProfiles,
   onSubmitted,
   onOpenAddRepo,
 }: HeroComposerProps) {
-  const { locale, t } = useI18n();
+  const { t } = useI18n();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [text, setText] = useState("");
   const [plan, setPlan] = useState<RequirementIntakePlan | null>(null);
@@ -87,7 +87,8 @@ export function HeroComposer({
   const [version, setVersion] = useState("");
   const [milestoneTitle, setMilestoneTitle] = useState("");
   const [scopePaths, setScopePaths] = useState("");
-  const [engine, setEngine] = useState<"auto" | WorkerEngineId>("auto");
+  /** "auto" or a ModelProfile id. */
+  const [modelId, setModelId] = useState("auto");
   const [budget, setBudget] = useState("");
 
   const repoId = repo?.id ?? "";
@@ -104,7 +105,7 @@ export function HeroComposer({
     // into mandate.allowedPaths (packages/core/src/intake.ts extractScopeTags → inferModuleScopedPaths).
     requirement: withScopeTokens(requirement, scope),
     preferredRoute: "auto" as const,
-    preferredEngine: (engine === "auto" ? undefined : engine) as EnginePreference | undefined,
+    preferredModelId: modelId === "auto" ? undefined : modelId,
     maxBudgetUsd: Number(budget) > 0 ? Number(budget) : undefined,
   });
 
@@ -156,7 +157,7 @@ export function HeroComposer({
           targetVersion: version.trim().replace(/^v/, ""),
           requirements: requirements.length > 0 ? requirements : [requirement],
           maxBudgetUsdPerItem: Number(budget) > 0 ? Number(budget) : undefined,
-          preferredEngine: engine === "auto" ? undefined : engine,
+          preferredModelId: modelId === "auto" ? undefined : modelId,
         });
         await onSubmitted("milestone");
       } else {
@@ -409,16 +410,18 @@ export function HeroComposer({
                 </label>
                 <select
                   id="composer-engine"
-                  value={engine}
-                  onChange={(e) => setEngine(e.target.value as "auto" | WorkerEngineId)}
+                  value={modelId}
+                  onChange={(e) => setModelId(e.target.value)}
                   className={INPUT_CLS}
                 >
                   <option value="auto">{t("composer.engineAuto")}</option>
-                  {availableEngines.map((e) => (
-                    <option key={e} value={e}>
-                      {formatEngineDisplayName(e, locale)}
-                    </option>
-                  ))}
+                  {modelProfiles
+                    .filter((p) => p.ready)
+                    .map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
                 </select>
               </div>
               <div>

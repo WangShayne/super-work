@@ -96,6 +96,8 @@ export function classifyTaskCategory(
 }
 
 function getCategoryPriorBonus(engine: WorkerEngineId, category: TaskCategory): number {
+  // Native API worker has no category specialisation prior; rely on observed history instead.
+  if (engine === "api") return 0;
   switch (category) {
     case "ui":
       return engine === "claude"

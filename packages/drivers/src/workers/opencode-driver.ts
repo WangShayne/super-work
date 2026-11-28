@@ -6,6 +6,7 @@ import type {
 } from "@super-work/core";
 import { nowIso } from "@super-work/core";
 import { wrapCommandWithOsSandbox } from "../sandbox/os-sandbox.ts";
+import { relayExtraEnv } from "./relay-env.ts";
 import { readLinesFromStream, truncateText } from "./stream-utils.ts";
 
 export function formatOpenCodeModelArg(
@@ -180,6 +181,7 @@ export class OpenCodeDriver implements WorkerDriver {
       readOnlyPaths: input.readOnlyPaths,
       allowNetwork: (input.sandboxMode ?? "balanced") === "strict" ? false : true,
       engine: "opencode",
+      ...relayExtraEnv("opencode", input),
     });
     const proc = Bun.spawn(wrapped.argv, {
       cwd: input.worktreePath,

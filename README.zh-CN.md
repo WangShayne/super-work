@@ -8,11 +8,27 @@
 
 ---
 
+## v1.8.1 — 统一大模型配置池：CLI 与 API 平级、角色指派（大模型与角色 Studio）
+
+v1.8.1 让你**为任意角色自由选择任意模型**。本机 CLI（`claude` / `codex` / `opencode` / `gemini`）与 API 模型（DeepSeek / OpenAI 兼容 / Anthropic 兼容 / Ollama）是同一个**配置池**里平级的 **`ModelProfile`**，可分别指派给*控制*、*实现*与*评审*三个角色：
+
+- **大模型与角色 Studio**（设置 → *大模型与角色*，以及安装向导的*自定义*；统一的 `ModelRegistryStudio` 组件，无重复表单）。**阶段 ① 配置池**：每个 CLI / API 配置都是一张平级卡片，含就绪徽标、自定义 Base URL / 密钥的 CLI 显示 `+ 中转` 徽标、卡片级**参与自动工作池**开关、一键**测试**（`POST /api/setup/test-model`）、行内**编辑**与两步行内**删除**（仅自定义配置），以及**扫描本机 CLI**与**新增模型配置**（8 个平级模板：4 种 API 协议 + 4 个 CLI 引擎）。**阶段 ② 角色指派**：三个选择器（控制 / 实现 / 交叉审查）仅列出*已就绪*配置（控制另含*本地启发式*，实现 / 审查另含*自动*），修改后立即保存。
+- **删除 API**：`POST /api/setup/configure` 支持 `deleteModelProfileIds: string[]`。自定义配置会被移除；内置 CLI 配置（`builtinCli`）受保护（HTTP 400）。曾指向被删配置的角色指派（含仓库级 `implementModelId` / `reviewModelId`）回退为 `heuristic` / `auto`。
+- **模型选择器**：首页*选项 → 模型*与 DeepDive 的 Steer 栏均从已就绪配置中选择，并发送 `preferredModelId`。
+
+v1.8.1 早先已交付的基础能力：
+
+- **`ApiWorkerDriver`（`api` 引擎）**：原生 Agent Worker，支持 DeepSeek、OpenAI 兼容（OpenAI、OpenRouter、OneAPI、SiliconFlow、Qwen、Ollama）与 Anthropic 兼容 API，工具循环被限制在工单 worktree 内。
+- **CLI 自定义中转**：`claude` / `codex` / `opencode` / `gemini` 均可配置可选的 `baseUrl` + `apiKey`，按次调用注入（`ANTHROPIC_BASE_URL`、`OPENAI_BASE_URL`、`GOOGLE_GEMINI_BASE_URL`），不修改本机 CLI 配置。
+- **`POST /api/setup/test-worker`**：一键测试 API 预设或 CLI 中转的连通性，返回 `{ ok, latencyMs, message }`；已保存的密钥仅以掩码形式展示。
+- **异构搭配**：实现与评审可使用不同配置（例如 Claude Code 实现、DeepSeek API 配置评审）；已存密钥仅以掩码展示，并支持清除密钥。
+- **`syncRepos: false`**：`POST /api/setup/configure` 现在可在保存凭据或通知时不覆盖仓库的 `preferredImplementEngine`（保留 `auto`）。
+
 ## v1.8.0 — Super-Agent First：大简化（消费级界面，专业级引擎）
 
 v1.8.0 将 `super-work` 重塑为**架在不变的专业引擎之上的消费级界面**：你只需说出需求、扫一眼“需要你”的事项、点击批准。下列所有高级能力依然存在，只是被收纳进可折叠的 **Engine Room（引擎室）**。
 
-- **单栏 HeaderBar**：`v1.8` 徽标 + 实时健康点 · 胶囊标签页（Home / History / Settings） · `⌘K` 命令面板 / `ZH-EN` 切换（非首页标签另有紧凑仓库胶囊）。仓库切换器与 **受控 / 智能 / 全权**（Guarded / Smart / Autonomous）授权拨盘集成在 Hero Composer 的上下文工具栏中，紧贴你正在输入的需求。
+- **单栏 HeaderBar**：`v1.8.1` 徽标 + 实时健康点 · 胶囊标签页（Home / History / Settings） · `⌘K` 命令面板 / `ZH-EN` 切换（非首页标签另有紧凑仓库胶囊）。仓库切换器与 **受控 / 智能 / 全权**（Guarded / Smart / Autonomous）授权拨盘集成在 Hero Composer 的上下文工具栏中，紧贴你正在输入的需求。
 - **三大空间**：
   - **Home（首页）** —— **Hero Composer**（隐式智能分诊、可选 `scope:<glob>` 令牌、可折叠 *Advanced ▾*）、**Needs You**（三个人类动词：**Approve 批准 / Answer 回答 / Unblock 解阻**）与 **Live Work** 实时任务卡片。
   - **History（历史）** —— 时间线与发布（Timeline & Releases），以及看板 / DAG 视图。

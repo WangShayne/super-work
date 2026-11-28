@@ -2,8 +2,15 @@ import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SuperWorkKernel, type CliScanReport, type SystemSetupConfig, nowIso } from "@super-work/core";
 import {
+  SuperWorkKernel,
+  type CliScanReport,
+  type SystemSetupConfig,
+  nowIso,
+  pickUsableApiWorkerProfile,
+} from "@super-work/core";
+import {
+  ApiWorkerDriver,
   BunSelfHostRunner,
   ClaudeCodeDriver,
   CliEnvironmentScanner,
@@ -95,6 +102,10 @@ export async function startDaemon(options?: {
     new CodexDriver(),
     new OpenCodeDriver(),
     new GeminiCliDriver(),
+    new ApiWorkerDriver(() =>
+      // v1.8.1: 'api' is available when ANY enabled API ModelProfile (or the legacy profile) is usable.
+      stateStore.getSystemSetting<SystemSetupConfig>("setup_config").then(pickUsableApiWorkerProfile),
+    ),
     new MockWorkerDriver(),
   ];
 

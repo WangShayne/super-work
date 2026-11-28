@@ -183,7 +183,7 @@ export function App() {
               ticketsById={ticketsById}
               inboxItems={inboxItems}
               liveEvents={liveEvents}
-              availableEngines={availableEngines}
+              modelProfiles={setupStatus?.config.modelProfiles ?? []}
               onResolve={handleResolveInbox}
               onRefresh={refresh}
               onInspectTicket={setInspectedTicketId}
@@ -212,7 +212,6 @@ export function App() {
               onChangeAutonomyPreset={handleChangeAutonomyPreset}
               onPatchRepo={patchRepo}
               onOpenAddRepo={() => setAddRepoOpen(true)}
-              onOpenSetup={() => setSetupOpen(true)}
               onSetupSaved={(next) => {
                 setSetupStatus(next);
                 refresh();
@@ -230,6 +229,7 @@ export function App() {
           allTickets={allTickets}
           repos={repos}
           repo={activeRepo}
+          modelProfiles={setupStatus?.config.modelProfiles ?? []}
           liveEvents={liveEvents}
           onClose={() => setInspectedTicketId(null)}
           onSelectTicket={setInspectedTicketId}
@@ -249,7 +249,6 @@ export function App() {
         <SetupWizardModal
           open={setupOpen}
           setupStatus={setupStatus}
-          availableEngines={availableEngines}
           onClose={() => setSetupOpen(false)}
           onSaved={async (next) => {
             setSetupStatus(next);

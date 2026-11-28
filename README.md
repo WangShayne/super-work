@@ -8,11 +8,27 @@ An asynchronous autonomous development workflow orchestration kernel and local d
 
 ---
 
+## v1.8.1 — Unified Model Pool: CLI & API Peers, Role Binding (Models & Roles Studio)
+
+v1.8.1 lets you pick **any model you like** for **any role**. Local CLIs (`claude` / `codex` / `opencode` / `gemini`) and API models (DeepSeek / OpenAI-compatible / Anthropic-compatible / Ollama) are equal peer **`ModelProfile`s** in one **Model Pool**, bound to the *Control*, *Implement* and *Review* roles:
+
+- **Models & Roles Studio** (Settings → *Models & Roles*, and the Setup Wizard's *Customize*; one `ModelRegistryStudio` component, no duplicated forms). **Stage ① Model Pool**: peer cards for every CLI and API profile with a ready badge, a `+ Relay` badge for CLIs with a custom Base URL / key, a per-card **Auto Pool** switch, a 1-click **Test** (`POST /api/setup/test-model`), inline **Edit** and a 2-step inline **Delete** (custom profiles only), plus **Rescan CLI** and **+ Add Model** (8 equal templates: 4 API protocols + 4 CLI engines). **Stage ② Role Binding**: three selectors (Control / Implement / Cross-Review) that list only *ready* profiles (plus *Heuristic* for Control and *Auto* for Implement / Review) and save immediately.
+- **Delete API**: `POST /api/setup/configure` accepts `deleteModelProfileIds: string[]`. Custom profiles are removed; built-in CLI profiles (`builtinCli`) are protected (HTTP 400). Role bindings (and repo-level `implementModelId` / `reviewModelId`) that pointed at a deleted profile fall back to `heuristic` / `auto`.
+- **Model picker**: Home *Options → Model* and the DeepDive steer bar pick from ready profiles and send `preferredModelId`.
+
+Foundations introduced earlier in v1.8.1:
+
+- **`ApiWorkerDriver` (`api` engine)**: a native agent worker over DeepSeek, OpenAI-compatible (OpenAI, OpenRouter, OneAPI, SiliconFlow, Qwen, Ollama) and Anthropic-compatible APIs. Its tool loop is jailed to the ticket worktree.
+- **CLI custom relays**: each of `claude` / `codex` / `opencode` / `gemini` accepts an optional `baseUrl` + `apiKey` that is injected per invocation (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `GOOGLE_GEMINI_BASE_URL`) without touching your local CLI config.
+- **`POST /api/setup/test-worker`**: one-call connectivity test for an API preset or a CLI relay, returning `{ ok, latencyMs, message }`. Saved keys are only ever shown masked.
+- **Heterogeneous pairing**: Implement and Review can use different profiles (e.g. Claude Code implements, a DeepSeek API profile reviews); saved keys are only shown masked, with clear-key support.
+- **`syncRepos: false`**: `POST /api/setup/configure` can now save credentials or notifications without overwriting a repo's `preferredImplementEngine` (so `auto` is preserved).
+
 ## v1.8.0 — Super-Agent First: The Great Simplification (Consumer Surface, Pro Engine)
 
 v1.8.0 turns `super-work` into a **consumer surface on top of an unchanged professional engine**: you state a requirement, glance at what needs you, and approve. Every advanced capability below still exists — it simply moved into a collapsible **Engine Room**.
 
-- **Single-bar HeaderBar**: `v1.8` badge + Live Health Dot · pill tabs (Home / History / Settings) · `⌘K` command palette / `ZH-EN` toggle (plus a compact repo pill on non-Home tabs). The repo switcher and the **Guarded / Smart / Autonomous** autonomy dial live in the Hero Composer's integrated context toolbar, right next to the requirement you are typing.
+- **Single-bar HeaderBar**: `v1.8.1` badge + Live Health Dot · pill tabs (Home / History / Settings) · `⌘K` command palette / `ZH-EN` toggle (plus a compact repo pill on non-Home tabs). The repo switcher and the **Guarded / Smart / Autonomous** autonomy dial live in the Hero Composer's integrated context toolbar, right next to the requirement you are typing.
 - **3 spaces**:
   - **Home** — the **Hero Composer** (implicit smart intake, optional `scope:<glob>` tokens, collapsible *Advanced ▾*), **Needs You** (three human verbs: **Approve / Answer / Unblock**) and **Live Work** cards.
   - **History** — Timeline & Releases, plus the Board / DAG views.

@@ -2,6 +2,7 @@ import type { WorkerDriver, WorkerStreamEvent, WorkerTurnInput } from "@super-wo
 import { nowIso } from "@super-work/core";
 import { createSanitizedClaudeEnv } from "../llm/control-plane-llm.ts";
 import { wrapCommandWithOsSandbox } from "../sandbox/os-sandbox.ts";
+import { relayExtraEnv } from "./relay-env.ts";
 import { readLinesFromStream, truncateText } from "./stream-utils.ts";
 
 export function buildClaudeCliArgs(input: WorkerTurnInput): string[] {
@@ -235,6 +236,7 @@ export class ClaudeCodeDriver implements WorkerDriver {
       allowNetwork: (input.sandboxMode ?? "balanced") === "strict" ? false : true,
       engine: "claude",
       baseEnv: createSanitizedClaudeEnv(),
+      ...relayExtraEnv("claude", input),
     });
     const proc = Bun.spawn(wrapped.argv, {
       cwd: input.worktreePath,

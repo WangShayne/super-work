@@ -624,6 +624,7 @@ export interface DirectTicketInput {
   maxCostUsd?: number;
   maxDurationSec?: number;
   preferredEngine?: EnginePreference;
+  preferredModelId?: string;
   arenaMode?: boolean;
   arenaCompetitorEngine?: WorkerEngineId;
   modelOverride?: string;
@@ -647,6 +648,7 @@ export interface CreateEpicInput {
   releaseBarrier?: boolean;
   barrierGroupId?: string;
   preferredEngine?: EnginePreference;
+  preferredModelId?: string;
   modelOverride?: string;
   effortOverride?: ReasoningEffort;
   maxCostUsdPerSubtask?: number;

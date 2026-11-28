@@ -17,6 +17,7 @@ import type {
 } from "@super-work/core";
 
 export interface OpenAICompatibleConfig {
+  /** May be empty for keyless endpoints (ollama / localhost). */
   apiKey: string;
   baseUrl: string;
   model: string;
@@ -155,7 +156,7 @@ export const WATCHDOG_SCHEMA = {
     },
     reason: { type: "string" },
     hint: { type: "string" },
-    targetEngine: { type: "string", enum: ["claude", "codex", "opencode", "gemini", "mock"] },
+    targetEngine: { type: "string", enum: ["claude", "codex", "opencode", "gemini", "api", "mock"] },
   },
   required: ["action", "reason"],
 };

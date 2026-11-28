@@ -1,4 +1,12 @@
-import type { EngineModelProfile, ReasoningEffort, WorkerEngineId } from "./engine.ts";
+import type {
+  ApiWorkerProfile,
+  EngineModelProfile,
+  ModelProfile,
+  PublicEngineProfile,
+  PublicModelProfile,
+  ReasoningEffort,
+  WorkerEngineId,
+} from "./engine.ts";
 import type { TicketStatus } from "./pipeline.ts";
 
 export interface NotificationConfig {
@@ -143,6 +151,15 @@ export interface SystemSetupConfig {
   codexProfile?: EngineModelProfile;
   opencodeProfile?: EngineModelProfile;
   geminiProfile?: EngineModelProfile;
+  apiWorkerProfile?: ApiWorkerProfile;
+  /** v1.8.1 unified peer model registry. */
+  modelProfiles?: ModelProfile[];
+  /** 'heuristic' or a ModelProfile id. */
+  controlModelId?: string;
+  /** 'auto' or a ModelProfile id. */
+  implementModelId?: string;
+  /** 'auto' or a ModelProfile id. */
+  reviewModelId?: string;
   notifications?: NotificationConfig;
   updatedAt: string;
 }
@@ -150,7 +167,23 @@ export interface SystemSetupConfig {
 export interface PublicSetupStatus {
   initialized: boolean;
   activeLlmProvider: string;
-  config: Omit<SystemSetupConfig, "llmApiKey" | "notifications"> & {
+  config: Omit<
+    SystemSetupConfig,
+    | "llmApiKey"
+    | "notifications"
+    | "claudeProfile"
+    | "codexProfile"
+    | "opencodeProfile"
+    | "geminiProfile"
+    | "apiWorkerProfile"
+    | "modelProfiles"
+  > & {
+    modelProfiles?: PublicModelProfile[];
+    claudeProfile?: PublicEngineProfile<EngineModelProfile>;
+    codexProfile?: PublicEngineProfile<EngineModelProfile>;
+    opencodeProfile?: PublicEngineProfile<EngineModelProfile>;
+    geminiProfile?: PublicEngineProfile<EngineModelProfile>;
+    apiWorkerProfile?: PublicEngineProfile<ApiWorkerProfile>;
     hasApiKey: boolean;
     maskedApiKey?: string;
     notifications?: Omit<NotificationConfig, "webhookSecret" | "actionSecret" | "githubWebhookSecret"> & {

@@ -24,9 +24,9 @@ import { RecallTab } from "./deep-dive/RecallTab.tsx";
 import { StreamTab } from "./deep-dive/StreamTab.tsx";
 import type {
   ChainOfRecall,
-  EnginePreference,
   LiveEventLogEntry,
   MemorySearchHit,
+  PublicModelProfile,
   RepoConfig,
   ReviewCommentStatus,
   SubmitReviewCommentsInput,
@@ -39,6 +39,8 @@ interface DeepDiveDrawerProps {
   allTickets?: Ticket[];
   repos?: RepoConfig[];
   repo?: RepoConfig;
+  /** Peer model profiles offered by the steer bar's model picker (ready ones only). */
+  modelProfiles?: PublicModelProfile[];
   liveEvents: LiveEventLogEntry[];
   onClose: () => void;
   onSelectTicket?: (ticketId: string) => void;
@@ -53,6 +55,7 @@ export function DeepDiveDrawer({
   allTickets = [],
   repos = [],
   repo,
+  modelProfiles = [],
   liveEvents,
   onClose,
   onSelectTicket,
@@ -81,7 +84,7 @@ export function DeepDiveDrawer({
   const [checkpointBusy, setCheckpointBusy] = useState<string | null>(null);
   const [checkpointNotice, setCheckpointNotice] = useState<string | null>(null);
   const [steerInstruction, setSteerInstruction] = useState("");
-  const [steerEngine, setSteerEngine] = useState<EnginePreference | "">("");
+  const [steerModel, setSteerModel] = useState("");
   const [steering, setSteering] = useState(false);
   const [savingEval, setSavingEval] = useState(false);
   const [evalNotice, setEvalNotice] = useState<string | null>(null);
@@ -95,7 +98,7 @@ export function DeepDiveDrawer({
     setCheckpointNotice(null);
     setResteerPrompt("");
     setSteerInstruction("");
-    setSteerEngine("");
+    setSteerModel("");
     setEvalNotice(null);
   }, [ticketId]);
 
@@ -232,10 +235,11 @@ export function DeepDiveDrawer({
     try {
       await api.steerTicket(ticketId, {
         instruction: steerInstruction.trim(),
-        preferredEngine: steerEngine || undefined,
+        // 'auto' clears any pin; a profile id pins that model; '' leaves the current choice alone
+        ...(steerModel === "auto" ? { preferredEngine: "auto" as const } : steerModel ? { preferredModelId: steerModel } : {}),
       });
       setSteerInstruction("");
-      setSteerEngine("");
+      setSteerModel("");
       const [d, r] = await Promise.all([api.getTicketDetail(ticketId), api.getRecall(ticketId)]);
       setDetail(d);
       setRecall(r.chain);
@@ -638,8 +642,9 @@ export function DeepDiveDrawer({
               value={steerable ? steerInstruction : followUp}
               onChange={steerable ? setSteerInstruction : setFollowUp}
               busy={steerable ? steering : sendingMsg}
-              engine={steerEngine}
-              onEngineChange={setSteerEngine}
+              model={steerModel}
+              onModelChange={setSteerModel}
+              modelProfiles={modelProfiles}
               onSubmit={steerable ? handleLiveSteer : handleSendFollowUp}
             />
           );

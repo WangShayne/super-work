@@ -320,7 +320,7 @@ describe("v0.9.0 Core Modules (A.1 TDD Guard + B.2 Bandit Router + D.1 DAG Cycle
       { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
       host,
     )) as { result?: { serverInfo?: { version?: string } } };
-    expect(initResp.result?.serverInfo?.version).toBe("1.8.0");
+    expect(initResp.result?.serverInfo?.version).toBe("1.8.1");
 
     const listResp = (await handleMcpJsonRpcMessage(
       { jsonrpc: "2.0", id: 2, method: "tools/list" },

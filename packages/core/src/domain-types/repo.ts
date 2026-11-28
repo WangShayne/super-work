@@ -68,6 +68,9 @@ export interface RepoConfig {
   blueprints?: TaskBlueprint[];
   preferredImplementEngine: EnginePreference;
   preferredReviewEngine: WorkerEngineId;
+  /** v1.8.1: ModelProfile id or auto. */
+  implementModelId?: string;
+  reviewModelId?: string;
   fallbackEngines?: WorkerEngineId[];
   autoCleanupWorktree?: boolean;
   verificationCommands?: string[];

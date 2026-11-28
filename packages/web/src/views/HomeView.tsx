@@ -13,7 +13,7 @@ import type {
   RepoConfig,
   RequirementRouteKind,
   Ticket,
-  WorkerEngineId,
+  PublicModelProfile,
 } from "../types.ts";
 import {
   HUMAN_ACTIONS,
@@ -35,7 +35,7 @@ interface HomeViewProps {
   ticketsById: Map<string, Ticket>;
   inboxItems: InboxItem[];
   liveEvents: LiveEventLogEntry[];
-  availableEngines: WorkerEngineId[];
+  modelProfiles: PublicModelProfile[];
   onResolve: ResolveHandler;
   onRefresh: () => void;
   onInspectTicket: (ticketId: string) => void;
@@ -53,7 +53,7 @@ export function HomeView({
   ticketsById,
   inboxItems,
   liveEvents,
-  availableEngines,
+  modelProfiles,
   onResolve,
   onRefresh,
   onInspectTicket,
@@ -147,7 +147,7 @@ export function HomeView({
         selectedRepoId={selectedRepoId}
         onSelectRepo={onSelectRepo}
         onChangeAutonomyPreset={onChangeAutonomyPreset}
-        availableEngines={availableEngines}
+        modelProfiles={modelProfiles}
         onSubmitted={onComposerSubmitted}
         onOpenAddRepo={onOpenAddRepo}
       />

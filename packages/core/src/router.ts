@@ -7,6 +7,7 @@ import {
   synthesizeRequirementTitle,
 } from "./intake.ts";
 import { createDefaultMandate, mandateScopesOverlap, matchesPathScope } from "./mandate.ts";
+import { resolveModelPreference } from "./model-registry.ts";
 import { getFirstStage } from "./pipeline.ts";
 import { formatPlaybookContext } from "./playbook.ts";
 import type {
@@ -37,6 +38,7 @@ import type {
   TicketImpactSummary,
   Trigger,
 } from "./types.ts";
+import type { SystemSetupConfig } from "./types.ts";
 import { isTerminalTicketStatus, newId, nowIso } from "./utils.ts";
 
 export type IngestResult =
@@ -590,6 +592,12 @@ export class EventIntakeRouter {
     const template = effectiveInput.template ?? repo.defaultTemplate;
     const tddMode = effectiveInput.tddMode ?? repo.defaultTddMode ?? false;
 
+    const modelPref = resolveModelPreference(
+      await this.stateStore.getSystemSetting<SystemSetupConfig>("setup_config"),
+      effectiveInput.preferredModelId,
+    );
+    const enginePref = modelPref.preferredEngine ?? effectiveInput.preferredEngine;
+
     const ticket: Ticket = {
       id: newId("tkt"),
       repoId: repo.id,
@@ -604,11 +612,10 @@ export class EventIntakeRouter {
       mandate,
       dependsOn,
       nativeSessions: {},
-      preferredEngine: effectiveInput.preferredEngine,
-      activeEngine:
-        effectiveInput.preferredEngine && effectiveInput.preferredEngine !== "auto"
-          ? effectiveInput.preferredEngine
-          : undefined,
+      preferredEngine: enginePref,
+      preferredModelId: modelPref.preferredModelId,
+      activeModelId: modelPref.activeModelId,
+      activeEngine: enginePref && enginePref !== "auto" ? enginePref : undefined,
       campaignId: effectiveInput.campaignId,
       milestoneId: effectiveInput.milestoneId,
       campaignWave: effectiveInput.campaignWave,
@@ -919,6 +926,7 @@ export class EventIntakeRouter {
       branchName: deliveryMode === "unified" ? `super-work/epic/${epicId}` : undefined,
       nativeSessions: {},
       preferredEngine: input.preferredEngine,
+      preferredModelId: input.preferredModelId?.trim() || undefined,
       tddMode: (input.tddMode ?? repo.defaultTddMode) || undefined,
       taskCategory: classifyTaskCategory(input.title, input.description, ["**"]),
       inlineMemory: {
@@ -946,6 +954,7 @@ export class EventIntakeRouter {
     });
     this.emit({ type: "ticket_created", ticket: epic, timestamp: ts });
 
+    const subSetupConfig = await this.stateStore.getSystemSetting<SystemSetupConfig>("setup_config");
     const createdByKey = new Map<string, Ticket>();
     const subtasks: Ticket[] = [];
     const activeByRepo = new Map<string, Ticket[]>();
@@ -991,7 +1000,8 @@ export class EventIntakeRouter {
         new Set([...explicitDeps, ...existingOverlapDeps, ...semantic.semanticDepIds]),
       );
       const subTddMode = spec.tddMode ?? input.tddMode ?? targetRepo.defaultTddMode ?? false;
-      const subPreferredEngine = spec.preferredEngine ?? input.preferredEngine;
+      const subModelPref = resolveModelPreference(subSetupConfig, input.preferredModelId);
+      const subPreferredEngine = spec.preferredEngine ?? subModelPref.preferredEngine ?? input.preferredEngine;
 
       const subTicket: Ticket = {
         id: newId("tkt"),
@@ -1012,6 +1022,10 @@ export class EventIntakeRouter {
         barrierGroupId,
         nativeSessions: {},
         preferredEngine: subPreferredEngine,
+        // a spec-level engine override beats the epic-level model id
+        ...(spec.preferredEngine && spec.preferredEngine !== subModelPref.preferredEngine
+          ? {}
+          : { preferredModelId: subModelPref.preferredModelId, activeModelId: subModelPref.activeModelId }),
         activeEngine:
           subPreferredEngine && subPreferredEngine !== "auto" ? subPreferredEngine : undefined,
         tddMode: subTddMode || undefined,

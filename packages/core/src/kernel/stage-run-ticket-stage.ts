@@ -41,6 +41,8 @@ import { failCampaignWaveTicket, mergeWaveToTargetStagingBranch } from "./stage-
 import {
   collectTrippedEngines,
   quarantineSpilloverAfterTurn,
+  resolveTurnWorkerAuthAndModel,
+  selectStageProfile,
   utcTodayString,
 } from "./stage-engine-helpers.ts";
 import { handleImplementGateFailureOp } from "./stage-post-gate-helpers.ts";
@@ -97,6 +99,7 @@ export async function runTicketStageOp(
 
   const availableEngines = await ctx.getAvailableEngines();
   const trippedEngines = await collectTrippedEngines(ctx);
+  const setupConfig = await ctx.stateStore.getSystemSetting<SystemSetupConfig>("setup_config");
 
   const wantsAutoRouting =
     ticket.preferredEngine === "auto" ||
@@ -198,6 +201,12 @@ export async function runTicketStageOp(
     }
   }
 
+  // v1.8.1: unified ModelProfile selection (explicit ids, workerAutoPool filtering, heterogeneous review).
+  const modelSel = await selectStageProfile(ctx, {
+    ticket, repo, stage, setupConfig, availableEngines, trippedEngines, legacyEngine: chosenEngine,
+  });
+  chosenEngine = modelSel.engine;
+
   let driver = ctx.drivers.get(chosenEngine);
   if (!driver) {
     const chain = resolveFallbackChain({
@@ -221,6 +230,7 @@ export async function runTicketStageOp(
     return;
   }
 
+  const selectedProfile = modelSel.engine === driver.engine ? modelSel.profile : undefined;
   const spans = new SpanRecorder();
   const prepSpan = spans.start("workspace_prep", `Prepare worktree (${stage})`);
   const { effectiveBaseBranch } = await ctx.getEffectiveBaseInfo(ticket, repo);
@@ -268,6 +278,7 @@ export async function runTicketStageOp(
     ticketId: ticket.id,
     stage,
     engine: driver.engine,
+    modelProfileId: selectedProfile?.id,
     status: "running",
     nativeSessionId: existingSessionId,
     costUsd: 0,
@@ -279,6 +290,7 @@ export async function runTicketStageOp(
     status: statusForStage(stage),
     currentStage: stage,
     activeEngine: driver.engine,
+    ...(stage !== "review" ? { activeModelId: selectedProfile?.id } : {}),
     worktreePath: ws.worktreePath,
     branchName: ws.branchName,
     updatedAt: nowIso(),
@@ -320,27 +332,7 @@ export async function runTicketStageOp(
     { ...(reviewEvidence ? { reviewEvidence } : {}), worktreePath: ws.worktreePath },
   );
 
-  const setupConfig = await ctx.stateStore.getSystemSetting<SystemSetupConfig>("setup_config");
-  const engineProfile =
-    driver.engine === "claude"
-      ? setupConfig?.claudeProfile
-      : driver.engine === "codex"
-        ? setupConfig?.codexProfile
-        : driver.engine === "opencode"
-          ? setupConfig?.opencodeProfile
-          : driver.engine === "gemini"
-            ? setupConfig?.geminiProfile
-            : undefined;
-  const canApplyModelOverride = Boolean(
-    ticket.modelOverride &&
-      stage !== "review" &&
-      (!ticket.preferredEngine || ticket.preferredEngine === driver.engine),
-  );
-  const effectiveModel = canApplyModelOverride ? ticket.modelOverride : engineProfile?.model;
-  const effectiveEffort =
-    stage !== "review" && ticket.effortOverride
-      ? ticket.effortOverride
-      : engineProfile?.effort;
+  const turnAuth = resolveTurnWorkerAuthAndModel(driver.engine, ticket, setupConfig, stage, selectedProfile);
 
   const abortController = new AbortController();
   ctx.abortControllers.set(ticket.id, abortController);
@@ -439,8 +431,7 @@ export async function runTicketStageOp(
         mandate: ticket.mandate,
         nativeSessionId: existingSessionId,
         isResume: Boolean(existingSessionId),
-        model: effectiveModel,
-        effort: effectiveEffort,
+        ...turnAuth,
         sandboxMode: repo.sandboxMode ?? "balanced",
         rootRepoPath: repo.rootPath,
         readOnlyPaths: stage === "implement" ? ticket.lockedTestPaths : undefined,

@@ -95,6 +95,28 @@ describe("superAgent helpers", () => {
     expect(countHealthAlerts(health({ sseOffline: false }))).toBe(0);
   });
 
+  it("treats the 'api' worker as a real engine for health alerts", () => {
+    // api + mock only: api is a real engine, healthy → no alert
+    expect(countHealthAlerts(health({ availableEngines: ["api", "mock"] }))).toBe(0);
+    // sole real engine 'api' tripped → no healthy real engine left
+    expect(
+      healthAlertReasons(health({ availableEngines: ["api", "mock"], engineHealth: [tripped("api")] })),
+    ).toEqual(["no_healthy_engine"]);
+    // tripped api with a healthy CLI sibling → no alert
+    expect(
+      healthAlertReasons(health({ availableEngines: ["claude", "api", "mock"], engineHealth: [tripped("api")] })),
+    ).toEqual([]);
+    // pinned to api, tripped, no fallback → pinned_engine_down; healthy fallback silences it
+    const pinnedApi = (fallbackEngines?: WorkerEngineId[]) =>
+      health({
+        availableEngines: ["claude", "api", "mock"],
+        engineHealth: [tripped("api")],
+        repo: { preferredImplementEngine: "api", fallbackEngines },
+      });
+    expect(healthAlertReasons(pinnedApi())).toEqual(["pinned_engine_down"]);
+    expect(healthAlertReasons(pinnedApi(["claude"]))).toEqual([]);
+  });
+
   it("alerts when the pinned engine is tripped and no fallback is healthy", () => {
     const pinned = (fallbackEngines?: WorkerEngineId[]) =>
       health({

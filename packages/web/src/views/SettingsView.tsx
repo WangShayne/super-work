@@ -2,10 +2,10 @@ import { Suspense, lazy, useEffect, useRef, useState, type ReactNode } from "rea
 import { ChevronDown, ChevronRight, Plus } from "lucide-react";
 import { api } from "../api.ts";
 import type { EngineRoomTarget } from "../components/EngineRoomPanel.tsx";
-import { formatEngineDisplayName, useI18n, type TranslationKey } from "../i18n.tsx";
+import { ModelRegistryStudio } from "../components/setup/ModelRegistryStudio.tsx";
+import { useI18n, type TranslationKey } from "../i18n.tsx";
 import type {
   AutonomyPreset,
-  EnginePreference,
   PublicSetupStatus,
   RepoConfig,
   RepoMetricsSummary,
@@ -29,7 +29,6 @@ interface SettingsViewProps {
   onChangeAutonomyPreset: (repoId: string, preset: AutonomyPreset) => void;
   onPatchRepo: (repoId: string, patch: RepoPatch) => Promise<void>;
   onOpenAddRepo: () => void;
-  onOpenSetup: () => void;
   onSetupSaved: (next: PublicSetupStatus) => void;
   onInspectTicket: (ticketId: string) => void;
   onRefresh: () => void;
@@ -96,7 +95,6 @@ export function SettingsView({
   onChangeAutonomyPreset,
   onPatchRepo,
   onOpenAddRepo,
-  onOpenSetup,
   onSetupSaved,
   onInspectTicket,
   onRefresh,
@@ -106,7 +104,6 @@ export function SettingsView({
   const [baseBranch, setBaseBranch] = useState("main");
   const [githubRepo, setGithubRepo] = useState("");
   const [budget, setBudget] = useState("");
-  const [manualEngines, setManualEngines] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ key: string; text: string; error?: boolean } | null>(null);
   const [engineRoomOpen, setEngineRoomOpen] = useState(false);
@@ -123,7 +120,6 @@ export function SettingsView({
     setBaseBranch(repo.baseBranch);
     setGithubRepo(repo.githubRepo ?? "");
     setBudget(repo.dailyBudgetUsd ? String(repo.dailyBudgetUsd) : "");
-    setManualEngines(repo.preferredImplementEngine !== "auto");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repo?.id, repo?.updatedAt]);
 
@@ -164,13 +160,9 @@ export function SettingsView({
     ) : null;
 
   const activePreset = inferAutonomyPreset(repo);
-  const readyTools = (setupStatus?.scanReport.tools ?? []).filter((x) => x.installed && x.authenticated === true);
   const effectiveBudget = metrics?.effectiveDailyBudgetUsd ?? metrics?.dailyBudgetUsd;
   const spend = metrics?.todayCostUsd ?? 0;
   const spendPct = effectiveBudget && effectiveBudget > 0 ? Math.min(100, (spend / effectiveBudget) * 100) : 0;
-  const autoEngines = repo?.preferredImplementEngine === "auto";
-
-  const engineOptions = Array.from(new Set<WorkerEngineId>([...availableEngines, "mock"]));
 
   const saveNotifications = () =>
     run("notif", async () => {
@@ -187,6 +179,7 @@ export function SettingsView({
         codexProfile: c.codexProfile,
         opencodeProfile: c.opencodeProfile,
         geminiProfile: c.geminiProfile,
+        syncRepos: false,
         notifications: {
           macosEnabled: macos,
           webhookEnabled: webhookOn,
@@ -338,93 +331,17 @@ export function SettingsView({
         </div>
       </Card>
 
-      {/* 4. Engines */}
-      <Card title={t("settings.engines.title")}>
-        <div className="flex flex-wrap items-center gap-3">
-          <Toggle
-            checked={autoEngines}
-            label={t("settings.engines.auto")}
-            disabled={busyKey === "engines"}
-            onChange={(v) =>
-              void run("engines", async () => {
-                await onPatchRepo(repo.id, {
-                  preferredImplementEngine: v ? "auto" : (readyTools[0]?.id as EnginePreference | undefined) ?? "claude",
-                });
-              })
-            }
+      {/* 4. Models & Roles (unified Model Pool + Role Binding) */}
+      <Card title={t("settings.models.title")}>
+        {setupStatus ? (
+          <ModelRegistryStudio
+            setupStatus={setupStatus}
+            repo={repo}
+            onPatchRepo={onPatchRepo}
+            onSetupSaved={onSetupSaved}
           />
-          <div className="flex flex-wrap gap-1.5">
-            {readyTools.length === 0 ? (
-              <span className="text-[11px] text-zinc-500">{t("settings.engines.noneReady")}</span>
-            ) : (
-              readyTools.map((tool) => (
-                <span
-                  key={tool.id}
-                  className="px-2 py-0.5 rounded-md border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 text-[11px] font-mono"
-                >
-                  {tool.id} ✓
-                </span>
-              ))
-            )}
-          </div>
-          {noteFor("engines")}
-          <button
-            type="button"
-            onClick={onOpenSetup}
-            className="ml-auto text-[11px] text-indigo-400 hover:text-indigo-300"
-          >
-            {t("settings.engines.customizeLlm")}
-          </button>
-        </div>
-        <button
-          type="button"
-          onClick={() => setManualEngines((v) => !v)}
-          aria-expanded={manualEngines}
-          className="inline-flex items-center gap-1 text-[11px] text-zinc-500 hover:text-zinc-300"
-        >
-          {manualEngines ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-          {t("settings.engines.manual")}
-        </button>
-        {manualEngines && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-            <div>
-              <label className="block text-zinc-400 mb-1">{t("settings.engines.implement")}</label>
-              <select
-                value={repo.preferredImplementEngine}
-                onChange={(e) =>
-                  void run("engines", () =>
-                    onPatchRepo(repo.id, { preferredImplementEngine: e.target.value as EnginePreference }),
-                  )
-                }
-                className={FIELD}
-              >
-                <option value="auto">{formatEngineDisplayName("auto", "en")}</option>
-                {engineOptions.map((e) => (
-                  <option key={e} value={e}>
-                    {formatEngineDisplayName(e, "en")}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-zinc-400 mb-1">{t("settings.engines.review")}</label>
-              <select
-                value={repo.preferredReviewEngine}
-                onChange={(e) =>
-                  void run("engines", () =>
-                    onPatchRepo(repo.id, { preferredReviewEngine: e.target.value as WorkerEngineId }),
-                  )
-                }
-                className={FIELD}
-              >
-                {engineOptions.map((e) => (
-                  <option key={e} value={e}>
-                    {formatEngineDisplayName(e, "en")}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
+        ) : (
+          <p className="text-xs text-zinc-500">{t("settings.notif.needSetup")}</p>
         )}
       </Card>
 

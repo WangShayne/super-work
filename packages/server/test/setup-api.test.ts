@@ -153,8 +153,8 @@ describe("First-Run Setup & CLI Scan Server API", () => {
         hasApiKey: boolean;
         maskedApiKey?: string;
         llmApiKey?: string;
-        claudeProfile?: { model?: string; effort?: string };
-        codexProfile?: { model?: string; effort?: string };
+        claudeProfile?: { model?: string; effort?: string; hasApiKey?: boolean };
+        codexProfile?: { model?: string; effort?: string; hasApiKey?: boolean };
       };
     };
     expect(cfg.initialized).toBe(true);
@@ -162,8 +162,8 @@ describe("First-Run Setup & CLI Scan Server API", () => {
     expect(cfg.config.hasApiKey).toBe(true);
     expect(cfg.config.maskedApiKey).toBe("sk-****abcd");
     expect(cfg.config.llmApiKey).toBeUndefined();
-    expect(cfg.config.claudeProfile).toEqual({ model: "opus", effort: "high" });
-    expect(cfg.config.codexProfile).toEqual({ model: "gpt-5.6-sol", effort: "xhigh" });
+    expect(cfg.config.claudeProfile).toEqual({ model: "opus", effort: "high", hasApiKey: false });
+    expect(cfg.config.codexProfile).toEqual({ model: "gpt-5.6-sol", effort: "xhigh", hasApiKey: false });
 
     // Per-ticket model/effort override persists through POST /api/tickets
     const ticketRes = await app.request("/api/tickets", {

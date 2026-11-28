@@ -6,6 +6,23 @@
 
 ---
 
+## 零 a、 v1.8.1：配置池与角色指派
+
+打开**设置 → 大模型与角色**（或安装向导的*自定义*）进入 **ModelRegistryStudio**。
+
+**阶段 ① — 大模型配置池（CLI 与 API 平级）**
+
+1. 点击**扫描本机 CLI**检测本机 `claude` / `codex` / `opencode` / `gemini`，顶部显示 `{已就绪}/{总数}`。
+2. 点击**新增模型配置**，从 8 个平级模板中选择：**DeepSeek**、**OpenAI / 兼容 API**（OpenAI、OpenRouter、OneAPI、SiliconFlow、Qwen）、**Anthropic / 兼容 API**、**本地 Ollama**（`http://localhost:11434/v1`），或 **Claude / Codex / OpenCode / Gemini CLI**。填写 Base URL、模型、推理强度与 API Key（已保存的密钥以掩码显示，勾选*清除已保存的 Key*即可删除）。CLI 配置的可选中转 Base URL / API Key 会注入为 `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` / `GOOGLE_GEMINI_BASE_URL`。
+3. 点击**测试连接**（`POST /api/setup/test-model`）查看延迟与状态，再点击**保存模型配置**。
+4. 每张卡片可切换**参与自动工作池**（是否纳入 Worker 智能路由）、**测试**、**编辑**，或**删除**（仅自定义配置，行内二次确认）。内置 CLI 配置的类型与引擎被锁定，且不可删除。
+
+**阶段 ② — 角色模型指派**
+
+选择**控制模型**（路由 / 拆单 / 看门狗；*本地启发式规则*不消耗 Token）、**工作实现模型**与**交叉审查模型**（*自动*走 Worker 池智能路由，审查优先选择不同模型盲审）。仅列出*已就绪*的配置；修改后立即保存并提示*已保存*；选中仓库时还会同步更新该仓库的 `implementModelId` / `reviewModelId`，且不会覆盖 `auto`。
+
+通过 `POST /api/setup/configure` 的 `deleteModelProfileIds` 删除配置后，曾使用它的角色回退为 `heuristic` / `auto`。首页编辑器的*选项 → 模型*与 DeepDive 的 Steer 栏从同一批已就绪配置中选择（`preferredModelId`）。
+
 ## 零、 v1.8.0 快速开始：Super-Agent First
 
 v1.8.0 的主题是*消费级界面，专业级引擎*：三步即可从零到交付一次变更。
@@ -40,7 +57,7 @@ super-work up [-d|--detach]                              # 显式启动守护进
 - **History（历史）**：时间线与发布（Timeline & Releases）、看板 / DAG。
 - **Settings（设置）**：5 项 Essentials + 可折叠 **Developer / Engine Room**（Contract / Gates、Playbook / Casebook、Routines / Campaigns、Worktrees / Merge Train / Simulate、Flight Recorder / Doctor / Evals）。
 - **DeepDiveDrawer**：*Overview & Changes* + *More ▾*，底部常驻 **Steer** 输入栏。
-- **HeaderBar**（单栏）：`v1.8` 徽标 + 实时健康点 · 胶囊标签页（Home / History / Settings） · `⌘K` / `ZH-EN`（非首页标签另有紧凑仓库胶囊）。
+- **HeaderBar**（单栏）：`v1.8.1` 徽标 + 实时健康点 · 胶囊标签页（Home / History / Settings） · `⌘K` / `ZH-EN`（非首页标签另有紧凑仓库胶囊）。
 - **Hero Composer 上下文工具栏**：仓库切换器（含注册） · **受控 / 智能 / 全权** 拨盘 · *Advanced ▾*，直接集成在需求输入框下方。
 
 以下章节深入介绍完整的 Engine Room 能力。

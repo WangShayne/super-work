@@ -45,7 +45,7 @@ import type { OpenAICompatibleConfig } from "./control-plane-helpers.ts";
 export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
   readonly providerName: string;
 
-  constructor(private readonly config: OpenAICompatibleConfig) {
+  constructor(protected readonly config: OpenAICompatibleConfig) {
     this.providerName = config.providerLabel ?? `api:${config.model}`;
   }
 
@@ -445,13 +445,15 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
     return probeSteps.length > 0 ? { ...norm, probeSteps } : norm;
   }
 
-  private async chatJson<T>(systemPrompt: string, userPrompt: string): Promise<T> {
+  protected async chatJson<T>(systemPrompt: string, userPrompt: string): Promise<T> {
     const url = `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`;
+    const apiKey = this.config.apiKey?.trim();
     const res = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${this.config.apiKey}`,
+        // Keyless endpoints (ollama / localhost) must not receive "Bearer ".
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
       },
       body: JSON.stringify({
         model: this.config.model,

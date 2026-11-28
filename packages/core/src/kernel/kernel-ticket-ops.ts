@@ -1,5 +1,6 @@
 import { countDiffLines } from "../arena.ts";
 import { selectRelevantCasesForContext } from "../casebook.ts";
+import { resolveSteerModelFields } from "../model-registry.ts";
 import { OutboxProcessor } from "../outbox.ts";
 import { getPipelineTemplate } from "../pipeline.ts";
 import { formatPlaybookContext } from "../playbook.ts";
@@ -22,6 +23,7 @@ import type {
   SpecClarificationResult,
   StageKind,
   SteerTicketInput,
+  SystemSetupConfig,
   Ticket,
   TicketCheckpoint,
   WorkerEngineId,
@@ -191,6 +193,7 @@ export async function intakeRequirementOp(
       epicDeliveryMode: plan.epicPlan.epicDeliveryMode,
       releaseBarrier: plan.epicPlan.releaseBarrier,
       preferredEngine: input.preferredEngine,
+      preferredModelId: input.preferredModelId,
       modelOverride: input.modelOverride,
       effortOverride: input.effortOverride,
       maxCostUsdPerSubtask: input.maxBudgetUsd,
@@ -210,6 +213,7 @@ export async function intakeRequirementOp(
     allowedPaths: single.allowedPaths,
     acceptanceCriteria: single.acceptanceCriteria,
     preferredEngine: input.preferredEngine,
+    preferredModelId: input.preferredModelId,
     modelOverride: input.modelOverride,
     effortOverride: input.effortOverride,
     maxCostUsd: input.maxBudgetUsd,
@@ -337,6 +341,7 @@ export async function steerTicketOp(
     ctx.pendingSteers.set(ticketId, {
       instruction,
       preferredEngine: input.preferredEngine,
+      preferredModelId: input.preferredModelId,
     });
     activeCtrl.abort("live_steer");
     const activeRun = ctx.activeTicketRuns.get(ticketId);
@@ -347,9 +352,13 @@ export async function steerTicketOp(
   }
 
   const ts = nowIso();
+  const steerModel = resolveSteerModelFields(
+    await ctx.stateStore.getSystemSetting<SystemSetupConfig>("setup_config"),
+    input,
+  );
   const overrideEngine =
-    input.preferredEngine && input.preferredEngine !== "auto"
-      ? input.preferredEngine
+    steerModel.enginePref && steerModel.enginePref !== "auto"
+      ? steerModel.enginePref
       : existing.activeEngine;
   const updated: Ticket = {
     ...existing,
@@ -357,7 +366,8 @@ export async function steerTicketOp(
     pauseBeforeRun: false,
     errorMessage: undefined,
     steerCount: (existing.steerCount ?? 0) + 1,
-    preferredEngine: input.preferredEngine ?? existing.preferredEngine,
+    preferredEngine: steerModel.enginePref ?? existing.preferredEngine,
+    ...(steerModel.modelFields ?? {}),
     activeEngine: overrideEngine,
     inlineMemory: {
       ...existing.inlineMemory,

@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { ChevronDown, Clock, Compass, Database, FileDiff, History, Send, Terminal } from "lucide-react";
 import { useI18n } from "../../i18n.tsx";
-import type { EnginePreference } from "../../types.ts";
+import type { PublicModelProfile } from "../../types.ts";
 
 export type DrawerTab = "overview" | "changes" | "recall" | "outbox" | "checkpoints";
 
@@ -110,13 +110,15 @@ interface SteerBarProps {
   value: string;
   onChange: (value: string) => void;
   busy: boolean;
-  engine: EnginePreference | "";
-  onEngineChange: (engine: EnginePreference | "") => void;
+  /** "" keep current model · "auto" auto-pick · otherwise a ready ModelProfile id. */
+  model: string;
+  onModelChange: (model: string) => void;
+  modelProfiles: PublicModelProfile[];
   onSubmit: (e: React.FormEvent) => void;
 }
 
 /** Permanent footer input of the DeepDive drawer. */
-export function SteerBar({ steerable, value, onChange, busy, engine, onEngineChange, onSubmit }: SteerBarProps) {
+export function SteerBar({ steerable, value, onChange, busy, model, onModelChange, modelProfiles, onSubmit }: SteerBarProps) {
   const { t } = useI18n();
   return (
     <form onSubmit={onSubmit} className="px-5 py-3 border-t border-zinc-800 bg-zinc-900/60 flex items-center gap-2">
@@ -131,17 +133,20 @@ export function SteerBar({ steerable, value, onChange, busy, engine, onEngineCha
       />
       {steerable && (
         <select
-          value={engine}
-          onChange={(e) => onEngineChange(e.target.value as EnginePreference | "")}
+          value={model}
+          onChange={(e) => onModelChange(e.target.value)}
           aria-label={t("composer.engine")}
-          className="bg-zinc-950 border border-zinc-800 rounded-md px-2 py-2 text-[11px] font-mono text-zinc-300"
+          className="bg-zinc-950 border border-zinc-800 rounded-md px-2 py-2 text-[11px] text-zinc-300 max-w-[9rem] sm:max-w-[14rem] truncate"
         >
-          <option value="">{t("drawer.keepEngine")}</option>
-          {(["auto", "claude", "codex", "opencode", "gemini", "mock"] as const).map((e) => (
-            <option key={e} value={e}>
-              {e}
-            </option>
-          ))}
+          <option value="">{t("models.picker.keep")}</option>
+          <option value="auto">{t("models.picker.autoPick")}</option>
+          {modelProfiles
+            .filter((p) => p.ready)
+            .map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
         </select>
       )}
       <button

@@ -66,6 +66,7 @@ const ENGINE_ALLOWED_PREFIXES: Record<SanitizedEnvOptions["engine"], string[]> =
     "OPENCODE_",
   ],
   gemini: ["GEMINI_", "GOOGLE_", "VERTEX_", "CLOUD_ML_REGION"],
+  api: [],
   mock: [],
   verification: [
     "PORT",

@@ -44,17 +44,21 @@ import {
 
 export class CliFallbackControlLLM implements ControlPlaneLLM {
   readonly providerName: string;
-  private readonly claudeBin: string;
-  private readonly model?: string;
-  private readonly effort: ReasoningEffort;
-  private readonly timeoutMs: number;
+  protected readonly claudeBin: string;
+  protected readonly model?: string;
+  protected readonly effort: ReasoningEffort;
+  protected readonly timeoutMs: number;
+  /** Relay overrides (custom baseUrl/apiKey) merged onto the sanitized process env. */
+  protected readonly extraEnv?: NodeJS.ProcessEnv;
 
   constructor(options?: {
     claudeBin?: string;
     model?: string;
     effort?: ReasoningEffort;
     timeoutMs?: number;
+    env?: NodeJS.ProcessEnv;
   }) {
+    this.extraEnv = options?.env;
     this.claudeBin = options?.claudeBin ?? "claude";
     this.model = sanitizeCliModelName(options?.model);
     this.effort = options?.effort ?? "low";
@@ -288,7 +292,7 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
     return normalizeRequirementIntakePlan(parsed, input);
   }
 
-  private async runClaudeJson<T>(prompt: string, schema: Record<string, unknown>): Promise<T> {
+  protected async runClaudeJson<T>(prompt: string, schema: Record<string, unknown>): Promise<T> {
     const resolvedBin = resolveExecutable(this.claudeBin);
     if (!resolvedBin) {
       throw new Error("claude CLI not found on PATH");
@@ -302,7 +306,7 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
 
     const { stdout, stderr, exitCode } = await runSpawnWithTimeout([resolvedBin, ...args], {
       timeoutMs: this.timeoutMs,
-      env: createSanitizedClaudeEnv(),
+      env: { ...createSanitizedClaudeEnv(), ...this.extraEnv },
       label: "Claude CLI ControlPlaneLLM",
     });
     if (exitCode !== 0) {
@@ -325,13 +329,16 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
   private readonly model?: string;
   private readonly effort: "low" | "medium" | "high" | "xhigh";
   private readonly timeoutMs: number;
+  private readonly extraEnv?: NodeJS.ProcessEnv;
 
   constructor(options?: {
     codexBin?: string;
     model?: string;
     effort?: ReasoningEffort;
     timeoutMs?: number;
+    env?: NodeJS.ProcessEnv;
   }) {
+    this.extraEnv = options?.env;
     this.codexBin = options?.codexBin ?? "codex";
     this.model = sanitizeCliModelName(options?.model);
     const rawEffort = options?.effort ?? "low";
@@ -597,6 +604,7 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
 
       const { stderr, exitCode } = await runSpawnWithTimeout(args, {
         timeoutMs: this.timeoutMs,
+        ...(this.extraEnv ? { env: { ...createSanitizedClaudeEnv(), ...this.extraEnv } } : {}),
         label: "Codex CLI ControlPlaneLLM",
       });
       if (exitCode !== 0) {

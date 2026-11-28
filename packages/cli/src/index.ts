@@ -80,7 +80,7 @@ function parseCliArgs(argv: string[]): ParsedArgs {
     "milestone",
   ]);
   const optionalEngineFlags = new Set(["arena"]);
-  const engineValues = new Set(["claude", "codex", "opencode", "gemini", "mock"]);
+  const engineValues = new Set(["claude", "codex", "opencode", "gemini", "api", "mock"]);
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;

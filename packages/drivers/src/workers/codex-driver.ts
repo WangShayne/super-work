@@ -6,6 +6,7 @@ import type {
 } from "@super-work/core";
 import { nowIso } from "@super-work/core";
 import { wrapCommandWithOsSandbox } from "../sandbox/os-sandbox.ts";
+import { relayExtraEnv } from "./relay-env.ts";
 import { readLinesFromStream, truncateText } from "./stream-utils.ts";
 
 export function normalizeCodexEffort(
@@ -156,6 +157,7 @@ export class CodexDriver implements WorkerDriver {
       allowNetwork: input.mandate.allowNetwork,
       engine: "codex",
       skipOuterSandbox: true,
+      ...relayExtraEnv("codex", input),
     });
     const proc = Bun.spawn(wrapped.argv, {
       cwd: input.worktreePath,

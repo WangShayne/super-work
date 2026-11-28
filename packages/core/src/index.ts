@@ -34,3 +34,4 @@ export * from "./engine-health.ts";
 export * from "./autonomy-preset.ts";
 export * from "./inbox-taxonomy.ts";
 export * from "./repo-autodetect.ts";
+export * from "./model-registry.ts";

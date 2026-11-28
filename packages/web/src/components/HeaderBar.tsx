@@ -83,7 +83,7 @@ export function HeaderBar({
           </div>
           <span className="font-semibold tracking-tight text-zinc-100 text-sm">super-work</span>
           <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-300/90 border border-indigo-500/25">
-            v1.8
+            v1.8.1
           </span>
           {reloadPhase && (
             <span

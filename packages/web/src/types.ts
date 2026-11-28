@@ -133,9 +133,20 @@ export type {
   AutonomyPreset,
   InboxHumanAction,
   RepoAutoDetectResult,
+  ApiWorkerPreset,
+  ApiWorkerProfile,
+  PublicEngineProfile,
+  ModelProfile,
+  PublicModelProfile,
+  ModelProfileKind,
+  CliEngineId,
+  ApiModelProtocol,
 } from "@super-work/core/types";
 
 import type {
+  ModelProfile as CoreModelProfile,
+  ApiWorkerProfile as CoreApiWorkerProfile,
+  EngineModelProfile as CoreEngineModelProfile,
   EnginePreference,
   HandoverDigest,
   InboxItem,
@@ -230,6 +241,26 @@ export interface LlmConnectionTestResult {
   message: string;
 }
 
+export interface WorkerConnectionTestResult {
+  ok: boolean;
+  latencyMs: number;
+  message: string;
+}
+
+/** v1.8.1 peer ModelProfile patch: apiKey replaces the saved key, clearApiKey removes it. */
+export type ModelProfilePatch = Partial<CoreModelProfile> & { clearApiKey?: boolean };
+
+export interface ModelConnectionTestResult {
+  ok: boolean;
+  providerName: string;
+  latencyMs: number;
+  message: string;
+}
+
+/** CLI engine profile patch: apiKey replaces the saved key, clearApiKey removes it. */
+export type EngineProfilePatch = CoreEngineModelProfile & { clearApiKey?: boolean };
+export type ApiWorkerProfilePatch = Partial<CoreApiWorkerProfile> & { clearApiKey?: boolean };
+
 export interface PlaybookHygieneReport {
   repoId?: string;
   total: number;
@@ -263,6 +294,7 @@ export interface CreateMilestoneInput {
   targetVersion?: string;
   requirements: string[];
   preferredEngine?: EnginePreference;
+  preferredModelId?: string;
   template?: PipelineTemplateId;
   maxBudgetUsdPerItem?: number;
   integrationMode?: MilestoneIntegrationMode;

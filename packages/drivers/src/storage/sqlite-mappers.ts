@@ -125,6 +125,8 @@ export function mapRepoRow(r: Record<string, unknown>): RepoConfig {
       ? (JSON.parse(String(r.blueprints_json)) as TaskBlueprint[])
       : undefined,
     verificationStrategy: normalizeVerificationStrategy(r.verification_strategy),
+    implementModelId: r.implement_model_id ? String(r.implement_model_id) : undefined,
+    reviewModelId: r.review_model_id ? String(r.review_model_id) : undefined,
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
   };
@@ -271,6 +273,8 @@ export function mapTicketRow(r: Record<string, unknown>): Ticket {
     pendingEpicReplan: r.pending_epic_replan_json
       ? (JSON.parse(String(r.pending_epic_replan_json)) as EpicReplanProposal)
       : undefined,
+    preferredModelId: r.preferred_model_id ? String(r.preferred_model_id) : undefined,
+    activeModelId: r.active_model_id ? String(r.active_model_id) : undefined,
     modelOverride: r.model_override ? String(r.model_override) : undefined,
     effortOverride: r.effort_override
       ? (String(r.effort_override) as Ticket["effortOverride"])
@@ -295,6 +299,7 @@ export function mapStageRunRow(r: Record<string, unknown>): StageRun {
     engine: r.engine as StageRun["engine"],
     status: r.status as StageRun["status"],
     nativeSessionId: r.native_session_id ? String(r.native_session_id) : undefined,
+    modelProfileId: r.model_profile_id ? String(r.model_profile_id) : undefined,
     costUsd: Number(r.cost_usd),
     startedAt: String(r.started_at),
     completedAt: r.completed_at ? String(r.completed_at) : undefined,

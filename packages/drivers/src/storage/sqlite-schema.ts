@@ -471,6 +471,8 @@ export function initializeSqliteSchema(db: Database): void {
   ensureColumn(db, existingRepoCols, "repos", "forbidden_paths_json", "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(db, existingRepoCols, "repos", "conventions", "TEXT");
   ensureColumn(db, existingRepoCols, "repos", "contract_synced_hash", "TEXT");
+  ensureColumn(db, existingRepoCols, "repos", "implement_model_id", "TEXT");
+  ensureColumn(db, existingRepoCols, "repos", "review_model_id", "TEXT");
   ensureColumn(db, existingRepoCols, "repos", "contract_synced_at", "TEXT");
   ensureColumn(db, existingRepoCols, "repos", "smoke_check_json", "TEXT");
   ensureColumn(db, existingRepoCols, "repos", "fallback_engines_json", "TEXT");
@@ -487,6 +489,8 @@ export function initializeSqliteSchema(db: Database): void {
   const ticketCols = db.query("PRAGMA table_info(tickets)").all() as Array<{ name: string }>;
   const existingCols = new Set(ticketCols.map((c) => c.name));
   ensureColumn(db, existingCols, "tickets", "preferred_engine", "TEXT");
+  ensureColumn(db, existingCols, "tickets", "preferred_model_id", "TEXT");
+  ensureColumn(db, existingCols, "tickets", "active_model_id", "TEXT");
   ensureColumn(db, existingCols, "tickets", "model_override", "TEXT");
   ensureColumn(db, existingCols, "tickets", "effort_override", "TEXT");
   ensureColumn(db, existingCols, "tickets", "worktree_cleaned_at", "TEXT");
@@ -546,6 +550,7 @@ export function initializeSqliteSchema(db: Database): void {
   ensureColumn(db, existingStageRunCols, "stage_runs", "spans_json", "TEXT");
   ensureColumn(db, existingStageRunCols, "stage_runs", "tool_profile_json", "TEXT");
   ensureColumn(db, existingStageRunCols, "stage_runs", "steered", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, existingStageRunCols, "stage_runs", "model_profile_id", "TEXT");
 
   const playbookCols = db.query("PRAGMA table_info(playbook_entries)").all() as Array<{ name: string }>;
   const existingPlaybookCols = new Set(playbookCols.map((c) => c.name));

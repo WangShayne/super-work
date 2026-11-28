@@ -31,8 +31,8 @@ export function upsertRepo(db: Database, repo: RepoConfig): void {
         max_concurrent_workers, daily_budget_usd, daily_budget_override_usd, daily_budget_override_date,
         delivery_gate_policy, risk_threshold, sensitive_paths_json, blueprints_json,
         verification_strategy,
-        created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        created_at, updated_at, implement_model_id, review_model_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         root_path = excluded.root_path,
@@ -65,6 +65,8 @@ export function upsertRepo(db: Database, repo: RepoConfig): void {
         sensitive_paths_json = excluded.sensitive_paths_json,
         blueprints_json = excluded.blueprints_json,
         verification_strategy = excluded.verification_strategy,
+        implement_model_id = excluded.implement_model_id,
+        review_model_id = excluded.review_model_id,
         updated_at = excluded.updated_at`,
     )
     .run(
@@ -102,6 +104,8 @@ export function upsertRepo(db: Database, repo: RepoConfig): void {
       repo.verificationStrategy ?? null,
       repo.createdAt,
       repo.updatedAt,
+      repo.implementModelId ?? null,
+      repo.reviewModelId ?? null,
     );
 }
 
@@ -209,8 +213,9 @@ export function saveTicket(db: Database, ticket: Ticket): void {
         routine_id, campaign_id, milestone_id, campaign_wave, target_branch, barrier_group_id, base_head_at_rebase,
         epic_replan_count, epic_replan_history_json, pending_epic_replan_json,
         model_override, effort_override,
-        inline_memory_json, handover_digest_json, cost_usd, priority, error_message, created_at, updated_at
-      ) VALUES (?, ?, ?,?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        inline_memory_json, handover_digest_json, cost_usd, priority, error_message, created_at, updated_at,
+        preferred_model_id, active_model_id
+      ) VALUES (?, ?,?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         description = excluded.description,
@@ -277,6 +282,8 @@ export function saveTicket(db: Database, ticket: Ticket): void {
         cost_usd = excluded.cost_usd,
         priority = excluded.priority,
         error_message = excluded.error_message,
+        preferred_model_id = excluded.preferred_model_id,
+        active_model_id = excluded.active_model_id,
         updated_at = excluded.updated_at`,
     )
     .run(
@@ -351,6 +358,8 @@ export function saveTicket(db: Database, ticket: Ticket): void {
       ticket.errorMessage ?? null,
       ticket.createdAt,
       ticket.updatedAt,
+      ticket.preferredModelId ?? null,
+      ticket.activeModelId ?? null,
     );
 }
 
@@ -393,8 +402,8 @@ export function saveStageRun(db: Database, stageRun: StageRun): void {
     .query(
       `INSERT INTO stage_runs (
         id, ticket_id, stage, engine, status, native_session_id, cost_usd,
-        started_at, completed_at, summary, spill_transcript_id, spans_json, tool_profile_json, steered
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        started_at, completed_at, summary, spill_transcript_id, spans_json, tool_profile_json, steered, model_profile_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         status = excluded.status,
         native_session_id = excluded.native_session_id,
@@ -404,7 +413,8 @@ export function saveStageRun(db: Database, stageRun: StageRun): void {
         spill_transcript_id = excluded.spill_transcript_id,
         spans_json = excluded.spans_json,
         tool_profile_json = excluded.tool_profile_json,
-        steered = excluded.steered`,
+        steered = excluded.steered,
+        model_profile_id = excluded.model_profile_id`,
     )
     .run(
       stageRun.id,
@@ -421,6 +431,7 @@ export function saveStageRun(db: Database, stageRun: StageRun): void {
       stageRun.spans ? JSON.stringify(stageRun.spans) : null,
       stageRun.toolProfile ? JSON.stringify(stageRun.toolProfile) : null,
       stageRun.steered ? 1 : 0,
+      stageRun.modelProfileId ?? null,
     );
 }
 

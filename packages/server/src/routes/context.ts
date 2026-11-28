@@ -1,9 +1,11 @@
+import { normalizeSystemSetupConfig, toPublicModelProfile } from "@super-work/core";
 import type {
   ArtifactStore,
   CliScanReport,
   LifecycleHooksConfig,
   LlmProviderPreset,
   NotificationConfig,
+  PublicEngineProfile,
   PublicSetupStatus,
   StateStore,
   SuperWorkKernel,
@@ -46,27 +48,53 @@ export function maskApiKey(key?: string): string | undefined {
   return `${trimmed.slice(0, 3)}****${trimmed.slice(-4)}`;
 }
 
+/** Strip the raw apiKey from a worker profile, exposing only presence + masked tail. */
+export function maskProfile<T extends { apiKey?: string }>(
+  profile: T | undefined,
+): PublicEngineProfile<T> | undefined {
+  if (!profile) return undefined;
+  const { apiKey, ...rest } = profile;
+  return {
+    ...rest,
+    hasApiKey: Boolean(apiKey?.trim()),
+    ...(maskApiKey(apiKey) ? { maskedApiKey: maskApiKey(apiKey) as string } : {}),
+  };
+}
+
 export function toPublicSetupStatus(
   savedConfig: SystemSetupConfig | null,
   scanReport: CliScanReport,
   activeLlmProvider: string,
 ): PublicSetupStatus {
-  const cfg: SystemSetupConfig = savedConfig ?? {
-    initialized: false,
-    llmPreset: "deepseek",
-    llmBaseUrl: "https://api.deepseek.com/v1",
-    llmModel: "deepseek-chat",
-    llmEffort: "low",
-    preferredImplementEngine: scanReport.recommendedImplementEngine,
-    preferredReviewEngine: scanReport.recommendedReviewEngine,
-    claudeProfile: {},
-    codexProfile: {},
-    opencodeProfile: {},
-    geminiProfile: {},
-    notifications: { ...DEFAULT_NOTIFICATION_CONFIG },
-    updatedAt: scanReport.scannedAt,
-  };
-  const { llmApiKey, notifications, ...rest } = cfg;
+  const cfg: SystemSetupConfig = normalizeSystemSetupConfig(
+    savedConfig ?? {
+      initialized: false,
+      llmPreset: "deepseek",
+      llmBaseUrl: "https://api.deepseek.com/v1",
+      llmModel: "deepseek-chat",
+      llmEffort: "low",
+      preferredImplementEngine: scanReport.recommendedImplementEngine,
+      preferredReviewEngine: scanReport.recommendedReviewEngine,
+      claudeProfile: {},
+      codexProfile: {},
+      opencodeProfile: {},
+      geminiProfile: {},
+      notifications: { ...DEFAULT_NOTIFICATION_CONFIG },
+      updatedAt: scanReport.scannedAt,
+    },
+    scanReport,
+  );
+  const {
+    llmApiKey,
+    modelProfiles,
+    notifications,
+    claudeProfile,
+    codexProfile,
+    opencodeProfile,
+    geminiProfile,
+    apiWorkerProfile,
+    ...rest
+  } = cfg;
   const mergedNotifs: NotificationConfig = {
     ...DEFAULT_NOTIFICATION_CONFIG,
     ...(notifications ?? {}),
@@ -77,6 +105,13 @@ export function toPublicSetupStatus(
     activeLlmProvider,
     config: {
       ...rest,
+      // v1.8.1: raw apiKey never leaves the server; profiles carry hasApiKey/maskedApiKey/ready.
+      modelProfiles: (modelProfiles ?? []).map((p) => toPublicModelProfile(p, scanReport)),
+      ...(claudeProfile ? { claudeProfile: maskProfile(claudeProfile) } : {}),
+      ...(codexProfile ? { codexProfile: maskProfile(codexProfile) } : {}),
+      ...(opencodeProfile ? { opencodeProfile: maskProfile(opencodeProfile) } : {}),
+      ...(geminiProfile ? { geminiProfile: maskProfile(geminiProfile) } : {}),
+      ...(apiWorkerProfile ? { apiWorkerProfile: maskProfile(apiWorkerProfile) } : {}),
       llmModel: normalizeSetupModel(cfg.llmPreset, rest.llmModel),
       hasApiKey: Boolean(llmApiKey?.trim()),
       maskedApiKey: maskApiKey(llmApiKey),

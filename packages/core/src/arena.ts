@@ -63,14 +63,14 @@ export function resolveFallbackChain(input: {
 
   const defaultOrder: WorkerEngineId[] =
     input.primaryEngine === "claude"
-      ? ["codex", "gemini", "opencode", "mock"]
+      ? ["codex", "gemini", "opencode", "api", "mock"]
       : input.primaryEngine === "codex"
-        ? ["claude", "gemini", "opencode", "mock"]
+        ? ["claude", "gemini", "opencode", "api", "mock"]
         : input.primaryEngine === "gemini"
-          ? ["claude", "codex", "opencode", "mock"]
+          ? ["claude", "codex", "opencode", "api", "mock"]
           : input.primaryEngine === "opencode"
-            ? ["claude", "codex", "gemini", "mock"]
-            : ["claude", "codex", "gemini", "opencode"];
+            ? ["claude", "codex", "gemini", "api", "mock"]
+            : ["claude", "codex", "gemini", "opencode", "api"];
 
   // With an explicit fallbackEngines list, never cross outside it + the preferred engines.
   const whitelist = resolveAllowedEngineWhitelist(input.repo);

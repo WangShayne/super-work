@@ -1,6 +1,6 @@
 export type OperatingMode = "off" | "observe" | "auto";
 
-export type WorkerEngineId = "claude" | "codex" | "opencode" | "gemini" | "mock";
+export type WorkerEngineId = "claude" | "codex" | "opencode" | "gemini" | "api" | "mock";
 
 export type EnginePreference = WorkerEngineId | "auto";
 
@@ -8,10 +8,58 @@ export type TaskCategory = "ui" | "backend" | "refactor" | "test_ci" | "docs_cho
 
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
+export type ApiWorkerPreset = "deepseek" | "openai" | "anthropic" | "custom";
+
 export interface EngineModelProfile {
   model?: string;
   effort?: ReasoningEffort;
+  baseUrl?: string;
+  apiKey?: string;
 }
+
+export interface ApiWorkerProfile {
+  preset: ApiWorkerPreset;
+  baseUrl: string;
+  model: string;
+  apiKey?: string;
+  effort?: ReasoningEffort;
+}
+
+// --- v1.8.1 Unified peer ModelProfile registry (CLI + API on equal footing) ---
+export type ModelProfileKind = "cli" | "api";
+
+export type CliEngineId = "claude" | "codex" | "opencode" | "gemini";
+
+export type ApiModelProtocol = "deepseek" | "openai" | "anthropic" | "ollama";
+
+export interface ModelProfile {
+  id: string;
+  name: string;
+  kind: ModelProfileKind;
+  cliEngine?: CliEngineId;
+  apiProtocol?: ApiModelProtocol;
+  baseUrl?: string;
+  model?: string;
+  effort?: ReasoningEffort;
+  apiKey?: string;
+  /** When false the profile is excluded from Worker 'auto' routing but stays usable as controlModelId. */
+  workerAutoPool: boolean;
+  enabled: boolean;
+  builtinCli?: boolean;
+}
+
+export type PublicModelProfile = Omit<ModelProfile, "apiKey"> & {
+  hasApiKey: boolean;
+  maskedApiKey?: string;
+  ready: boolean;
+  readyDetail?: string;
+};
+
+/** Profile with the raw apiKey replaced by presence flag + masked tail (safe for API responses). */
+export type PublicEngineProfile<T extends { apiKey?: string }> = Omit<T, "apiKey"> & {
+  hasApiKey: boolean;
+  maskedApiKey?: string;
+};
 
 export type EngineHealthStatus = "healthy" | "tripped";
 

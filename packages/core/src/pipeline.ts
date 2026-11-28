@@ -182,14 +182,14 @@ export function getAlternateEngine(
     : availableInput;
   const preferenceOrder: WorkerEngineId[] =
     current === "claude"
-      ? ["codex", "gemini", "opencode", "mock"]
+      ? ["codex", "gemini", "opencode", "api", "mock"]
       : current === "codex"
-        ? ["claude", "gemini", "opencode", "mock"]
+        ? ["claude", "gemini", "opencode", "api", "mock"]
         : current === "gemini"
-          ? ["codex", "claude", "opencode", "mock"]
+          ? ["codex", "claude", "opencode", "api", "mock"]
           : current === "opencode"
-            ? ["claude", "codex", "gemini", "mock"]
-            : ["claude", "codex", "gemini"];
+            ? ["claude", "codex", "gemini", "api", "mock"]
+            : ["claude", "codex", "gemini", "opencode", "api"];
 
   for (const candidate of preferenceOrder) {
     if (candidate !== current && available.includes(candidate)) {

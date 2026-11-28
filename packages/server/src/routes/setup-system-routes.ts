@@ -1,8 +1,9 @@
-import { nowIso } from "@super-work/core";
+import { normalizeSystemSetupConfig, nowIso, profileDriverEngine } from "@super-work/core";
 import type {
+  ApiWorkerProfile,
   CliScanReport,
-  EngineModelProfile,
   LlmProviderPreset,
+  ModelProfile,
   NotificationConfig,
   ReasoningEffort,
   SystemSetupConfig,
@@ -18,21 +19,41 @@ import {
   normalizeSetupModel,
   toPublicSetupStatus,
 } from "./context.ts";
+import {
+  type ApiWorkerProfileInput,
+  type EngineProfileInput,
+  type ModelProfileInput,
+  SetupValidationError,
+  applyProfileDeletions,
+  cleanApiWorkerProfile,
+  cleanEngineProfile,
+  mergeModelProfiles,
+  registerTestModelRoute,
+  registerTestWorkerRoute,
+  resetTrippedEngineHealth,
+  syncLegacyIntoProfiles,
+  validateRoleId,
+} from "./setup-worker-helpers.ts";
 
 export function registerSetupSystemRoutes(ctx: ServerRouteContext): void {
   const { app, kernel, stateStore, scanner, notificationDispatcher, getActiveProviderName } = ctx;
+  registerTestWorkerRoute(ctx);
+  registerTestModelRoute(ctx);
 
   /** 保存 setup_config、热切换控制面 LLM，并同步各仓库的首选引擎（configure 与 quick-start 共用）。 */
-  async function persistSetupConfig(nextConfig: SystemSetupConfig): Promise<void> {
+  async function persistSetupConfig(nextConfig: SystemSetupConfig, syncRepos = true): Promise<void> {
     await stateStore.setSystemSetting("setup_config", nextConfig);
     if (ctx.mutableLlm) {
       ctx.mutableLlm.reconfigure(buildControlPlaneLLMFromSetup(nextConfig));
     }
+    if (syncRepos === false) return;
     for (const repo of await stateStore.listRepos()) {
       await stateStore.upsertRepo({
         ...repo,
         preferredImplementEngine: nextConfig.preferredImplementEngine,
         preferredReviewEngine: nextConfig.preferredReviewEngine,
+        implementModelId: nextConfig.implementModelId,
+        reviewModelId: nextConfig.reviewModelId,
         updatedAt: nowIso(),
       });
     }
@@ -138,10 +159,20 @@ export function registerSetupSystemRoutes(ctx: ServerRouteContext): void {
       clearApiKey?: boolean;
       preferredImplementEngine?: WorkerEngineId;
       preferredReviewEngine?: WorkerEngineId;
-      claudeProfile?: EngineModelProfile;
-      codexProfile?: EngineModelProfile;
-      opencodeProfile?: EngineModelProfile;
-      geminiProfile?: EngineModelProfile;
+      claudeProfile?: EngineProfileInput;
+      codexProfile?: EngineProfileInput;
+      opencodeProfile?: EngineProfileInput;
+      geminiProfile?: EngineProfileInput;
+      apiWorkerProfile?: ApiWorkerProfileInput;
+      /** v1.8.1 unified peer registry: upserted by id; saved apiKey kept unless clearApiKey. */
+      modelProfiles?: ModelProfileInput[];
+      /** Custom profile ids to remove (builtinCli profiles are rejected); dangling role bindings fall back to heuristic/auto. */
+      deleteModelProfileIds?: string[];
+      controlModelId?: string;
+      implementModelId?: string;
+      reviewModelId?: string;
+      /** When false, persistSetupConfig leaves each repo's preferredImplementEngine/preferredReviewEngine untouched (default: sync). */
+      syncRepos?: boolean;
       notifications?: Partial<NotificationConfig> & {
         clearWebhookSecret?: boolean;
         clearActionSecret?: boolean;
@@ -157,16 +188,38 @@ export function registerSetupSystemRoutes(ctx: ServerRouteContext): void {
       await stateStore.setSystemSetting("last_cli_scan", scanReport);
     }
 
+    let apiWorkerProfile: ApiWorkerProfile | undefined = existing?.apiWorkerProfile;
+    let mergedProfiles: ModelProfile[] = normalizeSystemSetupConfig(existing, scanReport).modelProfiles ?? [];
+    let touchedProfiles: ModelProfile[] = [];
+    let deletedProfileIds = new Set<string>();
+    try {
+      if (body.apiWorkerProfile) {
+        apiWorkerProfile = cleanApiWorkerProfile(body.apiWorkerProfile, existing?.apiWorkerProfile);
+      }
+      for (const p of [body.claudeProfile, body.codexProfile, body.opencodeProfile, body.geminiProfile]) {
+        if (p) cleanEngineProfile(p); // validate baseUrl up-front so nothing is half-saved
+      }
+      if (body.modelProfiles !== undefined && !Array.isArray(body.modelProfiles)) {
+        throw new SetupValidationError("modelProfiles must be an array");
+      }
+      const merged = mergeModelProfiles(mergedProfiles, body.modelProfiles ?? []);
+      const pruned = applyProfileDeletions(merged.profiles, body.deleteModelProfileIds);
+      mergedProfiles = pruned.profiles;
+      deletedProfileIds = pruned.deleted;
+      touchedProfiles = merged.touched.filter((p) => !deletedProfileIds.has(p.id));
+      validateRoleId("controlModelId", body.controlModelId, mergedProfiles);
+      validateRoleId("implementModelId", body.implementModelId, mergedProfiles);
+      validateRoleId("reviewModelId", body.reviewModelId, mergedProfiles);
+    } catch (err) {
+      if (err instanceof SetupValidationError) return c.json({ error: err.message }, 400);
+      throw err;
+    }
+
     const finalApiKey = body.clearApiKey
       ? undefined
       : body.llmApiKey?.trim()
         ? body.llmApiKey.trim()
         : existing?.llmApiKey;
-
-    const cleanProfile = (p?: EngineModelProfile): EngineModelProfile => ({
-      model: p?.model?.trim() || undefined,
-      effort: p?.effort || undefined,
-    });
 
     const nextPreset: LlmProviderPreset = body.llmPreset ?? existing?.llmPreset ?? "heuristic";
     const existingNotifs: NotificationConfig = {
@@ -219,7 +272,13 @@ export function registerSetupSystemRoutes(ctx: ServerRouteContext): void {
         }
       : existingNotifs;
 
-    const nextConfig: SystemSetupConfig = {
+    const legacyLlmTouched =
+      body.llmPreset !== undefined ||
+      body.llmApiKey !== undefined ||
+      body.llmBaseUrl !== undefined ||
+      body.llmModel !== undefined ||
+      body.clearApiKey === true;
+    const nextConfig: SystemSetupConfig = normalizeSystemSetupConfig({
       initialized: true,
       llmPreset: nextPreset,
       llmBaseUrl: body.llmBaseUrl?.trim() ?? existing?.llmBaseUrl ?? "",
@@ -236,25 +295,73 @@ export function registerSetupSystemRoutes(ctx: ServerRouteContext): void {
         scanReport.recommendedReviewEngine,
       claudeProfile:
         body.claudeProfile !== undefined
-          ? cleanProfile(body.claudeProfile)
+          ? cleanEngineProfile(body.claudeProfile, existing?.claudeProfile)
           : (existing?.claudeProfile ?? {}),
       codexProfile:
         body.codexProfile !== undefined
-          ? cleanProfile(body.codexProfile)
+          ? cleanEngineProfile(body.codexProfile, existing?.codexProfile)
           : (existing?.codexProfile ?? {}),
       opencodeProfile:
         body.opencodeProfile !== undefined
-          ? cleanProfile(body.opencodeProfile)
+          ? cleanEngineProfile(body.opencodeProfile, existing?.opencodeProfile)
           : (existing?.opencodeProfile ?? {}),
       geminiProfile:
         body.geminiProfile !== undefined
-          ? cleanProfile(body.geminiProfile)
+          ? cleanEngineProfile(body.geminiProfile, existing?.geminiProfile)
           : (existing?.geminiProfile ?? {}),
+      ...(apiWorkerProfile ? { apiWorkerProfile } : {}),
+      modelProfiles: syncLegacyIntoProfiles(mergedProfiles, {
+        // legacy per-engine / api profile edits flow into their peer profiles unless the same
+        // request also edits that profile through modelProfiles (which wins).
+        claude: body.claudeProfile !== undefined ? cleanEngineProfile(body.claudeProfile, existing?.claudeProfile) : undefined,
+        codex: body.codexProfile !== undefined ? cleanEngineProfile(body.codexProfile, existing?.codexProfile) : undefined,
+        opencode: body.opencodeProfile !== undefined ? cleanEngineProfile(body.opencodeProfile, existing?.opencodeProfile) : undefined,
+        gemini: body.geminiProfile !== undefined ? cleanEngineProfile(body.geminiProfile, existing?.geminiProfile) : undefined,
+        api: body.apiWorkerProfile !== undefined ? apiWorkerProfile : undefined,
+        // legacy HTTP control-plane edits must re-migrate instead of leaving a stale api_llm_* copy
+        refreshLegacyLlm: legacyLlmTouched && body.controlModelId === undefined,
+        skipIds: new Set(touchedProfiles.map((p) => p.id)),
+      }),
+      controlModelId:
+        body.controlModelId ?? (legacyLlmTouched ? undefined : existing?.controlModelId),
+      implementModelId: body.implementModelId ?? existing?.implementModelId,
+      reviewModelId: body.reviewModelId ?? existing?.reviewModelId,
       notifications: nextNotifications,
       updatedAt: nowIso(),
-    };
+    }, scanReport);
 
-    await persistSetupConfig(nextConfig);
+    await persistSetupConfig(nextConfig, body.syncRepos !== false);
+    if (deletedProfileIds.size > 0) {
+      // repos pinning a deleted profile fall back to 'auto' (independent of syncRepos)
+      for (const repo of await stateStore.listRepos()) {
+        const impl = repo.implementModelId && deletedProfileIds.has(repo.implementModelId);
+        const rev = repo.reviewModelId && deletedProfileIds.has(repo.reviewModelId);
+        if (!impl && !rev) continue;
+        await stateStore.upsertRepo({
+          ...repo,
+          ...(impl ? { implementModelId: "auto" } : {}),
+          ...(rev ? { reviewModelId: "auto" } : {}),
+          updatedAt: nowIso(),
+        });
+      }
+    }
+    // Fresh credentials/endpoints must not wait out a tripped circuit-breaker cooldown.
+    await resetTrippedEngineHealth(ctx, [
+      ...new Set<WorkerEngineId>([
+        ...(
+          [
+            ["claude", body.claudeProfile],
+            ["codex", body.codexProfile],
+            ["opencode", body.opencodeProfile],
+            ["gemini", body.geminiProfile],
+            ["api", body.apiWorkerProfile],
+          ] as const
+        )
+          .filter(([, profile]) => profile !== undefined)
+          .map(([engine]) => engine as WorkerEngineId),
+        ...touchedProfiles.map((p) => profileDriverEngine(p)),
+      ]),
+    ]);
 
     return c.json(toPublicSetupStatus(nextConfig, scanReport, getActiveProviderName()));
   });
@@ -274,23 +381,30 @@ export function registerSetupSystemRoutes(ctx: ServerRouteContext): void {
         ? "codex_cli"
         : "heuristic";
 
-    const nextConfig: SystemSetupConfig = {
-      ...(existing ?? {
-        llmBaseUrl: "",
-        llmEffort: "low",
-        claudeProfile: {},
-        codexProfile: {},
-        opencodeProfile: {},
-        geminiProfile: {},
-        notifications: DEFAULT_NOTIFICATION_CONFIG,
-      }),
-      initialized: true,
-      llmPreset,
-      llmModel: normalizeSetupModel(llmPreset, undefined),
-      preferredImplementEngine: scanReport.recommendedImplementEngine,
-      preferredReviewEngine: scanReport.recommendedReviewEngine,
-      updatedAt: nowIso(),
-    };
+    const nextConfig: SystemSetupConfig = normalizeSystemSetupConfig(
+      {
+        ...(existing ?? {
+          llmBaseUrl: "",
+          llmEffort: "low",
+          claudeProfile: {},
+          codexProfile: {},
+          opencodeProfile: {},
+          geminiProfile: {},
+          notifications: DEFAULT_NOTIFICATION_CONFIG,
+        }),
+        initialized: true,
+        llmPreset,
+        llmModel: normalizeSetupModel(llmPreset, undefined),
+        preferredImplementEngine: scanReport.recommendedImplementEngine,
+        preferredReviewEngine: scanReport.recommendedReviewEngine,
+        // re-derived by normalization: claude_cli -> cli_claude, codex_cli -> cli_codex, else heuristic
+        controlModelId: undefined,
+        implementModelId: "auto",
+        reviewModelId: "auto",
+        updatedAt: nowIso(),
+      },
+      scanReport,
+    );
     await persistSetupConfig(nextConfig);
     return c.json(toPublicSetupStatus(nextConfig, scanReport, getActiveProviderName()));
   });
@@ -357,7 +471,7 @@ export function registerSetupSystemRoutes(ctx: ServerRouteContext): void {
   });
 
   // --- v1.5.0 Persistent Engine Circuit Breaker ---
-  const ENGINE_IDS = ["claude", "codex", "gemini", "opencode", "mock"] as const;
+  const ENGINE_IDS = ["claude", "codex", "gemini", "opencode", "api", "mock"] as const;
   const parseEngine = (raw: string | undefined): (typeof ENGINE_IDS)[number] | undefined =>
     ENGINE_IDS.find((e) => e === raw);
 

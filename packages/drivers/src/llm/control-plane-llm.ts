@@ -11,6 +11,7 @@ import type {
   EpicDecompositionPlan,
   LlmProviderPreset,
   MemorySearchHit,
+  ModelProfile,
   PipelineTemplateId,
   ReasoningEffort,
   RepoConfig,
@@ -36,6 +37,7 @@ import {
 import { OpenAICompatibleControlLLM } from "./control-plane-openai.ts";
 import { CliFallbackControlLLM, CodexCliControlLLM } from "./control-plane-cli-llms.ts";
 import { HeuristicControlLLM } from "./control-plane-heuristic.ts";
+import { createControlLLMFromProfile } from "./control-plane-symmetric.ts";
 
 export type { OpenAICompatibleConfig } from "./control-plane-helpers.ts";
 export {
@@ -269,9 +271,24 @@ export function createControlPlaneLLMFromEnv(): ControlPlaneLLM {
   return new CompositeControlPlaneLLM(chain);
 }
 
+/** Any CLI/API ModelProfile as ControlPlaneLLM, with the heuristic planner as last-resort fallback. */
+export function buildControlPlaneLLMFromProfile(profile: ModelProfile): ControlPlaneLLM {
+  return new CompositeControlPlaneLLM([createControlLLMFromProfile(profile), new HeuristicControlLLM()]);
+}
+
 export function buildControlPlaneLLMFromSetup(config?: SystemSetupConfig | null): ControlPlaneLLM {
   if (!config || !config.initialized) {
     return createControlPlaneLLMFromEnv();
+  }
+
+  if (config.controlModelId === "heuristic") {
+    return new HeuristicControlLLM();
+  }
+  const controlProfile = config.controlModelId
+    ? config.modelProfiles?.find((p) => p.id === config.controlModelId && p.enabled !== false)
+    : undefined;
+  if (controlProfile) {
+    return buildControlPlaneLLMFromProfile(controlProfile);
   }
 
   if (

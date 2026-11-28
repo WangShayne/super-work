@@ -14,7 +14,9 @@ import type {
   DagNodeMutationInput,
   DeliveryChannel,
   DeliveryGatePolicy,
-  EngineModelProfile,
+  ApiWorkerPreset,
+  ApiWorkerProfilePatch,
+  EngineProfilePatch,
   EnginePreference,
   EpicDecompositionPlan,
   EpicDeliveryMode,
@@ -74,8 +76,11 @@ import type {
   TicketDetailResponse,
   TicketReviewComment,
   VerificationStrategy,
+  WorkerConnectionTestResult,
   WorkerEngineId,
   WorktreeGcResult,
+  ModelConnectionTestResult,
+  ModelProfilePatch,
 } from "./types.ts";
 
 export function getAuthToken(): string | undefined {
@@ -128,6 +133,8 @@ export const api = {
     sensitivePaths?: string[];
     preferredImplementEngine?: EnginePreference;
     preferredReviewEngine?: WorkerEngineId;
+    implementModelId?: string | null;
+    reviewModelId?: string | null;
     verificationCommands?: string[];
     verificationStrategy?: VerificationStrategy;
     defaultDeliveryChannel?: DeliveryChannel;
@@ -160,7 +167,11 @@ export const api = {
       | "sensitivePaths"
       | "blueprints"
       | "hooks"
+      | "implementModelId"
+      | "reviewModelId"
     > & {
+      implementModelId?: string | null;
+      reviewModelId?: string | null;
       maxConcurrentWorkers?: number | null;
       dailyBudgetUsd?: number | null;
       conventions?: string | null;
@@ -331,6 +342,7 @@ export const api = {
     dependsOn?: string[];
     maxCostUsd?: number;
     preferredEngine?: EnginePreference;
+    preferredModelId?: string;
     arenaMode?: boolean;
     arenaCompetitorEngine?: WorkerEngineId;
     modelOverride?: string;
@@ -496,7 +508,7 @@ export const api = {
 
   steerTicket: (
     ticketId: string,
-    payload: { instruction: string; preferredEngine?: EnginePreference },
+    payload: { instruction: string; preferredEngine?: EnginePreference; preferredModelId?: string },
   ) =>
     request<{ ticket: Ticket }>(`/api/tickets/${encodeURIComponent(ticketId)}/steer`, {
       method: "POST",
@@ -545,6 +557,7 @@ export const api = {
     releaseBarrier?: boolean;
     barrierGroupId?: string;
     preferredEngine?: EnginePreference;
+    preferredModelId?: string;
     modelOverride?: string;
     effortOverride?: ReasoningEffort;
     maxCostUsdPerSubtask?: number;
@@ -697,19 +710,47 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  testWorkerConnection: (payload: {
+    engine: WorkerEngineId;
+    preset?: ApiWorkerPreset;
+    baseUrl?: string;
+    model?: string;
+    apiKey?: string;
+    useSavedKey?: boolean;
+  }) =>
+    request<WorkerConnectionTestResult>("/api/setup/test-worker", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  testModelConnection: (payload: ModelProfilePatch & { useSavedKey?: boolean }) =>
+    request<ModelConnectionTestResult>("/api/setup/test-model", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
   configureSetup: (payload: {
-    llmPreset: LlmProviderPreset;
-    llmBaseUrl: string;
-    llmModel: string;
+    llmPreset?: LlmProviderPreset;
+    llmBaseUrl?: string;
+    llmModel?: string;
     llmEffort?: ReasoningEffort;
     llmApiKey?: string;
     clearApiKey?: boolean;
-    preferredImplementEngine: WorkerEngineId;
-    preferredReviewEngine: WorkerEngineId;
-    claudeProfile?: EngineModelProfile;
-    codexProfile?: EngineModelProfile;
-    opencodeProfile?: EngineModelProfile;
-    geminiProfile?: EngineModelProfile;
+    preferredImplementEngine?: WorkerEngineId;
+    preferredReviewEngine?: WorkerEngineId;
+    claudeProfile?: EngineProfilePatch;
+    codexProfile?: EngineProfilePatch;
+    opencodeProfile?: EngineProfilePatch;
+    geminiProfile?: EngineProfilePatch;
+    apiWorkerProfile?: ApiWorkerProfilePatch;
+    /** v1.8.1 peer profiles: upserted by id; deleteModelProfileIds removes custom (non-builtin) profiles. */
+    modelProfiles?: ModelProfilePatch[];
+    deleteModelProfileIds?: string[];
+    controlModelId?: string;
+    implementModelId?: string;
+    reviewModelId?: string;
+    /** false: keep each repo's preferred engines (e.g. 'auto') instead of syncing them. */
+    syncRepos?: boolean;
     notifications?: Partial<NotificationConfig> & {
       clearWebhookSecret?: boolean;
       clearActionSecret?: boolean;

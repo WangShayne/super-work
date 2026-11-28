@@ -174,7 +174,11 @@ export interface Ticket {
   worktreeCleanedAt?: string;
   nativeSessions: Partial<Record<WorkerEngineId, string>>;
   preferredEngine?: EnginePreference;
+  /** v1.8.1: ModelProfile id requested by the user. */
+  preferredModelId?: string;
   activeEngine?: WorkerEngineId;
+  /** v1.8.1: ModelProfile id resolved by routing / pinned for this ticket. */
+  activeModelId?: string;
   failedEngines?: WorkerEngineId[];
   arenaMode?: boolean;
   arenaCompetitorEngine?: WorkerEngineId;
@@ -240,6 +244,8 @@ export interface StageRun {
   ticketId: string;
   stage: StageKind;
   engine: WorkerEngineId;
+  /** v1.8.1: ModelProfile that served this run (undefined for legacy runs). */
+  modelProfileId?: string;
   status: StageRunStatus;
   nativeSessionId?: string;
   costUsd: number;
@@ -277,6 +283,7 @@ export interface SpillArtifact {
 export interface SteerTicketInput {
   instruction: string;
   preferredEngine?: EnginePreference;
+  preferredModelId?: string;
 }
 
 export interface FileSymbolEntry {
@@ -323,6 +330,7 @@ export interface RestoreCheckpointInput {
   mode?: "in_place" | "fork";
   prompt?: string;
   preferredEngine?: EnginePreference;
+  preferredModelId?: string;
   targetStage?: StageKind;
 }
 
@@ -331,6 +339,7 @@ export interface DagNodeMutationInput {
   title?: string;
   description?: string;
   preferredEngine?: EnginePreference;
+  preferredModelId?: string;
   allowedPaths?: string[];
   dependsOn?: string[];
   tddMode?: boolean;

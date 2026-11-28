@@ -220,6 +220,7 @@ export interface RequirementIntakeInput {
   title?: string;
   preferredRoute?: "auto" | RequirementRouteKind;
   preferredEngine?: EnginePreference;
+  preferredModelId?: string;
   template?: PipelineTemplateId;
   tddMode?: boolean;
   deliveryGatePolicy?: DeliveryGatePolicy;

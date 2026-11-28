@@ -111,6 +111,8 @@ export function registerRepoRoutes(ctx: ServerRouteContext): void {
       hooks: normalizeHooksConfig(body.hooks),
       preferredImplementEngine: body.preferredImplementEngine ?? "claude",
       preferredReviewEngine: body.preferredReviewEngine ?? "codex",
+      implementModelId: body.implementModelId?.trim() || undefined,
+      reviewModelId: body.reviewModelId?.trim() || undefined,
       fallbackEngines: Array.isArray(body.fallbackEngines)
         ? body.fallbackEngines.filter((e): e is WorkerEngineId => Boolean(e))
         : undefined,
@@ -172,7 +174,12 @@ export function registerRepoRoutes(ctx: ServerRouteContext): void {
       | "blueprints"
       | "hooks"
       | "verificationStrategy"
+      | "implementModelId"
+      | "reviewModelId"
     > & {
+      /** v1.8.1: ModelProfile id or 'auto'; null/'' clears the repo-level binding. */
+      implementModelId?: string | null;
+      reviewModelId?: string | null;
       autonomyPreset?: AutonomyPreset | null;
       verificationStrategy?: VerificationStrategy | null;
       maxConcurrentWorkers?: number | null;
@@ -200,6 +207,14 @@ export function registerRepoRoutes(ctx: ServerRouteContext): void {
       autonomyPreset: preset ?? (presetRaw === null ? undefined : existing.autonomyPreset),
       name: patch.name?.trim() || existing.name,
       baseBranch: patch.baseBranch?.trim() || existing.baseBranch,
+      implementModelId:
+        patch.implementModelId !== undefined
+          ? patch.implementModelId?.trim() || undefined
+          : existing.implementModelId,
+      reviewModelId:
+        patch.reviewModelId !== undefined
+          ? patch.reviewModelId?.trim() || undefined
+          : existing.reviewModelId,
       fallbackEngines:
         patch.fallbackEngines !== undefined
           ? patch.fallbackEngines === null

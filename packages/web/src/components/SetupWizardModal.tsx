@@ -2,7 +2,7 @@ import { Suspense, lazy, useEffect, useState } from "react";
 import { ChevronDown, ChevronRight, Loader2, RefreshCw, Rocket, Wrench, X } from "lucide-react";
 import { api } from "../api.ts";
 import { useI18n } from "../i18n.tsx";
-import type { CliScanReport, PublicSetupStatus, WorkerEngineId } from "../types.ts";
+import type { CliScanReport, PublicSetupStatus } from "../types.ts";
 
 const CustomizeSetupForm = lazy(() =>
   import("./setup/CustomizeSetupForm.tsx").then((m) => ({ default: m.CustomizeSetupForm })),
@@ -11,7 +11,6 @@ const CustomizeSetupForm = lazy(() =>
 interface SetupWizardModalProps {
   open: boolean;
   setupStatus: PublicSetupStatus | null;
-  availableEngines: WorkerEngineId[];
   onClose: () => void;
   onSaved: (next: PublicSetupStatus) => Promise<void>;
 }
@@ -23,7 +22,7 @@ function toolMark(tool: CliScanReport["tools"][number]): { glyph: string; cls: s
   return { glyph: "✓", cls: "border-sky-500/30 bg-sky-500/10 text-sky-300" };
 }
 
-export function SetupWizardModal({ open, setupStatus, availableEngines, onClose, onSaved }: SetupWizardModalProps) {
+export function SetupWizardModal({ open, setupStatus, onClose, onSaved }: SetupWizardModalProps) {
   const { t } = useI18n();
   const [scanReport, setScanReport] = useState<CliScanReport | null>(null);
   const [customizeOpen, setCustomizeOpen] = useState(false);
@@ -179,12 +178,7 @@ export function SetupWizardModal({ open, setupStatus, availableEngines, onClose,
             {customizeOpen && (
               <div className="mt-4">
                 <Suspense fallback={<div className="py-6 text-center text-zinc-500">…</div>}>
-                  <CustomizeSetupForm
-                    setupStatus={setupStatus}
-                    availableEngines={availableEngines}
-                    onClose={onClose}
-                    onSaved={onSaved}
-                  />
+                  <CustomizeSetupForm setupStatus={setupStatus} onClose={onClose} onSaved={onSaved} />
                 </Suspense>
               </div>
             )}

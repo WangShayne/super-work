@@ -506,7 +506,7 @@ export function registerMcpWebhookRoutes(ctx: ServerRouteContext): void {
     },
     manageEngineHealth: async (args) => {
       const action = String(args.action ?? "list");
-      const engines = ["claude", "codex", "gemini", "opencode", "mock"] as const;
+      const engines = ["claude", "codex", "gemini", "opencode", "api", "mock"] as const;
       const engine = engines.find((e) => e === args.engine);
       if (args.engine && !engine) throw new Error(`Unknown engine: ${String(args.engine)}`);
       if (action === "list") return { engines: await kernel.listEngineHealth() };
@@ -550,7 +550,7 @@ export function registerMcpWebhookRoutes(ctx: ServerRouteContext): void {
   app.get("/api/mcp", (c) => {
     return c.json({
       name: "super-work",
-      version: "1.8.0",
+      version: "1.8.1",
       transport: "streamable-http",
       endpoint: "/api/mcp",
     });

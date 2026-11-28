@@ -1,4 +1,4 @@
-import type { ReasoningEffort, WorkerEngineId } from "./engine.ts";
+import type { ApiWorkerPreset, ReasoningEffort, WorkerEngineId } from "./engine.ts";
 import type { StageKind } from "./pipeline.ts";
 import type { ControlProbeStep } from "./probe.ts";
 import type { ReviewFinding } from "./review.ts";
@@ -50,6 +50,11 @@ export interface WorkerTurnInput {
   sandboxMode?: SandboxMode;
   rootRepoPath?: string;
   readOnlyPaths?: string[];
+  /** Custom relay endpoint override (CLI workers) or API worker endpoint. */
+  baseUrl?: string;
+  /** Custom relay key override; never log or persist from the turn. */
+  apiKey?: string;
+  apiPreset?: ApiWorkerPreset;
 }
 
 export type WatchdogSignalKind =
