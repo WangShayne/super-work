@@ -80,6 +80,7 @@ import type {
   WorkerEngineId,
   WorktreeGcResult,
   ModelConnectionTestResult,
+  ModelDiscoveryResult,
   ModelProfilePatch,
 } from "./types.ts";
 
@@ -725,6 +726,12 @@ export const api = {
 
   testModelConnection: (payload: ModelProfilePatch & { useSavedKey?: boolean }) =>
     request<ModelConnectionTestResult>("/api/setup/test-model", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  fetchProviderModels: (payload: ModelProfilePatch & { useSavedKey?: boolean }) =>
+    request<ModelDiscoveryResult>("/api/setup/models", {
       method: "POST",
       body: JSON.stringify(payload),
     }),

@@ -1,7 +1,14 @@
 import { CheckCircle2, Cloud, Loader2, Pencil, Terminal, Trash2, XCircle, Zap } from "lucide-react";
-import { useI18n } from "../../i18n.tsx";
+import { useI18n, type TranslationKey } from "../../i18n.tsx";
 import type { PublicModelProfile } from "../../types.ts";
+import { formatModelStatusHuman, type ModelRole } from "../../utils/modelAdvisor.ts";
 import { hostOf } from "./modelTemplates.ts";
+
+const ROLE_BADGE: Record<ModelRole, { key: TranslationKey; cls: string }> = {
+  control: { key: "models.badge.control", cls: "border-indigo-500/40 bg-indigo-500/15 text-indigo-200" },
+  implement: { key: "models.badge.implement", cls: "border-sky-500/40 bg-sky-500/15 text-sky-200" },
+  review: { key: "models.badge.review", cls: "border-violet-500/40 bg-violet-500/15 text-violet-200" },
+};
 
 export interface CardTestState {
   running: boolean;
@@ -12,6 +19,10 @@ export interface CardTestState {
 interface ModelProfileCardProps {
   profile: PublicModelProfile;
   busy: boolean;
+  /** Roles this profile is explicitly pinned to. */
+  roles: ModelRole[];
+  /** Unpinned but eligible for Auto routing. */
+  autoCandidate: boolean;
   test?: CardTestState;
   confirmingDelete: boolean;
   onToggleAutoPool: () => void;
@@ -29,6 +40,8 @@ const ACTION =
 export function ModelProfileCard({
   profile: p,
   busy,
+  roles,
+  autoCandidate,
   test,
   confirmingDelete,
   onToggleAutoPool,
@@ -38,11 +51,12 @@ export function ModelProfileCard({
   onConfirmDelete,
   onCancelDelete,
 }: ModelProfileCardProps) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const KindIcon = p.kind === "cli" ? Terminal : Cloud;
   const engine = p.kind === "cli" ? p.cliEngine : p.apiProtocol;
   const relay = p.kind === "cli" && Boolean(p.baseUrl || p.hasApiKey);
   const meta = [p.model || t("setup.followLocalDefault"), p.effort, hostOf(p.baseUrl)].filter(Boolean).join(" · ");
+  const needsCompletion = !p.ready && !p.builtinCli;
 
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-3 space-y-2 min-w-0">
@@ -51,10 +65,20 @@ export function ModelProfileCard({
           <div className="font-semibold text-zinc-100 truncate">{p.name}</div>
           <span className="inline-flex items-center gap-1 mt-0.5 text-[10px] font-mono text-zinc-400">
             <KindIcon className="w-3 h-3" aria-hidden="true" />
-            {p.kind === "cli" ? "CLI" : "API"} · {engine}
+            {t(p.kind === "cli" ? "models.track.cli" : "models.track.api")} · {engine}
           </span>
         </div>
         <div className="flex flex-wrap justify-end gap-1 shrink-0">
+          {roles.map((r) => (
+            <span key={r} className={`px-1.5 py-0.5 rounded-full border text-[10px] font-medium ${ROLE_BADGE[r].cls}`}>
+              {t(ROLE_BADGE[r].key)}
+            </span>
+          ))}
+          {roles.length === 0 && autoCandidate && (
+            <span className="px-1.5 py-0.5 rounded-full border border-zinc-700 bg-zinc-800/60 text-zinc-400 text-[10px]">
+              {t("models.badge.auto")}
+            </span>
+          )}
           {relay && (
             <span className="px-1.5 py-0.5 rounded border border-sky-500/30 bg-sky-500/10 text-sky-300 text-[10px]">
               {t("models.relay")}
@@ -71,10 +95,10 @@ export function ModelProfileCard({
       </div>
 
       <div className="text-[11px] text-zinc-400 font-mono truncate" title={meta}>{meta}</div>
-      {p.readyDetail && <div className="text-[10px] text-zinc-500 break-words">{p.readyDetail}</div>}
+      <div className={`text-[11px] break-words ${p.ready ? "text-zinc-400" : "text-amber-300/90"}`}>{formatModelStatusHuman(p, locale)}</div>
 
       <div className="flex flex-wrap items-center gap-2 pt-1">
-        <label className="inline-flex items-center gap-1.5 text-[11px] text-zinc-300 cursor-pointer select-none">
+        <label title={t("models.autoPoolTip")} className="inline-flex items-center gap-1.5 text-[11px] text-zinc-300 cursor-pointer select-none">
           <button
             type="button"
             role="switch"
@@ -94,9 +118,14 @@ export function ModelProfileCard({
             {test?.running ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
             {t("models.test")}
           </button>
-          <button type="button" onClick={onEdit} disabled={busy} className={ACTION}>
+          <button
+            type="button"
+            onClick={onEdit}
+            disabled={busy}
+            className={needsCompletion ? `${ACTION} !border-amber-500/50 !bg-amber-500/10 !text-amber-200 hover:!bg-amber-500/20` : ACTION}
+          >
             <Pencil className="w-3 h-3" />
-            {t("models.edit")}
+            {needsCompletion ? t("models.complete") : t("models.edit")}
           </button>
           {!p.builtinCli &&
             (confirmingDelete ? (

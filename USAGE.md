@@ -6,6 +6,16 @@ This guide walks through first-run CLI environment scanning, Control-Plane LLM c
 
 ---
 
+## 0. v1.8.2: Role-First Models & Roles Studio
+
+Open **Settings → Models & Roles**:
+
+1. **Pick the three roles first** — *Control* (understands requests, splits, routes), *Implement* (writes code in the isolated worktree), *Cross-Review* (independent re-check). Each card shows a recommended track.
+2. **Or click a Smart Recipe** (shown only when your ready models support it): *Dual-CLI heterogeneous review*, *API control + subscription CLI coding*, *Pure API*, *Smart auto-routing*. A green check marks the active one.
+3. **Read the Advisor** under the cards: it warns about same-model self-review, heuristic-only control, an empty Auto pool and incomplete custom models; use the 1-click button to apply the suggested fix.
+4. **Manage the pool** below: *Native CLI harness* cards reuse your local subscription; *Built-in API harness* cards call HTTP directly. Badges show each model's roles; **Allow auto-rotation** only affects Auto mode and never blocks manual choice; an incomplete custom model shows an amber **Complete** button.
+5. **Add Model** groups templates by track, suggests model names, marks required API fields, and hides the optional CLI relay URL / key under *Advanced*.
+
 ## 0a. v1.8.1: Model Pool & Role Binding
 
 Open **Settings → Models & Roles** (or the Setup Wizard's *Customize*) to reach the **ModelRegistryStudio**.
@@ -15,6 +25,7 @@ Open **Settings → Models & Roles** (or the Setup Wizard's *Customize*) to reac
 1. Click **Rescan CLI** to detect local `claude` / `codex` / `opencode` / `gemini`. The header shows `{ready}/{total} ready`.
 2. Click **+ Add Model** and pick one of 8 equal templates: **DeepSeek**, **OpenAI / Compatible API** (OpenAI, OpenRouter, OneAPI, SiliconFlow, Qwen), **Anthropic / Compatible API**, **Local Ollama** (`http://localhost:11434/v1`), or **Claude / Codex / OpenCode / Gemini CLI**. Fill in Base URL, Model, Effort and API Key (a saved key is shown masked; tick *Clear saved key* to remove it). For a CLI profile the optional relay Base URL / API Key is injected as `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` / `GOOGLE_GEMINI_BASE_URL`.
 3. Click **Test Connection** (`POST /api/setup/test-model`) to see latency and status, then **Save Model**.
+   - **Fetch Models (v1.8.2)**: after filling *Base URL* and *API Key*, click **Fetch Models** next to the Model field. It probes the upstream `/models`, `/v1/models`, `/model`, `/v1/model` (plus Ollama's `/api/tags` for local endpoints) via `POST /api/setup/models` (alias `POST /api/setup/model`) and lists the discovered models as clickable chips; click one to fill the Model field. When editing a saved profile the stored key is reused (never sent back to the browser). CLI profiles can do the same with **Fetch relay models** inside *Advanced: custom relay gateway* once a relay Base URL is set.
 4. On each card: toggle **Auto Pool** (include the profile in smart Worker routing), **Test**, **Edit**, or **Delete** (custom profiles only; confirm inline). Built-in CLI profiles keep their kind and engine locked and cannot be deleted.
 
 **Stage ② — Role Model Binding**
@@ -57,7 +68,7 @@ All presets use `mode: auto`, `sandboxMode: balanced`, `verificationStrategy: sm
 - **History**: Timeline & Releases, Board / DAG.
 - **Settings**: 5-item Essentials + collapsible **Developer / Engine Room** (Contract / Gates, Playbook / Casebook, Routines / Campaigns, Worktrees / Merge Train / Simulate, Flight Recorder / Doctor / Evals).
 - **DeepDiveDrawer**: *Overview & Changes* + *More ▾*, with a permanent bottom **Steer** input bar.
-- **HeaderBar** (single bar): `v1.8.1` badge + Live Health Dot · pill tabs (Home / History / Settings) · `⌘K` / `ZH-EN` (plus a compact repo pill on non-Home tabs).
+- **HeaderBar** (single bar): `v1.8.2` badge + Live Health Dot · pill tabs (Home / History / Settings) · `⌘K` / `ZH-EN` (plus a compact repo pill on non-Home tabs).
 - **Hero Composer context toolbar**: repo switcher (+ register) · **Guarded / Smart / Autonomous** dial · *Advanced ▾*, integrated right under the requirement input.
 
 The sections below describe the full Engine Room in depth.

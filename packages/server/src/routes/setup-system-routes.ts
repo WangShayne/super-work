@@ -35,10 +35,13 @@ import {
   validateRoleId,
 } from "./setup-worker-helpers.ts";
 
+import { registerListModelsRoute } from "./setup-model-discovery-route.ts";
+
 export function registerSetupSystemRoutes(ctx: ServerRouteContext): void {
   const { app, kernel, stateStore, scanner, notificationDispatcher, getActiveProviderName } = ctx;
   registerTestWorkerRoute(ctx);
   registerTestModelRoute(ctx);
+  registerListModelsRoute(ctx);
 
   /** 保存 setup_config、热切换控制面 LLM，并同步各仓库的首选引擎（configure 与 quick-start 共用）。 */
   async function persistSetupConfig(nextConfig: SystemSetupConfig, syncRepos = true): Promise<void> {

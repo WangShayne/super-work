@@ -48,6 +48,21 @@ export interface ModelProfile {
   builtinCli?: boolean;
 }
 
+/** v1.8.2 one entry from an upstream `/models` | `/model` listing. */
+export interface DiscoveredModelItem {
+  id: string;
+  label?: string;
+  ownedBy?: string;
+}
+
+export interface ModelDiscoveryResult {
+  ok: boolean;
+  models: DiscoveredModelItem[];
+  endpoint?: string;
+  latencyMs: number;
+  message: string;
+}
+
 export type PublicModelProfile = Omit<ModelProfile, "apiKey"> & {
   hasApiKey: boolean;
   maskedApiKey?: string;

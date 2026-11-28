@@ -285,7 +285,7 @@ describe("v0.8.0 End-to-End Capabilities (A.1 MCP + A.2 Webhooks/Cards + B.1 Bro
       expect(mcpOutLines).toHaveLength(5);
 
       const parsedInit = JSON.parse(mcpOutLines[0]!) as { result: { serverInfo: { version: string } } };
-      expect(parsedInit.result.serverInfo.version).toBe("1.8.1");
+      expect(parsedInit.result.serverInfo.version).toBe("1.8.2");
       const parsedTools = JSON.parse(mcpOutLines[1]!) as { result: { tools: Array<{ name: string }> } };
       expect(parsedTools.result.tools).toHaveLength(27);
       const parsedClarify = JSON.parse(mcpOutLines[2]!) as {

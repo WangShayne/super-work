@@ -168,7 +168,14 @@ stateDiagram-v2
 - **CLI 中转注入**：`claudeProfile` / `codexProfile` / `opencodeProfile` / `geminiProfile` 可选 `baseUrl` + `apiKey`，按次调用注入为 `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` / `GOOGLE_GEMINI_BASE_URL`。原始密钥仅保存在服务端；`GET /api/setup/status` 只返回 `hasApiKey` + `maskedApiKey`（`PublicEngineProfile`），`clearApiKey` 可清除已存密钥。
 - **`POST /api/setup/test-worker`**（[setup-system-routes.ts](./packages/server/src/routes/setup-system-routes.ts)）：测试 API 预设或 CLI 中转，返回 `{ ok, latencyMs, message }`；仅在 `useSavedKey` 时使用已保存密钥。
 - **`syncRepos`**：`persistSetupConfig(nextConfig, syncRepos = true)` 仅在 `syncRepos !== false` 时才覆盖各仓库的 `preferredImplementEngine` / `preferredReviewEngine`，因此保存凭据或通知不会让仓库脱离 `auto`。
-- **版本**：各工作区包、`GET /api/mcp` 与 JSON-RPC `initialize` 的 `serverInfo.version` 均报告 `1.8.1`（27 个工具）；Web 徽标 `v1.8.1`。
+- **版本**：各工作区包、`GET /api/mcp` 与 JSON-RPC `initialize` 的 `serverInfo.version` 在该版本报告 `1.8.1`（27 个工具；已被 `1.8.2` 取代，见 §3.16）；Web 徽标当时为 `v1.8.1`。
+
+### 3.16 `v1.8.2` 双基座清晰化、角色优先 Studio、一键智能搭配与反模式顾问
+- **双基座（Dual-Harness）架构**：**外层治理基座**（隔离 worktree、Mandate、确定性门禁、交叉评审、Outbox 交付）对所有 Worker 一致，并承载可插拔的**内层基座**——**原厂 CLI 基座**（`kind: "cli"`，复用本机订阅与协同训练的编码工具）与**内置 API 基座**（`kind: "api"`，直连 HTTP + 受 worktree 约束的轻量工具循环）。后端与协议无变化：这是建立在 §3.15 之上的纯 Web + 文档版本。
+- **纯函数顾问**（[modelAdvisor.ts](./packages/web/src/utils/modelAdvisor.ts)，测试见 `packages/web/test/modelAdvisor.test.ts`）：`formatModelStatusHuman`（绝不暴露原始内核 / 登录字符串）、`activeRolesOfProfile`、`isAutoCandidate`、`buildSmartModelRecipes`（`hybrid_best` / `cli_heterogeneous` / `pure_api` / `smart_auto`，均带 `isActive`）与 `diagnoseModelBindings`（`no_ready_models`、`same_model_self_review`、`empty_auto_pool`、`heuristic_control`、`unready_custom`，可附 `suggestedPatch`）。仅对 Web 类型使用 `import type`，浏览器包与 `@super-work/core` 保持隔离。
+- **角色优先 `ModelRegistryStudio`**：[ModelRoleBoard.tsx](./packages/web/src/components/setup/ModelRoleBoard.tsx)（区块 ①：搭配药丸、三张角色卡、顾问横幅）位于双轨配置池之上（区块 ②：`ModelProfileCard` 带轨道标签、角色徽章、白话状态行、*允许自动轮换*与琥珀色*去补全*按钮）。`applyRoles(patch)` 把一个或多个角色合并为一次 `configureSetup`（外加一次 `patchRepo`），搭配不会产生竞态。
+- **引导式表单**（[ModelProfileForm.tsx](./packages/web/src/components/setup/ModelProfileForm.tsx)、[modelTemplates.ts](./packages/web/src/components/setup/modelTemplates.ts)）：`TEMPLATE_GROUPS` 把 8 个模板分为 API 与 CLI 两条轨道，`suggestions` 驱动 `<datalist>`，新配置默认 `workerAutoPool: true`，CLI 中转地址 / 密钥收纳在可展开的「高级」中（已配置时自动展开）。**实时模型发现（v1.8.2）**：`discoverModelsFromEndpoint`（[model-discovery.ts](./packages/drivers/src/llm/model-discovery.ts)）按协议携带对应鉴权头，依次探测 `/models`、`/v1/models`、`/model`、`/v1/model`（本地端点另加 Ollama `/api/tags`），解析 `data` / `models` / `model_list` / 数组 / 单对象等响应并脱敏密钥；经 `POST /api/setup/models`（别名 `/api/setup/model`，`useSavedKey` 复用已存密钥）暴露，由 `ModelProfileForm` 中的 [FetchedModelPicker.tsx](./packages/web/src/components/setup/FetchedModelPicker.tsx) 消费。
+- **版本**：各工作区包、`GET /api/mcp` 与 JSON-RPC `initialize` 的 `serverInfo.version` 均报告 `1.8.2`（27 个工具）；Web 徽标 `v1.8.2`。
 
 ### 3.14 `v1.8.0` Super-Agent First —— 消费级界面，专业级引擎
 - **分层**：Web 是架在不变引擎之上的轻量*消费级界面*（Home / History / Settings、单行 4 项 HeaderBar、带常驻 Steer 栏的精简 DeepDiveDrawer）；高级能力收纳于可折叠的 Settings → Developer / Engine Room。内核契约未做任何变更。

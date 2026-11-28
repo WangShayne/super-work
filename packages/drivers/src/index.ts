@@ -20,6 +20,7 @@ export * from "./workers/api-worker-tools.ts";
 export * from "./workers/relay-env.ts";
 export * from "./llm/control-plane-llm.ts";
 export * from "./llm/control-plane-symmetric.ts";
+export * from "./llm/model-discovery.ts";
 export * from "./sources/gh-cli-source.ts";
 export * from "./env/cli-scanner.ts";
 export * from "./env/service-manager.ts";

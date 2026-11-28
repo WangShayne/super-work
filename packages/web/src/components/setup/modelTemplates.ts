@@ -18,17 +18,25 @@ export interface ModelTemplate {
   name: string;
   baseUrl: string;
   model: string;
+  /** Model-name hints rendered as <datalist> options (API templates only). */
+  suggestions: string[];
 }
 
 export const MODEL_TEMPLATES: ModelTemplate[] = [
-  { id: "deepseek", titleKey: "models.tpl.deepseek", kind: "api", apiProtocol: "deepseek", name: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat" },
-  { id: "openai", titleKey: "models.tpl.openai", kind: "api", apiProtocol: "openai", name: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" },
-  { id: "anthropic", titleKey: "models.tpl.anthropic", kind: "api", apiProtocol: "anthropic", name: "Anthropic", baseUrl: "https://api.anthropic.com", model: "claude-sonnet-4-5" },
-  { id: "ollama", titleKey: "models.tpl.ollama", kind: "api", apiProtocol: "ollama", name: "Ollama", baseUrl: "http://localhost:11434/v1", model: "qwen2.5-coder" },
-  { id: "claude", titleKey: "models.tpl.claude", kind: "cli", cliEngine: "claude", name: "Claude CLI", baseUrl: "", model: "" },
-  { id: "codex", titleKey: "models.tpl.codex", kind: "cli", cliEngine: "codex", name: "Codex CLI", baseUrl: "", model: "" },
-  { id: "opencode", titleKey: "models.tpl.opencode", kind: "cli", cliEngine: "opencode", name: "OpenCode CLI", baseUrl: "", model: "" },
-  { id: "gemini", titleKey: "models.tpl.gemini", kind: "cli", cliEngine: "gemini", name: "Gemini CLI", baseUrl: "", model: "" },
+  { id: "deepseek", titleKey: "models.tpl.deepseek", kind: "api", apiProtocol: "deepseek", name: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat", suggestions: ["deepseek-chat", "deepseek-reasoner"] },
+  { id: "openai", titleKey: "models.tpl.openai", kind: "api", apiProtocol: "openai", name: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", suggestions: ["gpt-4.1", "o4-mini"] },
+  { id: "anthropic", titleKey: "models.tpl.anthropic", kind: "api", apiProtocol: "anthropic", name: "Anthropic", baseUrl: "https://api.anthropic.com", model: "claude-sonnet-4-5", suggestions: ["claude-sonnet-4-5", "claude-opus-4-5"] },
+  { id: "ollama", titleKey: "models.tpl.ollama", kind: "api", apiProtocol: "ollama", name: "Ollama", baseUrl: "http://localhost:11434/v1", model: "qwen2.5-coder", suggestions: ["qwen2.5-coder", "llama3.3"] },
+  { id: "claude", titleKey: "models.tpl.claude", kind: "cli", cliEngine: "claude", name: "Claude CLI", baseUrl: "", model: "", suggestions: [] },
+  { id: "codex", titleKey: "models.tpl.codex", kind: "cli", cliEngine: "codex", name: "Codex CLI", baseUrl: "", model: "", suggestions: [] },
+  { id: "opencode", titleKey: "models.tpl.opencode", kind: "cli", cliEngine: "opencode", name: "OpenCode CLI", baseUrl: "", model: "", suggestions: [] },
+  { id: "gemini", titleKey: "models.tpl.gemini", kind: "cli", cliEngine: "gemini", name: "Gemini CLI", baseUrl: "", model: "", suggestions: [] },
+];
+
+/** The two labeled track groups shown by "+ Add Model". */
+export const TEMPLATE_GROUPS: Array<{ track: ModelProfileKind; titleKey: TranslationKey; templates: ModelTemplate[] }> = [
+  { track: "api", titleKey: "models.form.groupApi", templates: MODEL_TEMPLATES.filter((t) => t.kind === "api") },
+  { track: "cli", titleKey: "models.form.groupCli", templates: MODEL_TEMPLATES.filter((t) => t.kind === "cli") },
 ];
 
 /** Editable form state for one ModelProfile (apiKey is write-only: blank keeps the saved key). */
@@ -60,8 +68,8 @@ export function draftFromTemplate(tpl: ModelTemplate): ProfileDraft {
     effort: "",
     apiKey: "",
     clearApiKey: false,
-    // custom API models are lightweight by default; CLI engines join the auto pool
-    workerAutoPool: tpl.kind === "cli",
+    // every new profile joins the Auto pool so it works out of the box in Auto mode
+    workerAutoPool: true,
     builtinCli: false,
     hasApiKey: false,
   };

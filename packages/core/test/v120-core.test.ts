@@ -233,7 +233,7 @@ describe("v1.2.0 Core Logic (Campaigns, MergeTrain, Immutable super-work.json, M
       { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
       stubHost,
     )) as McpJsonRpcResponse;
-    expect((initRes.result as { serverInfo: { version: string } }).serverInfo.version).toBe("1.8.1");
+    expect((initRes.result as { serverInfo: { version: string } }).serverInfo.version).toBe("1.8.2");
 
     const cRes = (await handleMcpJsonRpcMessage(
       {

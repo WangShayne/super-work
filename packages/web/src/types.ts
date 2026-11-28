@@ -166,6 +166,8 @@ import type {
   WorkerEngineId,
 } from "@super-work/core/types";
 
+export type { DiscoveredModelItem, ModelDiscoveryResult } from "@super-work/core/types";
+
 export interface RoutinePresetTemplate {
   id: string;
   nameZh: string;

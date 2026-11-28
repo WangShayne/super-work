@@ -6,6 +6,16 @@
 
 ---
 
+## 零、 v1.8.2：角色优先的「大模型与角色」Studio
+
+打开 **设置 → 大模型与角色**：
+
+1. **先选三个角色**——*控制*（理解需求、拆单、路由）、*实现*（在隔离 worktree 里写代码）、*交叉审查*（独立复核）。每张卡片都会提示推荐轨道。
+2. **或直接点一键智能搭配**（仅在已就绪模型满足条件时出现）：*包月双 CLI 异构搭配*、*API 控场 + 包月 CLI 编码*、*纯 API 自治*、*全池智能自动路由*；当前生效的会显示绿色对勾。
+3. **看卡片下方的顾问提示**：会提醒实现与审查同模型、仅用启发式控制、自动池为空、自定义模型未补全；点一键按钮即可应用建议。
+4. **在下方管理配置池**：*原厂 CLI 基座*卡片复用本机订阅，*内置 API 基座*卡片直连 HTTP。徽标显示该模型承担的角色；**允许自动轮换**只影响「自动」模式，不会阻止手动选择；未补全的自定义模型会显示琥珀色**去补全**按钮。
+5. **新增模型配置**按轨道分组模板、提供模型名称建议、标出 API 必填项，并把可选的 CLI 中转地址 / 密钥折叠在「高级」里。
+
 ## 零 a、 v1.8.1：配置池与角色指派
 
 打开**设置 → 大模型与角色**（或安装向导的*自定义*）进入 **ModelRegistryStudio**。
@@ -15,6 +25,7 @@
 1. 点击**扫描本机 CLI**检测本机 `claude` / `codex` / `opencode` / `gemini`，顶部显示 `{已就绪}/{总数}`。
 2. 点击**新增模型配置**，从 8 个平级模板中选择：**DeepSeek**、**OpenAI / 兼容 API**（OpenAI、OpenRouter、OneAPI、SiliconFlow、Qwen）、**Anthropic / 兼容 API**、**本地 Ollama**（`http://localhost:11434/v1`），或 **Claude / Codex / OpenCode / Gemini CLI**。填写 Base URL、模型、推理强度与 API Key（已保存的密钥以掩码显示，勾选*清除已保存的 Key*即可删除）。CLI 配置的可选中转 Base URL / API Key 会注入为 `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` / `GOOGLE_GEMINI_BASE_URL`。
 3. 点击**测试连接**（`POST /api/setup/test-model`）查看延迟与状态，再点击**保存模型配置**。
+   - **获取可选模型（v1.8.2）**：填好*接口地址*与 *API Key* 后，点击模型名称旁的**获取可选模型**。系统通过 `POST /api/setup/models`（别名 `POST /api/setup/model`）依次探测上游 `/models`、`/v1/models`、`/model`、`/v1/model`（本地端点另加 Ollama 原生 `/api/tags`），并以可点击的标签列出结果，点击即可填入模型名称。编辑已保存配置时会复用已存密钥（不会回传浏览器）。CLI 配置在*高级：自定义中转网关*中填写中转 Base URL 后，也可点击**获取中转可选模型**。
 4. 每张卡片可切换**参与自动工作池**（是否纳入 Worker 智能路由）、**测试**、**编辑**，或**删除**（仅自定义配置，行内二次确认）。内置 CLI 配置的类型与引擎被锁定，且不可删除。
 
 **阶段 ② — 角色模型指派**
@@ -57,7 +68,7 @@ super-work up [-d|--detach]                              # 显式启动守护进
 - **History（历史）**：时间线与发布（Timeline & Releases）、看板 / DAG。
 - **Settings（设置）**：5 项 Essentials + 可折叠 **Developer / Engine Room**（Contract / Gates、Playbook / Casebook、Routines / Campaigns、Worktrees / Merge Train / Simulate、Flight Recorder / Doctor / Evals）。
 - **DeepDiveDrawer**：*Overview & Changes* + *More ▾*，底部常驻 **Steer** 输入栏。
-- **HeaderBar**（单栏）：`v1.8.1` 徽标 + 实时健康点 · 胶囊标签页（Home / History / Settings） · `⌘K` / `ZH-EN`（非首页标签另有紧凑仓库胶囊）。
+- **HeaderBar**（单栏）：`v1.8.2` 徽标 + 实时健康点 · 胶囊标签页（Home / History / Settings） · `⌘K` / `ZH-EN`（非首页标签另有紧凑仓库胶囊）。
 - **Hero Composer 上下文工具栏**：仓库切换器（含注册） · **受控 / 智能 / 全权** 拨盘 · *Advanced ▾*，直接集成在需求输入框下方。
 
 以下章节深入介绍完整的 Engine Room 能力。

@@ -1,7 +1,7 @@
 import { Suspense, lazy, useEffect, useState } from "react";
 import { ChevronDown, ChevronRight, Loader2, RefreshCw, Rocket, Wrench, X } from "lucide-react";
 import { api } from "../api.ts";
-import { useI18n } from "../i18n.tsx";
+import { formatLlmProviderDisplay, useI18n } from "../i18n.tsx";
 import type { CliScanReport, PublicSetupStatus } from "../types.ts";
 
 const CustomizeSetupForm = lazy(() =>
@@ -23,7 +23,11 @@ function toolMark(tool: CliScanReport["tools"][number]): { glyph: string; cls: s
 }
 
 export function SetupWizardModal({ open, setupStatus, onClose, onSaved }: SetupWizardModalProps) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
+  const controlId = setupStatus?.config.controlModelId;
+  const controlName =
+    setupStatus?.config.modelProfiles?.find((p) => p.id === controlId)?.name ??
+    formatLlmProviderDisplay(setupStatus?.activeLlmProvider, locale);
   const [scanReport, setScanReport] = useState<CliScanReport | null>(null);
   const [customizeOpen, setCustomizeOpen] = useState(false);
   const [starting, setStarting] = useState(false);
@@ -95,7 +99,7 @@ export function SetupWizardModal({ open, setupStatus, onClose, onSaved }: SetupW
                 {isFirstRun ? t("setup.title") : t("setup.settingsTitle")}
               </h2>
               <p className="text-[11px] font-mono text-zinc-500">
-                {t("header.controlPlanePrefix")}: {setupStatus.activeLlmProvider}
+                {t("header.controlPlanePrefix")}: {controlName}
               </p>
             </div>
           </div>

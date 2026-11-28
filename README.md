@@ -8,11 +8,20 @@ An asynchronous autonomous development workflow orchestration kernel and local d
 
 ---
 
+## v1.8.2 — Role-First Guided Model Studio: Dual-Harness Clarity, Smart Recipes & Anti-Pattern Advisor
+
+v1.8.2 makes **Models & Roles** self-explanatory. super-work is a **Dual-Harness** system: one **Outer Governance Harness** (isolated worktree, mandate, gates, review, delivery) wraps pluggable **Inner Harnesses** — the **Native CLI Harness** (`claude` / `codex` / `opencode` / `gemini`: reuses your local subscription and co-trained coding tools) and the **Built-in API Harness** (DeepSeek / OpenAI- / Anthropic-compatible / Ollama: direct HTTP plus a lightweight sandboxed loop; pay-as-you-go or local).
+
+- **Role-First Studio**: the three role cards (Control / Implement / Cross-Review, each with a plain-language duty and a recommended track) come first; the model pool follows, with *Native CLI* / *Built-in API* track labels, per-card role badges (Control / Implement / Review / Auto candidate) and human-readable status text instead of raw login strings.
+- **1-click Smart Recipes**: built live from your *ready* profiles — Dual-CLI heterogeneous review, API control + subscription CLI coding, Pure API, Smart auto-routing — applied to all three roles in a single request.
+- **Anti-Pattern Advisor**: flags same-model self-review, heuristic-only control while models are ready, an empty Auto pool and unfinished custom profiles, with 1-click fixes.
+- **Guided add-form**: templates grouped into the two tracks, model-name suggestions, required markers on API fields (keyless hint for Ollama / localhost), and the optional CLI relay URL / key collapsed behind an *Advanced* disclosure.
+
 ## v1.8.1 — Unified Model Pool: CLI & API Peers, Role Binding (Models & Roles Studio)
 
 v1.8.1 lets you pick **any model you like** for **any role**. Local CLIs (`claude` / `codex` / `opencode` / `gemini`) and API models (DeepSeek / OpenAI-compatible / Anthropic-compatible / Ollama) are equal peer **`ModelProfile`s** in one **Model Pool**, bound to the *Control*, *Implement* and *Review* roles:
 
-- **Models & Roles Studio** (Settings → *Models & Roles*, and the Setup Wizard's *Customize*; one `ModelRegistryStudio` component, no duplicated forms). **Stage ① Model Pool**: peer cards for every CLI and API profile with a ready badge, a `+ Relay` badge for CLIs with a custom Base URL / key, a per-card **Auto Pool** switch, a 1-click **Test** (`POST /api/setup/test-model`), inline **Edit** and a 2-step inline **Delete** (custom profiles only), plus **Rescan CLI** and **+ Add Model** (8 equal templates: 4 API protocols + 4 CLI engines). **Stage ② Role Binding**: three selectors (Control / Implement / Cross-Review) that list only *ready* profiles (plus *Heuristic* for Control and *Auto* for Implement / Review) and save immediately.
+- **Models & Roles Studio** (Settings → *Models & Roles*, and the Setup Wizard's *Customize*; one `ModelRegistryStudio` component, no duplicated forms). **Stage ① Model Pool**: peer cards for every CLI and API profile with a ready badge, a `+ Relay` badge for CLIs with a custom Base URL / key, a per-card **Auto Pool** switch, a 1-click **Test** (`POST /api/setup/test-model`), inline **Edit** and a 2-step inline **Delete** (custom profiles only), plus **Rescan CLI** and **+ Add Model** (8 equal templates: 4 API protocols + 4 CLI engines). **Stage ② Role Binding**: three selectors (Control / Implement / Cross-Review) that list only *ready* profiles (plus *Heuristic* for Control and *Auto* for Implement / Review) and save immediately. **One-click model discovery (v1.8.2)**: the Add/Edit form's *Fetch Models* button probes the provider's live `/models` / `/model` endpoint (`POST /api/setup/models`) so you pick from real model IDs instead of typing them; it works for API profiles and CLI custom relays.
 - **Delete API**: `POST /api/setup/configure` accepts `deleteModelProfileIds: string[]`. Custom profiles are removed; built-in CLI profiles (`builtinCli`) are protected (HTTP 400). Role bindings (and repo-level `implementModelId` / `reviewModelId`) that pointed at a deleted profile fall back to `heuristic` / `auto`.
 - **Model picker**: Home *Options → Model* and the DeepDive steer bar pick from ready profiles and send `preferredModelId`.
 
@@ -28,7 +37,7 @@ Foundations introduced earlier in v1.8.1:
 
 v1.8.0 turns `super-work` into a **consumer surface on top of an unchanged professional engine**: you state a requirement, glance at what needs you, and approve. Every advanced capability below still exists — it simply moved into a collapsible **Engine Room**.
 
-- **Single-bar HeaderBar**: `v1.8.1` badge + Live Health Dot · pill tabs (Home / History / Settings) · `⌘K` command palette / `ZH-EN` toggle (plus a compact repo pill on non-Home tabs). The repo switcher and the **Guarded / Smart / Autonomous** autonomy dial live in the Hero Composer's integrated context toolbar, right next to the requirement you are typing.
+- **Single-bar HeaderBar**: `v1.8.2` badge + Live Health Dot · pill tabs (Home / History / Settings) · `⌘K` command palette / `ZH-EN` toggle (plus a compact repo pill on non-Home tabs). The repo switcher and the **Guarded / Smart / Autonomous** autonomy dial live in the Hero Composer's integrated context toolbar, right next to the requirement you are typing.
 - **3 spaces**:
   - **Home** — the **Hero Composer** (implicit smart intake, optional `scope:<glob>` tokens, collapsible *Advanced ▾*), **Needs You** (three human verbs: **Approve / Answer / Unblock**) and **Live Work** cards.
   - **History** — Timeline & Releases, plus the Board / DAG views.

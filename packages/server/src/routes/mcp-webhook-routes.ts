@@ -550,7 +550,7 @@ export function registerMcpWebhookRoutes(ctx: ServerRouteContext): void {
   app.get("/api/mcp", (c) => {
     return c.json({
       name: "super-work",
-      version: "1.8.1",
+      version: "1.8.2",
       transport: "streamable-http",
       endpoint: "/api/mcp",
     });

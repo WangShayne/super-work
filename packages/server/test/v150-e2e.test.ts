@@ -275,7 +275,7 @@ describe("v1.5.0 Wave 3 End-to-End (milestone_branch staging, squash release, en
       expect(resetRes.status).toBe(200);
 
       const mcpInfo = (await (await fetch(`${baseUrl}/api/mcp`)).json()) as { version: string };
-      expect(mcpInfo.version).toBe("1.8.1");
+      expect(mcpInfo.version).toBe("1.8.2");
       expect(MCP_TOOL_DEFINITIONS).toHaveLength(27);
 
       const rpc = async (method: string, params?: Record<string, unknown>) =>
@@ -293,7 +293,7 @@ describe("v1.5.0 Wave 3 End-to-End (milestone_branch staging, squash release, en
           };
         };
       expect((await rpc("initialize", { protocolVersion: "2025-03-26" })).result.serverInfo?.version).toBe(
-        "1.8.1",
+        "1.8.2",
       );
       const tools = (await rpc("tools/list")).result.tools ?? [];
       expect(tools).toHaveLength(27);

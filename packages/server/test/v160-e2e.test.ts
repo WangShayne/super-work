@@ -307,7 +307,7 @@ describe("v1.6.0 Wave 2 End-to-End (playbook hygiene, GitHub release guardrails,
         source: "human",
       });
       const info = (await (await fetch(`${baseUrl}/api/mcp`)).json()) as { version: string };
-      expect(info.version).toBe("1.8.1");
+      expect(info.version).toBe("1.8.2");
       expect(MCP_TOOL_DEFINITIONS).toHaveLength(27);
 
       const rpc = async (method: string, params?: Record<string, unknown>) =>
@@ -325,7 +325,7 @@ describe("v1.6.0 Wave 2 End-to-End (playbook hygiene, GitHub release guardrails,
           };
         };
       expect((await rpc("initialize", { protocolVersion: "2025-03-26" })).result.serverInfo?.version).toBe(
-        "1.8.1",
+        "1.8.2",
       );
       const tools = (await rpc("tools/list")).result.tools ?? [];
       expect(tools).toHaveLength(27);
