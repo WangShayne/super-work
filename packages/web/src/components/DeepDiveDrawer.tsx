@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { api } from "../api.ts";
 import { formatTicketStatus, useI18n } from "../i18n.tsx";
+import type { ResolveHandler } from "./NeedsYouCard.tsx";
 import { CheckpointsTab } from "./deep-dive/CheckpointsTab.tsx";
 import { DrawerTabBar, SteerBar, type DrawerTab } from "./deep-dive/DrawerChrome.tsx";
 import { DiffTab } from "./deep-dive/DiffTab.tsx";
@@ -42,9 +43,12 @@ interface DeepDiveDrawerProps {
   /** Peer model profiles offered by the steer bar's model picker (ready ones only). */
   modelProfiles?: PublicModelProfile[];
   liveEvents: LiveEventLogEntry[];
+  sseConnected?: boolean;
   onClose: () => void;
   onSelectTicket?: (ticketId: string) => void;
   onRefresh: () => void;
+  /** Answer pending inbox decisions (clarification / signoff / mandate) inline in the drawer. */
+  onResolve?: ResolveHandler;
 }
 
 /** Statuses where a live steer instruction can still influence the running worker. */
@@ -57,9 +61,11 @@ export function DeepDiveDrawer({
   repo,
   modelProfiles = [],
   liveEvents,
+  sseConnected = false,
   onClose,
   onSelectTicket,
   onRefresh,
+  onResolve,
 }: DeepDiveDrawerProps) {
   const { locale, t } = useI18n();
   const [tab, setTab] = useState<DrawerTab>("overview");
@@ -580,11 +586,13 @@ export function DeepDiveDrawer({
               reposById={reposById}
               childSubtasks={childSubtasks}
               ticketLiveEvents={ticketLiveEvents}
+              sseConnected={sseConnected}
               deliveryError={deliveryError}
               evalNotice={evalNotice}
               setDetail={setDetail}
               onRefresh={onRefresh}
               onSelectTicket={onSelectTicket}
+              onResolve={onResolve}
             />
           )}
 

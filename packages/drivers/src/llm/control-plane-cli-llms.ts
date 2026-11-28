@@ -23,6 +23,7 @@ import type {
   WorkerEngineId,
   WorkerStreamEvent,
 } from "@super-work/core";
+import { WORKER_MANDATE_ROUTER_RULE } from "./worker-mandate-rule.ts";
 import {
   DEFAULT_CONTROL_PLANE_TIMEOUT_MS,
   EPIC_DECOMPOSITION_SCHEMA,
@@ -268,7 +269,7 @@ export class CliFallbackControlLLM implements ControlPlaneLLM {
     };
   }): Promise<RequirementIntakePlan> {
     const prompt = [
-      "Route a raw software requirement to `single_ticket`, `epic_dag`, or `goal_campaign` (only choose `goal_campaign` when a valid metricCommand and numeric targetValue exist). Narrow allowedPaths using real repo structure.",
+      "Route a raw software requirement to `single_ticket`, `epic_dag`, or `goal_campaign` (only choose `goal_campaign` when a valid metricCommand and numeric targetValue exist). Narrow allowedPaths using real repo structure. " + WORKER_MANDATE_ROUTER_RULE,
       `Repo: ${input.repo.name} (${input.repo.id}), DefaultTemplate: ${input.defaultTemplate}`,
       input.availableRepos && input.availableRepos.length > 1
         ? `AvailableRepos: ${JSON.stringify(input.availableRepos)}`
@@ -549,7 +550,7 @@ export class CodexCliControlLLM implements ControlPlaneLLM {
     };
   }): Promise<RequirementIntakePlan> {
     const prompt = [
-      "Route a raw software requirement to `single_ticket`, `epic_dag`, or `goal_campaign` (only choose `goal_campaign` when a valid metricCommand and numeric targetValue exist). Narrow allowedPaths using real repo structure.",
+      "Route a raw software requirement to `single_ticket`, `epic_dag`, or `goal_campaign` (only choose `goal_campaign` when a valid metricCommand and numeric targetValue exist). Narrow allowedPaths using real repo structure. " + WORKER_MANDATE_ROUTER_RULE,
       `Repo: ${input.repo.name} (${input.repo.id}), DefaultTemplate: ${input.defaultTemplate}`,
       input.availableRepos && input.availableRepos.length > 1
         ? `AvailableRepos: ${JSON.stringify(input.availableRepos)}`

@@ -12,7 +12,7 @@ import {
   Square,
   X,
 } from "lucide-react";
-import { api } from "../api.ts";
+import { api, type MilestoneReleaseOptions } from "../api.ts";
 import { formatInboxKind, useI18n } from "../i18n.tsx";
 import type {
   ArenaCandidateResult,
@@ -30,6 +30,7 @@ export type ResolveOptions = {
   budgetIncreaseUsd?: number;
   arenaWinnerId?: string;
   selectedOption?: string;
+  milestoneRelease?: MilestoneReleaseOptions;
 };
 
 export type ResolveHandler = (
@@ -44,7 +45,8 @@ interface NeedsYouCardProps {
   item: InboxItem;
   ticket?: Ticket;
   selected: boolean;
-  onToggleSelect: () => void;
+  /** Omit to hide the batch-select checkbox (e.g. inside the Drawer). */
+  onToggleSelect?: () => void;
   onResolve: ResolveHandler;
   onInspectTicket: (ticketId: string) => void;
 }
@@ -70,6 +72,24 @@ export function NeedsYouCard({
   const [previewBusy, setPreviewBusy] = useState<string | null>(null);
 
   const payload = item.contextPayload;
+  const targetVersion = typeof payload.targetVersion === "string" ? payload.targetVersion : "";
+  const [relBump, setRelBump] = useState(true);
+  const [relSquash, setRelSquash] = useState(true);
+  const [relTag, setRelTag] = useState(Boolean(targetVersion));
+  const [relPush, setRelPush] = useState(true);
+  const [relGithub, setRelGithub] = useState(false);
+  const [relMsg, setRelMsg] = useState("");
+  const milestoneRelease: MilestoneReleaseOptions | undefined =
+    item.kind === "milestone_ready"
+      ? {
+          bumpVersion: relBump,
+          squashReleaseCommit: relSquash,
+          createTag: relTag,
+          pushRemote: relPush,
+          createGithubRelease: relGithub && relTag && relPush,
+          releaseCommitMessage: relMsg.trim() || undefined,
+        }
+      : undefined;
   const clarification =
     item.kind === "clarification_request"
       ? (payload.clarification as WorkerClarificationRequest | undefined)
@@ -155,13 +175,15 @@ export function NeedsYouCard({
     <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 space-y-3 hover:border-zinc-700 transition">
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-start gap-2.5 min-w-0">
-          <input
-            type="checkbox"
-            checked={selected}
-            onChange={onToggleSelect}
-            aria-label={`Select ${item.title}`}
-            className="mt-1 rounded border-zinc-700 bg-zinc-950 text-indigo-500 cursor-pointer"
-          />
+          {onToggleSelect && (
+            <input
+              type="checkbox"
+              checked={selected}
+              onChange={onToggleSelect}
+              aria-label={`Select ${item.title}`}
+              className="mt-1 rounded border-zinc-700 bg-zinc-950 text-indigo-500 cursor-pointer"
+            />
+          )}
           <div className="min-w-0">
             <h4 className="text-sm font-semibold text-zinc-100 truncate">{item.title}</h4>
             <div className="text-[10px] font-mono text-zinc-500 mt-0.5">
@@ -358,6 +380,63 @@ export function NeedsYouCard({
         </div>
       )}
 
+      {item.kind === "milestone_ready" && (
+        <div className="space-y-2 rounded-lg border border-zinc-800 bg-zinc-950/60 p-2.5 text-xs text-zinc-300">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+            <label className="inline-flex items-center gap-1.5">
+              <input type="checkbox" checked={relBump} onChange={(e) => setRelBump(e.target.checked)} />
+              {t("milestone.optBump")}
+            </label>
+            <label className="inline-flex items-center gap-1.5">
+              <input type="checkbox" checked={relSquash} onChange={(e) => setRelSquash(e.target.checked)} />
+              {t("milestone.optSquash")}
+            </label>
+            <label className="inline-flex items-center gap-1.5">
+              <input
+                type="checkbox"
+                checked={relTag}
+                onChange={(e) => {
+                  setRelTag(e.target.checked);
+                  if (!e.target.checked) setRelGithub(false);
+                }}
+              />
+              {t("milestone.optTag")}
+            </label>
+            <label className="inline-flex items-center gap-1.5">
+              <input
+                type="checkbox"
+                checked={relPush}
+                onChange={(e) => {
+                  setRelPush(e.target.checked);
+                  if (!e.target.checked) setRelGithub(false);
+                }}
+              />
+              {t("milestone.optPush")}
+            </label>
+            <label
+              className={`inline-flex items-center gap-1.5 ${relTag && relPush ? "" : "opacity-50"}`}
+              title={t("milestone.optGithubReleaseHint")}
+            >
+              <input
+                type="checkbox"
+                checked={relGithub && relTag && relPush}
+                disabled={!(relTag && relPush)}
+                onChange={(e) => setRelGithub(e.target.checked)}
+              />
+              {t("milestone.optGithubRelease")}
+            </label>
+          </div>
+          <input
+            type="text"
+            value={relMsg}
+            onChange={(e) => setRelMsg(e.target.value)}
+            placeholder={`feat: release v${targetVersion || "X.Y.Z"}`}
+            aria-label={t("milestone.commitMsgLabel")}
+            className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1 font-mono text-[11px] text-zinc-200 placeholder:text-zinc-600"
+          />
+        </div>
+      )}
+
       {error && <div className="text-xs text-rose-400 break-words">{error}</div>}
 
       <div className="flex flex-wrap items-center gap-2">
@@ -424,7 +503,9 @@ export function NeedsYouCard({
                   ? { budgetIncreaseUsd: 5 }
                   : clarification && activeChoice
                     ? { selectedOption: activeChoice }
-                    : undefined,
+                    : milestoneRelease
+                      ? { milestoneRelease }
+                      : undefined,
               )
             }
             className={`${BTN_PRIMARY} bg-emerald-600 hover:bg-emerald-500`}

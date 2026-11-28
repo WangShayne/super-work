@@ -250,7 +250,7 @@ describe("v1.1.0 End-to-End Capabilities (A.1 Probes + A.2 Chief & Batch Inbox +
       // 5. MCP (GET /api/mcp + 23 tools + tools/call ask_chief)
       const mcpInfoRes = await fetch(`${baseUrl}/api/mcp`);
       expect(mcpInfoRes.status).toBe(200);
-      expect(((await mcpInfoRes.json()) as { version: string }).version).toBe("1.8.2");
+      expect(((await mcpInfoRes.json()) as { version: string }).version).toBe("1.8.3");
 
       const toolsListRes = await fetch(`${baseUrl}/api/mcp`, {
         method: "POST",

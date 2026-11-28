@@ -23,11 +23,20 @@ export function registerInboxOutboxRoutes(ctx: ServerRouteContext): void {
       saveToPlaybook?: boolean;
       arenaWinnerId?: string;
       selectedOption?: string;
+      milestoneRelease?: {
+        bumpVersion?: boolean;
+        createTag?: boolean;
+        pushRemote?: boolean;
+        squashReleaseCommit?: boolean;
+        releaseCommitMessage?: string;
+        createGithubRelease?: boolean;
+      };
     };
     if (body.decision !== "approved" && body.decision !== "rejected") {
       return c.json({ error: "decision must be 'approved' or 'rejected'" }, 400);
     }
     const result = await kernel.resolveInboxItem(id, body.decision, body.note, {
+      milestoneRelease: body.milestoneRelease,
       deliveryAction: body.deliveryAction,
       expandMandate: body.expandMandate,
       budgetIncreaseUsd: body.budgetIncreaseUsd,

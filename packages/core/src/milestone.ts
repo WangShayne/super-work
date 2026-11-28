@@ -71,6 +71,22 @@ export function planMilestoneWaves(planned: PlannedMilestoneItem[]): MilestoneIt
   return out;
 }
 
+const SOURCE_CHANGE_RE =
+  /packages\/|\bsrc\/|\.tsx?\b|\b(feature|bug|bugfix|refactor|implement|fix)\b|修复|重构|新增功能|实现|button|header|modal|component|endpoint|route|按钮|组件|接口|页面/i;
+const HOUSEKEEPING_RE =
+  /git\s+push|push\s+(?:to\s+)?(?:origin|remote|main|tags?)|git\s+tag|annotated\s+tag|tag\s+v?\d|打\s*tag|添加.{0,8}tag|推送|整合|整理|合并.{0,8}提交|squash|bump\s+version|升级版本|版本号|release\s+v/i;
+
+/**
+ * True when the requirement only asks for release housekeeping (squash/consolidate commits,
+ * version bump, tag, push) and mentions no source paths or feature/bug/refactor work.
+ */
+export function isPureReleaseHousekeepingRequirement(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  if (SOURCE_CHANGE_RE.test(t)) return false;
+  return HOUSEKEEPING_RE.test(t);
+}
+
 export function synthesizeMilestoneReleaseNotes(input: {
   milestone: Milestone;
   tickets: Ticket[];
@@ -123,6 +139,15 @@ export function synthesizeMilestoneReleaseNotes(input: {
   const telemetryEn = digest
     ? `\n\n### Run Telemetry\n- Tickets: ${ts?.delivered}/${ts?.total} delivered, cost $${ts?.totalCostUsd.toFixed(2)}\n- Scoped gate: ${digest.gateSavings.scopedRuns} run(s), saved ${Math.round(digest.gateSavings.totalSavedMs / 1000)}s\n- Self-host: canary passed ${digest.selfHost.canaryPassed}, reloads ${digest.selfHost.reloadsCompleted}, rollbacks ${digest.selfHost.canaryRolledBack}`
     : "";
+
+  if (milestone.items.length === 0) {
+    const costText = ts ? `; cost $${ts.totalCostUsd.toFixed(2)}` : "";
+    return {
+      releaseNotesZh: `## ${milestone.name}${version} 发布说明\n\n直接发布主干就绪变更(无新增需求项)。${telemetryZh}\n`,
+      releaseNotesEn: `## ${milestone.name}${version} Release Notes\n\nDirect release of base-branch changes (no new requirement items).${telemetryEn}\n`,
+      digestSummary: `Direct release of base-branch changes${costText}`,
+    };
+  }
 
   const releaseNotesZh = `## ${milestone.name}${version} 发布说明\n\n共交付 ${delivered.length}/${milestone.items.length} 项。\n\n${section("zh")}${telemetryZh}\n`;
   const releaseNotesEn = `## ${milestone.name}${version} Release Notes\n\n${delivered.length}/${milestone.items.length} item(s) delivered.\n\n${section("en")}${telemetryEn}\n`;

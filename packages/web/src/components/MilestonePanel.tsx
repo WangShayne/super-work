@@ -52,6 +52,20 @@ function MilestoneCard({
   const notes = notesLang === "zh" ? milestone.releaseNotesZh : milestone.releaseNotesEn;
   const delivered = milestone.items.filter((i) => i.status === "delivered").length;
 
+  const [cancelling, setCancelling] = useState(false);
+  const cancel = async () => {
+    setCancelling(true);
+    setError("");
+    try {
+      await api.cancelMilestone(milestone.id);
+      onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCancelling(false);
+    }
+  };
+
   const release = async () => {
     setReleasing(true);
     setError("");
@@ -99,9 +113,21 @@ function MilestoneCard({
             </span>
           )}
         </div>
-        <span className="text-zinc-500">
-          {delivered}/{milestone.items.length}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-zinc-500">
+            {delivered}/{milestone.items.length}
+          </span>
+          {(milestone.status === "active" || ready) && (
+            <button
+              type="button"
+              disabled={cancelling}
+              onClick={() => void cancel()}
+              className="px-2 py-0.5 rounded border border-zinc-700 text-[11px] text-zinc-400 hover:text-rose-300 hover:border-rose-500/40 disabled:opacity-50"
+            >
+              {t("milestone.cancelBtn")}
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="flex gap-3 overflow-x-auto pb-1">

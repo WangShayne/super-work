@@ -22,7 +22,7 @@ import { adoptArenaCandidateWinnerOp, cleanupArenaCandidateWorktreesOp } from ".
 import { deliverCampaignOp, startCampaignOp } from "./campaign-coordinator.ts";
 import type { KernelCoordinatorContext } from "./context.ts";
 import { applyEpicReplanProposalOp } from "./epic-replan-coordinator.ts";
-import { releaseMilestoneOp } from "./milestone-coordinator.ts";
+import { type ReleaseMilestoneOptions, cancelMilestoneOp, releaseMilestoneOp } from "./milestone-coordinator.ts";
 
 function utcTodayString(): string {
   return new Date().toISOString().slice(0, 10);
@@ -40,6 +40,7 @@ export async function resolveInboxItemOp(
     saveToPlaybook?: boolean;
     arenaWinnerId?: string;
     selectedOption?: string;
+    milestoneRelease?: ReleaseMilestoneOptions;
   },
 ): Promise<{ item: InboxItem; ticket: Ticket }> {
   const item = await ctx.stateStore.getInboxItem(inboxId);
@@ -67,18 +68,20 @@ export async function resolveInboxItemOp(
     const milestoneId = item.contextPayload?.milestoneId as string | undefined;
     if (decision === "approved" && milestoneId) {
       try {
-        // Explicit human signoff: bump version only; never tag/push implicitly.
-        await releaseMilestoneOp(ctx, milestoneId, {
-          bumpVersion: true,
-          createTag: false,
-          pushRemote: false,
-        });
+        // Explicit human signoff; default bumps version only (tag/push only when the card opts in).
+        await releaseMilestoneOp(
+          ctx,
+          milestoneId,
+          options?.milestoneRelease ?? { bumpVersion: true, createTag: false, pushRemote: false },
+        );
       } catch (err) {
         // Re-open the card so the human can retry after fixing the repo state.
         await ctx.stateStore.saveInboxItem(item);
         ctx.emitEvent({ type: "inbox_created", item, timestamp: nowIso() });
         throw err;
       }
+    } else if (decision === "rejected" && milestoneId) {
+      await cancelMilestoneOp(ctx, milestoneId, note);
     }
     return {
       item: resolvedItem,

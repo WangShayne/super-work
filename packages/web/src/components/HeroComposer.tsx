@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 import {
   Bug,
   Eye,
@@ -10,6 +10,7 @@ import {
   Plus,
   SlidersHorizontal,
   Sparkles,
+  X,
 } from "lucide-react";
 import { api } from "../api.ts";
 import { useI18n, type TranslationKey } from "../i18n.tsx";
@@ -29,6 +30,13 @@ import {
   parsePathList,
   withScopeTokens,
 } from "../utils/superAgent.ts";
+import {
+  INITIAL_STARTER_STATE,
+  reduceStarterComposer,
+  type StarterComposerAction,
+  type StarterComposerState,
+  type StarterId,
+} from "../utils/starterComposer.ts";
 
 interface HeroComposerProps {
   repo: RepoConfig | undefined;
@@ -50,8 +58,6 @@ const PRESET_ACTIVE: Record<AutonomyPreset, string> = {
   smart: "bg-indigo-500/20 text-indigo-200 border-indigo-500/40",
   autonomous: "bg-emerald-500/20 text-emerald-300 border-emerald-500/40",
 };
-
-type StarterId = "bug" | "feature" | "refactor" | "release";
 
 const STARTERS: { id: StarterId; icon: typeof Bug }[] = [
   { id: "bug", icon: Bug },
@@ -78,23 +84,32 @@ export function HeroComposer({
 }: HeroComposerProps) {
   const { t } = useI18n();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const [text, setText] = useState("");
   const [plan, setPlan] = useState<RequirementIntakePlan | null>(null);
   const [busy, setBusy] = useState<"preview" | "run" | null>(null);
   const [error, setError] = useState("");
-  const [optionsOpen, setOptionsOpen] = useState(false);
-  const [releaseMode, setReleaseMode] = useState(false);
-  const [version, setVersion] = useState("");
-  const [milestoneTitle, setMilestoneTitle] = useState("");
   const [scopePaths, setScopePaths] = useState("");
   /** "auto" or a ModelProfile id. */
   const [modelId, setModelId] = useState("auto");
   const [budget, setBudget] = useState("");
 
+  const allScaffolds = STARTERS.map(({ id }) => t(`composer.starter.${id}.scaffold` as TranslationKey));
+  const [composer, dispatch] = useReducer(
+    (s: StarterComposerState, a: StarterComposerAction) => reduceStarterComposer(s, a, allScaffolds),
+    INITIAL_STARTER_STATE,
+  );
+  const { text, activeStarter, releaseMode, version, milestoneTitle, optionsOpen } = composer;
+  const hasCustomOptions = scopePaths.trim() !== "" || modelId !== "auto" || budget.trim() !== "";
+  useEffect(() => {
+    dispatch({ type: "custom_options", value: hasCustomOptions });
+  }, [hasCustomOptions]);
+
   const repoId = repo?.id ?? "";
   const requirement = text.trim();
   const versionOk = !releaseMode || isSemver(version);
-  const canRun = Boolean(repoId && requirement && versionOk && busy === null);
+  // Release mode may run with an empty box: changes already on main are squashed/tagged/pushed directly.
+  const canRun = Boolean(
+    repoId && (requirement || (releaseMode && isSemver(version))) && versionOk && busy === null,
+  );
   const scope = parsePathList(scopePaths);
   const scopeTokens = formatScopeTokens(scope);
   const activePreset = inferAutonomyPreset(repo);
@@ -110,17 +125,22 @@ export function HeroComposer({
   });
 
   const onChangeText = (value: string) => {
-    setText(value);
+    dispatch({ type: "text", value });
     if (plan) setPlan(null);
   };
 
-  const applyStarter = (id: StarterId) => {
+  const clearComposer = () => {
+    dispatch({ type: "clear" });
+    setPlan(null);
+    setError("");
+  };
+
+  const toggleStarter = (id: StarterId) => {
     const scaffold = t(`composer.starter.${id}.scaffold` as TranslationKey);
-    onChangeText(scaffold);
-    if (id === "release") {
-      setOptionsOpen(true);
-      setReleaseMode(true);
-    }
+    const activating = activeStarter !== id;
+    dispatch({ type: "toggle", id, scaffold });
+    if (plan) setPlan(null);
+    if (!activating) return;
     window.setTimeout(() => {
       const el = textareaRef.current;
       if (!el) return;
@@ -155,7 +175,7 @@ export function HeroComposer({
           repoId,
           name: milestoneTitle.trim() || `Release ${version.trim()}`,
           targetVersion: version.trim().replace(/^v/, ""),
-          requirements: requirements.length > 0 ? requirements : [requirement],
+          requirements: requirements.length > 0 ? requirements : requirement ? [requirement] : [],
           maxBudgetUsdPerItem: Number(budget) > 0 ? Number(budget) : undefined,
           preferredModelId: modelId === "auto" ? undefined : modelId,
         });
@@ -164,7 +184,7 @@ export function HeroComposer({
         const res = await api.submitIntake(buildPayload());
         await onSubmitted(res.route);
       }
-      setText("");
+      dispatch({ type: "clear" });
       setPlan(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -287,7 +307,7 @@ export function HeroComposer({
 
             <button
               type="button"
-              onClick={() => setOptionsOpen((v) => !v)}
+              onClick={() => dispatch({ type: "options_open", value: !optionsOpen })}
               aria-expanded={optionsOpen}
               aria-controls="composer-options"
               className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] font-medium transition ${
@@ -354,7 +374,7 @@ export function HeroComposer({
                 <input
                   type="checkbox"
                   checked={releaseMode}
-                  onChange={(e) => setReleaseMode(e.target.checked)}
+                  onChange={(e) => dispatch({ type: "release_checkbox", checked: e.target.checked })}
                   className="rounded border-zinc-700 bg-zinc-950 text-indigo-500"
                 />
                 {t("composer.releaseMode")}
@@ -363,14 +383,14 @@ export function HeroComposer({
                 <>
                   <input
                     value={version}
-                    onChange={(e) => setVersion(e.target.value)}
+                    onChange={(e) => dispatch({ type: "version", value: e.target.value })}
                     placeholder="vX.Y.Z"
                     aria-label={t("milestone.versionLabel")}
                     className={`${INPUT_CLS} !w-28 font-mono ${versionOk ? "" : "border-rose-500/60"}`}
                   />
                   <input
                     value={milestoneTitle}
-                    onChange={(e) => setMilestoneTitle(e.target.value)}
+                    onChange={(e) => dispatch({ type: "milestone_title", value: e.target.value })}
                     placeholder={t("composer.milestoneTitle")}
                     className={`${INPUT_CLS} flex-1 min-w-[160px]`}
                   />
@@ -444,19 +464,38 @@ export function HeroComposer({
         )}
       </div>
 
-      {requirement === "" && repo && (
+      {repo && (
         <div className="flex flex-wrap items-center justify-center gap-2">
-          {STARTERS.map(({ id, icon: Icon }) => (
+          {STARTERS.map(({ id, icon: Icon }) => {
+            const active = activeStarter === id;
+            return (
+              <button
+                key={id}
+                type="button"
+                aria-pressed={active}
+                onClick={() => toggleStarter(id)}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs transition ${
+                  active
+                    ? "border-indigo-500/50 bg-indigo-500/15 text-indigo-200"
+                    : "border-zinc-800 bg-zinc-900/50 hover:bg-zinc-900 hover:border-zinc-700 text-zinc-400 hover:text-zinc-100"
+                }`}
+              >
+                <Icon className="w-3.5 h-3.5" aria-hidden="true" />
+                {t(`composer.starter.${id}` as TranslationKey)}
+                {active && <X className="w-3 h-3 opacity-80" aria-hidden="true" />}
+              </button>
+            );
+          })}
+          {(activeStarter !== null || requirement !== "" || releaseMode) && (
             <button
-              key={id}
               type="button"
-              onClick={() => applyStarter(id)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-zinc-800 bg-zinc-900/50 hover:bg-zinc-900 hover:border-zinc-700 text-zinc-400 hover:text-zinc-100 text-xs transition"
+              onClick={clearComposer}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/20 text-rose-200 text-xs transition"
             >
-              <Icon className="w-3.5 h-3.5" aria-hidden="true" />
-              {t(`composer.starter.${id}` as TranslationKey)}
+              <X className="w-3 h-3" aria-hidden="true" />
+              {t("composer.starter.clear")}
             </button>
-          ))}
+          )}
         </div>
       )}
     </section>

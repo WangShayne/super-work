@@ -6,6 +6,11 @@ This guide walks through first-run CLI environment scanning, Control-Plane LLM c
 
 ---
 
+## 0. v1.8.3: Cancellable Starters & Live Execution Feed
+
+- **Starter chips** on Home toggle on/off (click the active chip again, or press **Clear**). Switching chips swaps the scaffold; text you typed yourself is kept. Leaving "Cut a release" resets release mode, version and title.
+- **Watching a run**: each working mission row shows an elapsed timer and the latest step. Expand **Live (n)** for an inline console of the last 6 steps, or open the ticket drawer for the full feed (filters: All / Tools / Thoughts / Stages & gates, Auto-scroll toggle, SSE status). Refreshing the page replays recent events from the server.
+
 ## 0. v1.8.2: Role-First Models & Roles Studio
 
 Open **Settings → Models & Roles**:

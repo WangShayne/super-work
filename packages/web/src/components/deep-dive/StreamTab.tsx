@@ -5,6 +5,9 @@ import { HandoverDigestView } from "./HandoverDigestView.tsx";
 import { scopedVerificationForRun } from "./scopedVerification.ts";
 import { formatStage, formatTicketStatus, useI18n } from "../../i18n.tsx";
 import type { LiveEventLogEntry, RepoConfig, Ticket, TicketDetailResponse } from "../../types.ts";
+import { humanTicketPhase } from "../../utils/superAgent.ts";
+import { LiveExecutionFeed } from "../LiveExecutionFeed.tsx";
+import { NeedsYouCard, type ResolveHandler } from "../NeedsYouCard.tsx";
 
 export interface StreamTabProps {
   ticketId: string;
@@ -14,11 +17,13 @@ export interface StreamTabProps {
   reposById: Map<string, RepoConfig>;
   childSubtasks: Ticket[];
   ticketLiveEvents: LiveEventLogEntry[];
+  sseConnected: boolean;
   deliveryError: string | null;
   evalNotice: string | null;
   setDetail: (d: TicketDetailResponse) => void;
   onRefresh: () => void;
   onSelectTicket?: (ticketId: string) => void;
+  onResolve?: ResolveHandler;
 }
 
 export function StreamTab({
@@ -29,15 +34,44 @@ export function StreamTab({
   reposById,
   childSubtasks,
   ticketLiveEvents,
+  sseConnected,
   deliveryError,
   evalNotice,
   setDetail,
   onRefresh,
   onSelectTicket,
+  onResolve,
 }: StreamTabProps) {
   const { locale, t } = useI18n();
+  const phase = ticket ? humanTicketPhase(ticket.status) : undefined;
+  const isLive = phase === "working" || phase === "attention";
+  const feed = (
+    <LiveExecutionFeed
+      mode="full"
+      events={ticketLiveEvents}
+      ticket={ticket}
+      stageRuns={detail?.stageRuns}
+      sseConnected={sseConnected}
+    />
+  );
   return (
     <div className="space-y-5">
+      {onResolve &&
+        (detail?.inboxItems ?? [])
+          .filter((i) => i.status === "pending")
+          .map((item) => (
+            <NeedsYouCard
+              key={item.id}
+              item={item}
+              ticket={ticket}
+              selected={false}
+              onResolve={async (...args) => {
+                await onResolve(...args);
+                onRefresh();
+              }}
+              onInspectTicket={(id) => onSelectTicket?.(id)}
+            />
+          ))}
       {ticket?.errorMessage && (
         <div className="p-3 rounded-lg border border-rose-500/30 bg-rose-500/10 text-xs text-rose-200">
           <strong>{t("drawer.attention")}</strong> {ticket.errorMessage}
@@ -53,6 +87,8 @@ export function StreamTab({
           {evalNotice}
         </div>
       )}
+
+      {isLive && feed}
 
       {ticket &&
         (ticket.routingRationale ||
@@ -424,28 +460,7 @@ export function StreamTab({
         )}
       </div>
 
-      <div className="space-y-2">
-        <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
-          {t("drawer.liveEventsTitle")}
-        </h3>
-        <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-3 font-mono text-[11px] space-y-1.5 max-h-80 overflow-y-auto">
-          {ticketLiveEvents.length === 0 ? (
-            <span className="text-zinc-600">
-              {t("drawer.listeningEvents")}
-            </span>
-          ) : (
-            ticketLiveEvents.map((ev) => (
-              <div key={ev.id} className="flex gap-2">
-                <span className="text-zinc-600 shrink-0">
-                  {ev.timestamp.slice(11, 19)}
-                </span>
-                <span className="text-indigo-400 shrink-0">[{ev.kind}]</span>
-                <span className="text-zinc-300 break-all">{ev.summary}</span>
-              </div>
-            ))
-          )}
-        </div>
-      </div>
+      {!isLive && feed}
     </div>
   );
 }

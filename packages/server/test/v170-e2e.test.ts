@@ -49,7 +49,7 @@ describe("v1.7.0 Wave 2 End-to-End (MCP 1.7.0, Watchdog 2.0 / flake digest, core
     const baseUrl = `http://127.0.0.1:${server.port}`;
     try {
       const info = (await (await fetch(`${baseUrl}/api/mcp`)).json()) as { version: string };
-      expect(info.version).toBe("1.8.2");
+      expect(info.version).toBe("1.8.3");
       expect(MCP_TOOL_DEFINITIONS).toHaveLength(27);
 
       const rpc = async (method: string) =>
@@ -60,7 +60,7 @@ describe("v1.7.0 Wave 2 End-to-End (MCP 1.7.0, Watchdog 2.0 / flake digest, core
             body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: { protocolVersion: "2025-03-26" } }),
           })
         ).json()) as { result: { serverInfo?: { version: string }; tools?: unknown[] } };
-      expect((await rpc("initialize")).result.serverInfo?.version).toBe("1.8.2");
+      expect((await rpc("initialize")).result.serverInfo?.version).toBe("1.8.3");
       expect((await rpc("tools/list")).result.tools).toHaveLength(27);
     } finally {
       await server.stop(true);

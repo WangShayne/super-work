@@ -41,6 +41,7 @@ import {
   runWithOptionalProbes,
 } from "./control-plane-helpers.ts";
 import type { OpenAICompatibleConfig } from "./control-plane-helpers.ts";
+import { WORKER_MANDATE_ROUTER_RULE } from "./worker-mandate-rule.ts";
 
 export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
   readonly providerName: string;
@@ -420,6 +421,7 @@ export class OpenAICompatibleControlLLM implements ControlPlaneLLM {
           "- `single_ticket`: coherent single feature/fix cleanly executable on one branch; provide narrowed `singleSpec.allowedPaths` aligned to real files/modules.",
           "- `epic_dag`: complex or multi-package/multi-repo feature requiring 2-6 concurrent or staged subtasks with disjoint `allowedPaths` in `epicPlan`.",
           "- `goal_campaign`: quantitative optimization ONLY when an executable `metricCommand` and numeric `targetValue` exist.",
+          WORKER_MANDATE_ROUTER_RULE,
           allowProbes ? PROBE_PROMPT_GUIDE : "",
           "Output ONLY valid JSON matching the schema:",
           JSON.stringify(REQUIREMENT_INTAKE_SCHEMA),

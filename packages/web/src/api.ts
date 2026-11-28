@@ -116,6 +116,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** Mirror of core ReleaseMilestoneOptions (type-only; kept local because core does not export it via /types). */
+export interface MilestoneReleaseOptions {
+  bumpVersion?: boolean;
+  createTag?: boolean;
+  pushRemote?: boolean;
+  squashReleaseCommit?: boolean;
+  releaseCommitMessage?: string;
+  createGithubRelease?: boolean;
+}
+
 export const api = {
   getHealth: () => request<HealthResponse>("/api/health"),
 
@@ -606,6 +616,7 @@ export const api = {
       budgetIncreaseUsd?: number;
       arenaWinnerId?: string;
       selectedOption?: string;
+      milestoneRelease?: MilestoneReleaseOptions;
     },
   ) =>
     request<{ item: InboxItem; ticket: Ticket }>(`/api/inbox/${id}/resolve`, {
@@ -618,6 +629,7 @@ export const api = {
         budgetIncreaseUsd: options?.budgetIncreaseUsd,
         arenaWinnerId: options?.arenaWinnerId,
         selectedOption: options?.selectedOption,
+        milestoneRelease: options?.milestoneRelease,
       }),
     }),
 
@@ -798,6 +810,12 @@ export const api = {
     request<{ milestone: Milestone }>("/api/milestones", {
       method: "POST",
       body: JSON.stringify(payload),
+    }),
+
+  cancelMilestone: (id: string, reason?: string) =>
+    request<{ milestone: Milestone }>(`/api/milestones/${encodeURIComponent(id)}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
     }),
 
   releaseMilestone: (

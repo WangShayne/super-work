@@ -170,6 +170,12 @@ stateDiagram-v2
 - **`syncRepos`**：`persistSetupConfig(nextConfig, syncRepos = true)` 仅在 `syncRepos !== false` 时才覆盖各仓库的 `preferredImplementEngine` / `preferredReviewEngine`，因此保存凭据或通知不会让仓库脱离 `auto`。
 - **版本**：各工作区包、`GET /api/mcp` 与 JSON-RPC `initialize` 的 `serverInfo.version` 在该版本报告 `1.8.1`（27 个工具；已被 `1.8.2` 取代，见 §3.16）；Web 徽标当时为 `v1.8.1`。
 
+### 3.17 `v1.8.3` 可取消快捷 Chips、SSE 重放缓冲与可视化实时执行流
+- **重放缓冲**（[live-event-buffer.ts](./packages/server/src/live-event-buffer.ts)）：`createServerApp` 订阅内核，按任务保留环形缓冲（每任务 60 条、最多 40 个任务，LRU 淘汰），覆盖 `stage_started`、`worker_event`（排除 `usage` / `session_started`）、`stage_completed`、`verification_completed`、`checkpoint_created`、`watchdog_*`、`inbox_created`、`outbox_*`。`GET /api/events` 在 `connected` 之后重放匹配事件，复用实时通道的 `repoId` / `ticketId`（含子任务）过滤。测试：`packages/server/test/v183-sse-replay.test.ts`。
+- **结构化解析**（[liveStream.ts](./packages/web/src/utils/liveStream.ts)）：`parseKernelLiveEvent` 将 SSE 负载转为带可选 `category/badge/headline/detail/engine/toolName/isError` 的 `LiveEventLogEntry`（纯状态同步事件返回 `null`；`verification_completed` 保留 `kind` 与 `raw`，`scopedVerification.ts` 无需修改）。`appendBoundedTicketEvent` 对重放去重并限制每任务 80 / 总计 600 条；`synthesizeStageRunActivities` 由 `stageRuns` 还原时间线；`useKernelEvents` 将刷新防抖 100 ms。
+- **界面**：`LiveExecutionFeed`（`MissionRow` 中为 `compact`，`StreamTab` 中为 `full`）；`MissionRow` 改为 `<div>`，主按钮与展开按钮为兄弟节点（无嵌套按钮）。Composer 的 Chip 逻辑位于纯 reducer [starterComposer.ts](./packages/web/src/utils/starterComposer.ts)。测试：`packages/web/test/liveStream.test.ts`。
+- **版本**：各工作区包、`GET /api/mcp` 与 JSON-RPC `initialize` 的 `serverInfo.version` 均报告 `1.8.3`（27 个工具）；Web 徽标 `v1.8.3`。
+
 ### 3.16 `v1.8.2` 双基座清晰化、角色优先 Studio、一键智能搭配与反模式顾问
 - **双基座（Dual-Harness）架构**：**外层治理基座**（隔离 worktree、Mandate、确定性门禁、交叉评审、Outbox 交付）对所有 Worker 一致，并承载可插拔的**内层基座**——**原厂 CLI 基座**（`kind: "cli"`，复用本机订阅与协同训练的编码工具）与**内置 API 基座**（`kind: "api"`，直连 HTTP + 受 worktree 约束的轻量工具循环）。后端与协议无变化：这是建立在 §3.15 之上的纯 Web + 文档版本。
 - **纯函数顾问**（[modelAdvisor.ts](./packages/web/src/utils/modelAdvisor.ts)，测试见 `packages/web/test/modelAdvisor.test.ts`）：`formatModelStatusHuman`（绝不暴露原始内核 / 登录字符串）、`activeRolesOfProfile`、`isAutoCandidate`、`buildSmartModelRecipes`（`hybrid_best` / `cli_heterogeneous` / `pure_api` / `smart_auto`，均带 `isActive`）与 `diagnoseModelBindings`（`no_ready_models`、`same_model_self_review`、`empty_auto_pool`、`heuristic_control`、`unready_custom`，可附 `suggestedPatch`）。仅对 Web 类型使用 `import type`，浏览器包与 `@super-work/core` 保持隔离。

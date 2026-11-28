@@ -8,6 +8,12 @@ An asynchronous autonomous development workflow orchestration kernel and local d
 
 ---
 
+## v1.8.3 — Cancellable Starter Chips, SSE Replay Buffer & Visual Live Execution Feed
+
+- **Starter chips are toggles**: Fix a bug / Build a feature / Safe refactor / Cut a release stay visible, show `aria-pressed` + an `×` when active, switch cleanly between each other, and an explicit **Clear** pill resets text, release mode, version and milestone title (custom text and custom Options are preserved).
+- **Readable live execution**: SSE worker/stage/gate events are parsed into structured entries (`Bash · bun run typecheck`, `Read · packages/web/src/App.tsx`, gate pass/fail, watchdog and delivery alerts) instead of raw JSON. Home mission rows show a ticking timer, the latest step, and an inline **Live (n)** console; the drawer's Stream tab gets a full feed with filters, auto-scroll and a live SSE indicator (reconstructed from stage history when no live events exist).
+- **`/api/events` replay buffer**: the server keeps the last 60 meaningful events for each of the 40 most recent tickets and replays them (honoring `repoId` / `ticketId` filters) right after `connected`, so a page refresh no longer loses the live trail. The web client de-duplicates replays and debounces refreshes by 100 ms.
+
 ## v1.8.2 — Role-First Guided Model Studio: Dual-Harness Clarity, Smart Recipes & Anti-Pattern Advisor
 
 v1.8.2 makes **Models & Roles** self-explanatory. super-work is a **Dual-Harness** system: one **Outer Governance Harness** (isolated worktree, mandate, gates, review, delivery) wraps pluggable **Inner Harnesses** — the **Native CLI Harness** (`claude` / `codex` / `opencode` / `gemini`: reuses your local subscription and co-trained coding tools) and the **Built-in API Harness** (DeepSeek / OpenAI- / Anthropic-compatible / Ollama: direct HTTP plus a lightweight sandboxed loop; pay-as-you-go or local).

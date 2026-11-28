@@ -35,6 +35,7 @@ interface HomeViewProps {
   ticketsById: Map<string, Ticket>;
   inboxItems: InboxItem[];
   liveEvents: LiveEventLogEntry[];
+  sseConnected: boolean;
   modelProfiles: PublicModelProfile[];
   onResolve: ResolveHandler;
   onRefresh: () => void;
@@ -53,6 +54,7 @@ export function HomeView({
   ticketsById,
   inboxItems,
   liveEvents,
+  sseConnected,
   modelProfiles,
   onResolve,
   onRefresh,
@@ -89,9 +91,13 @@ export function HomeView({
         ? t("home.headline.executing").replace("{n}", String(workingCount))
         : t("home.headline.idle");
 
-  const lastEventByTicket = useMemo(() => {
-    const map = new Map<string, LiveEventLogEntry>();
-    for (const ev of liveEvents) map.set(ev.ticketId, ev);
+  const eventsByTicket = useMemo(() => {
+    const map = new Map<string, LiveEventLogEntry[]>();
+    for (const ev of liveEvents) {
+      const list = map.get(ev.ticketId);
+      if (list) list.push(ev);
+      else map.set(ev.ticketId, [ev]);
+    }
     return map;
   }, [liveEvents]);
 
@@ -246,7 +252,14 @@ export function HomeView({
         ) : (
           <div className="space-y-2">
             {liveWork.map((tk) => (
-              <MissionRow key={tk.id} ticket={tk} lastEvent={lastEventByTicket.get(tk.id)} onInspect={onInspectTicket} />
+              <MissionRow
+                key={tk.id}
+                ticket={tk}
+                events={eventsByTicket.get(tk.id) ?? []}
+                sseConnected={sseConnected}
+                defaultExpanded={workingCount === 1 && humanTicketPhase(tk.status) === "working"}
+                onInspect={onInspectTicket}
+              />
             ))}
           </div>
         )}

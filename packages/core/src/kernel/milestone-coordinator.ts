@@ -1,6 +1,7 @@
 import { buildRunDigestReport } from "../digest.ts";
 import {
   type PlannedMilestoneItem,
+  isPureReleaseHousekeepingRequirement,
   planMilestoneWaves,
   synthesizeMilestoneReleaseNotes,
 } from "../milestone.ts";
@@ -18,6 +19,7 @@ import type {
 } from "../types.ts";
 import { newId, nowIso } from "../utils.ts";
 import type { KernelCoordinatorContext } from "./context.ts";
+import { cancelTicketOp } from "./kernel-ticket-ops.ts";
 import { maybeVerifyAndReloadSelfHostMilestoneOp } from "./self-host-coordinator.ts";
 
 const MAX_MILESTONE_ITEMS = 20;
@@ -190,7 +192,10 @@ export async function createMilestoneOp(
   const name = input.name?.trim();
   if (!name) throw new Error("Milestone name is required");
   const requirements = (input.requirements ?? []).map((r) => String(r).trim()).filter(Boolean);
-  if (requirements.length === 0) throw new Error("Milestone requires at least one requirement");
+  const targetVersionInput = input.targetVersion?.trim();
+  if (requirements.length === 0 && !targetVersionInput) {
+    throw new Error("Milestone requires at least one requirement");
+  }
   if (requirements.length > MAX_MILESTONE_ITEMS) {
     throw new Error(`Milestone supports at most ${MAX_MILESTONE_ITEMS} requirements`);
   }
@@ -202,8 +207,14 @@ export async function createMilestoneOp(
     maxBudgetUsdPerItem: input.maxBudgetUsdPerItem,
   };
 
+  // Direct release: nothing left to code (empty or pure squash/tag/push housekeeping) → 0-item milestone.
+  const directRelease =
+    !!targetVersionInput &&
+    (requirements.length === 0 || requirements.every(isPureReleaseHousekeepingRequirement));
+  const effectiveRequirements = directRelease ? [] : requirements;
+
   const plans: RequirementIntakePlan[] = [];
-  for (const requirement of requirements) {
+  for (const requirement of effectiveRequirements) {
     plans.push(
       await ctx.previewRequirementIntake({
         repoId: input.repoId,
@@ -218,7 +229,7 @@ export async function createMilestoneOp(
     );
   }
 
-  const planned: PlannedMilestoneItem[] = requirements.map((requirement, index) => ({
+  const planned: PlannedMilestoneItem[] = effectiveRequirements.map((requirement, index) => ({
     id: newId("msi"),
     index,
     requirement,
@@ -260,6 +271,8 @@ export async function createMilestoneOp(
     updatedAt: ts,
   };
   await store.save(milestone);
+
+  if (directRelease) return markMilestoneReady(ctx, milestone);
 
   // Dispatch every item whose upstream dependencies are plain tickets/epics now (cross-wave
   // dependsOn gates Wave 1+). Items depending on a goal campaign are dispatched by sync.
@@ -430,6 +443,49 @@ export async function syncMilestonesOp(ctx: KernelCoordinatorContext, repoId: st
       await persist(ctx, milestone);
     }
   }
+}
+
+const TERMINAL_TICKET_STATUSES = new Set<string>(["delivered", "failed", "cancelled"]);
+
+export async function cancelMilestoneOp(
+  ctx: KernelCoordinatorContext,
+  id: string,
+  reason?: string,
+): Promise<Milestone> {
+  const store = requireMilestoneStore(ctx);
+  const milestone = await store.get(id);
+  if (!milestone) throw new Error(`Milestone not found: ${id}`);
+  if (milestone.status === "released" || milestone.status === "cancelled") {
+    throw new Error(`Milestone ${id} is ${milestone.status}, cannot cancel`);
+  }
+  const why = reason?.trim() || "Milestone cancelled";
+
+  const tickets = await collectMilestoneTickets(ctx, milestone);
+  for (const t of tickets) {
+    if (TERMINAL_TICKET_STATUSES.has(t.status)) continue;
+    try {
+      await cancelTicketOp(ctx, t.id, why);
+    } catch {
+      // best-effort: one stuck ticket must not block cancelling the rest
+    }
+  }
+
+  const pending = await ctx.stateStore.listInboxItems({ repoId: milestone.repoId, status: "pending" });
+  for (const inbox of pending) {
+    if (inbox.kind === "milestone_ready" && inbox.contextPayload?.milestoneId === milestone.id) {
+      const ts = nowIso();
+      const resolved: InboxItem = { ...inbox, status: "rejected", resolutionNote: why, resolvedAt: ts };
+      await ctx.stateStore.saveInboxItem(resolved);
+      ctx.emitEvent({ type: "inbox_resolved", item: resolved, timestamp: ts });
+    }
+  }
+
+  if (milestone.stagingBranch) {
+    const repo = await ctx.stateStore.getRepo(milestone.repoId);
+    if (repo) await ctx.workspace.deleteBranch?.(repo.rootPath, milestone.stagingBranch).catch(() => {});
+  }
+
+  return persist(ctx, { ...milestone, status: "cancelled" });
 }
 
 /**

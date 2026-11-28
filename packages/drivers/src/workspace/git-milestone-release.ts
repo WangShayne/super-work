@@ -81,6 +81,14 @@ export async function executeMilestoneReleaseImpl(input: {
     throw new Error(`Refusing milestone release: '${baseBranch}' has uncommitted tracked changes`);
   }
 
+  if (doTag && version) {
+    const existingTag = await runGit(
+      ["rev-parse", "--verify", "--quiet", `refs/tags/v${version}`],
+      rootRepoPath,
+    );
+    if (existingTag.exitCode === 0) throw new Error(`Tag v${version} already exists locally`);
+  }
+
   const identity = ["-c", "user.name=super-work", "-c", "user.email=super-work@localhost"];
   const preReleaseSha = (await must(["rev-parse", "HEAD"], "Resolve pre-release HEAD")).stdout.trim();
 
@@ -150,9 +158,24 @@ export async function executeMilestoneReleaseImpl(input: {
 
   if (doSquash) {
     const preSquashHead = (await must(["rev-parse", "HEAD"], "Resolve HEAD")).stdout.trim();
-    if (preSquashHead !== preReleaseSha) {
+    // direct_main: collapse every unpushed commit (not just the bump) back onto origin/<base>.
+    let squashTargetSha = preReleaseSha;
+    if (!stagingBranch) {
+      const originRef = `refs/remotes/origin/${baseBranch}`;
+      const originExists = await runGit(["show-ref", "--verify", "--quiet", originRef], rootRepoPath);
+      if (originExists.exitCode === 0) {
+        const isAncestor = await runGit(
+          ["merge-base", "--is-ancestor", originRef, preSquashHead],
+          rootRepoPath,
+        );
+        if (isAncestor.exitCode === 0) {
+          squashTargetSha = (await must(["rev-parse", originRef], "Resolve origin base")).stdout.trim();
+        }
+      }
+    }
+    if (preSquashHead !== squashTargetSha) {
       const preTree = (await must(["rev-parse", "HEAD^{tree}"], "Resolve tree")).stdout.trim();
-      await must(["reset", "--soft", preReleaseSha], "Soft reset for squash");
+      await must(["reset", "--soft", squashTargetSha], "Soft reset for squash");
       await must(
         [
           ...identity,

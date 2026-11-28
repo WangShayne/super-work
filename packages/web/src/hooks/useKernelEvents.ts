@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getAuthToken } from "../api.ts";
 import type { LiveEventLogEntry } from "../types.ts";
+import { appendBoundedTicketEvent, parseKernelLiveEvent } from "../utils/liveStream.ts";
 
 const REFRESH_EVENTS = [
   "repo_updated",
@@ -34,15 +35,17 @@ const REFRESH_EVENTS = [
   "self_reload_updated",
 ];
 
-type Nested = { id?: string; ticketId?: string } | undefined;
+const REFRESH_DEBOUNCE_MS = 100;
 
-/** Subscribes to the Kernel SSE bus; triggers `onRefresh` on every domain event. */
+/** Subscribes to the Kernel SSE bus; coalesces domain events into one debounced `onRefresh`. */
 export function useKernelEvents(onRefresh: () => void): {
   sseConnected: boolean;
   liveEvents: LiveEventLogEntry[];
 } {
   const [sseConnected, setSseConnected] = useState(false);
   const [liveEvents, setLiveEvents] = useState<LiveEventLogEntry[]>([]);
+  const refreshRef = useRef(onRefresh);
+  refreshRef.current = onRefresh;
 
   useEffect(() => {
     const token = getAuthToken();
@@ -50,57 +53,42 @@ export function useKernelEvents(onRefresh: () => void): {
     es.onopen = () => setSseConnected(true);
     es.onerror = () => setSseConnected(false);
 
-    const pushLog = (ticketId: string, kind: string, summary: string, raw: unknown) => {
-      setLiveEvents((prev) => [
-        ...prev.slice(-199),
-        {
-          id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-          ticketId,
-          kind,
-          summary,
-          timestamp: new Date().toISOString(),
-          raw,
-        },
-      ]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const scheduleRefresh = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = undefined;
+        refreshRef.current();
+      }, REFRESH_DEBOUNCE_MS);
+    };
+
+    const handle = (name: string, e: MessageEvent, refresh: boolean) => {
+      try {
+        const parsed: unknown = JSON.parse(e.data);
+        const entry = parseKernelLiveEvent(name, parsed);
+        if (entry?.ticketId) {
+          const full: LiveEventLogEntry = {
+            id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            ...entry,
+          };
+          setLiveEvents((prev) => appendBoundedTicketEvent(prev, full));
+        }
+      } catch {
+        // Ignore malformed frames
+      }
+      if (refresh) scheduleRefresh();
     };
 
     for (const name of REFRESH_EVENTS) {
-      es.addEventListener(name, (e: MessageEvent) => {
-        try {
-          const parsed = JSON.parse(e.data) as Record<string, unknown>;
-          const tId =
-            (parsed.ticketId as string | undefined) ||
-            (parsed.ticket as Nested)?.id ||
-            (parsed.checkpoint as Nested)?.ticketId ||
-            (parsed.item as Nested)?.ticketId ||
-            (parsed.entry as Nested)?.ticketId ||
-            (parsed.signal as Nested)?.ticketId;
-          if (tId) pushLog(tId, name, JSON.stringify(parsed).slice(0, 180), parsed);
-        } catch {
-          // Ignore parse errors
-        }
-        onRefresh();
-      });
+      es.addEventListener(name, (e: MessageEvent) => handle(name, e, true));
     }
+    es.addEventListener("worker_event", (e: MessageEvent) => handle("worker_event", e, false));
 
-    es.addEventListener("worker_event", (e: MessageEvent) => {
-      try {
-        const parsed = JSON.parse(e.data) as {
-          ticketId: string;
-          engine: string;
-          event: { type: string; text?: string; toolName?: string; inputSummary?: string; summary?: string; message?: string };
-        };
-        const ev = parsed.event;
-        const msg =
-          ev.text || ev.summary || ev.message || (ev.toolName ? `${ev.toolName}: ${ev.inputSummary ?? ""}` : ev.type);
-        pushLog(parsed.ticketId, `${parsed.engine}:${ev.type}`, msg, parsed);
-      } catch {
-        // Ignore
-      }
-    });
-
-    return () => es.close();
-  }, [onRefresh]);
+    return () => {
+      if (timer !== undefined) clearTimeout(timer);
+      es.close();
+    };
+  }, []);
 
   return { sseConnected, liveEvents };
 }

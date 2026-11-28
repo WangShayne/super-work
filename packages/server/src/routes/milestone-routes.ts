@@ -62,6 +62,22 @@ export function registerMilestoneRoutes(ctx: ServerRouteContext): void {
     return c.json({ milestone });
   });
 
+  app.post("/api/milestones/:id/cancel", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { reason?: string };
+    const id = c.req.param("id");
+    const existing = await kernel.getMilestone(id);
+    if (!existing) return c.json({ error: "Milestone not found" }, 404);
+    try {
+      const milestone = await kernel.cancelMilestone(
+        id,
+        typeof body.reason === "string" ? body.reason : undefined,
+      );
+      return c.json({ milestone });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
   app.post("/api/milestones/:id/release", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as {
       bumpVersion?: boolean;

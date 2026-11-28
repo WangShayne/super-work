@@ -19,6 +19,7 @@ import {
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
+import { createLiveEventBuffer } from "./live-event-buffer.ts";
 import { registerAutonomyRoutes } from "./routes/autonomy-routes.ts";
 import type { ServerRouteContext } from "./routes/context.ts";
 import { registerInboxOutboxRoutes } from "./routes/inbox-outbox-routes.ts";
@@ -279,6 +280,9 @@ export function createServerApp(deps: ServerAppDeps): Hono {
   registerMcpWebhookRoutes(routeCtx);
 
   // --- Real-time SSE Bus ---
+  const liveBuffer = createLiveEventBuffer();
+  kernel.subscribe((event) => liveBuffer.push(event));
+
   app.get("/api/events", async (c) => {
     const filterRepoId = c.req.query("repoId") || undefined;
     const filterTicketId = c.req.query("ticketId") || undefined;
@@ -296,6 +300,27 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         resolveClosed = res;
       });
 
+      const matches = (event: KernelEvent): boolean => {
+        if (!filterRepoId && !filterTicketId) return true;
+        const target = resolveEventTarget(event, ticketMeta);
+        if (filterRepoId && target.repoId !== filterRepoId) {
+          const parentId = target.ticketId
+            ? ticketMeta.get(target.ticketId)?.parentTicketId
+            : undefined;
+          const parentRepoId = parentId ? ticketMeta.get(parentId)?.repoId : undefined;
+          if (parentRepoId !== filterRepoId) return false;
+        }
+        if (filterTicketId) {
+          const evTktId = target.ticketId;
+          const matchesSelf = evTktId === filterTicketId;
+          const matchesChild = Boolean(
+            evTktId && ticketMeta.get(evTktId)?.parentTicketId === filterTicketId,
+          );
+          if (!matchesSelf && !matchesChild) return false;
+        }
+        return true;
+      };
+
       const unsubscribe = kernel.subscribe((event) => {
         if (closed) return;
         if (event.type === "ticket_created" || event.type === "ticket_updated") {
@@ -304,30 +329,7 @@ export function createServerApp(deps: ServerAppDeps): Hono {
             parentTicketId: event.ticket.parentTicketId,
           });
         }
-
-        if (filterRepoId || filterTicketId) {
-          const target = resolveEventTarget(event, ticketMeta);
-          if (filterRepoId && target.repoId !== filterRepoId) {
-            const parentId = target.ticketId
-              ? ticketMeta.get(target.ticketId)?.parentTicketId
-              : undefined;
-            const parentRepoId = parentId ? ticketMeta.get(parentId)?.repoId : undefined;
-            if (parentRepoId !== filterRepoId) {
-              return;
-            }
-          }
-          if (filterTicketId) {
-            const evTktId = target.ticketId;
-            const matchesSelf = evTktId === filterTicketId;
-            const matchesChild = Boolean(
-              evTktId && ticketMeta.get(evTktId)?.parentTicketId === filterTicketId,
-            );
-            if (!matchesSelf && !matchesChild) {
-              return;
-            }
-          }
-        }
-
+        if (!matches(event)) return;
         void stream.writeSSE({
           event: event.type,
           data: JSON.stringify(event),
@@ -353,6 +355,13 @@ export function createServerApp(deps: ServerAppDeps): Hono {
         event: "connected",
         data: JSON.stringify({ timestamp: nowIso() }),
       });
+
+      // Replay recent per-ticket execution events so refreshes/new tabs see live context.
+      for (const event of liveBuffer.replay()) {
+        if (closed) break;
+        if (!matches(event)) continue;
+        await stream.writeSSE({ event: event.type, data: JSON.stringify(event) });
+      }
 
       await donePromise;
     });

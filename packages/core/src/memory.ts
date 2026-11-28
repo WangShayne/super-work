@@ -121,7 +121,7 @@ export class MemoryManager {
     sections.push(`\n## Mandate (Immutable Scope & Constraints)`);
     sections.push(`- Allowed paths: ${ticket.mandate.allowedPaths.join(", ") || "**"}`);
     sections.push(`- Forbidden paths: ${ticket.mandate.forbiddenPaths.join(", ")}`);
-    sections.push(`- External side effects prohibited: NEVER run git push, gh pr create, or external API mutations directly; super-work handles delivery via Outbox.`);
+    sections.push(`- External side effects prohibited: NEVER run git push, git tag for release pushing, gh pr create, or external API mutations directly; super-work handles delivery, tagging, and remote push via Outbox / Milestone Release. If the user prompt mentions pushing or tagging, complete all code/version/doc/test changes in the worktree and DO NOT request clarification about git push vs Mandate.`);
     if (verificationCommands && verificationCommands.length > 0) {
       sections.push(
         `- Deterministic verification gate: ${verificationCommands.join(" && ")} (executed automatically by super-work after implement and rebase)`,

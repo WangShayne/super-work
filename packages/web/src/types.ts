@@ -234,7 +234,17 @@ export interface LiveEventLogEntry {
   summary: string;
   timestamp: string;
   raw?: unknown;
+  /** v1.8.3 structured presentation fields (optional for backward compatibility). */
+  category?: LiveEventCategory;
+  badge?: string;
+  headline?: string;
+  detail?: string;
+  engine?: string;
+  toolName?: string;
+  isError?: boolean;
 }
+
+export type LiveEventCategory = "stage" | "thought" | "tool" | "output" | "gate" | "alert";
 
 export interface LlmConnectionTestResult {
   ok: boolean;

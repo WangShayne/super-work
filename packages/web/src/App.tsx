@@ -183,6 +183,7 @@ export function App() {
               ticketsById={ticketsById}
               inboxItems={inboxItems}
               liveEvents={liveEvents}
+              sseConnected={sseConnected}
               modelProfiles={setupStatus?.config.modelProfiles ?? []}
               onResolve={handleResolveInbox}
               onRefresh={refresh}
@@ -231,9 +232,11 @@ export function App() {
           repo={activeRepo}
           modelProfiles={setupStatus?.config.modelProfiles ?? []}
           liveEvents={liveEvents}
+          sseConnected={sseConnected}
           onClose={() => setInspectedTicketId(null)}
           onSelectTicket={setInspectedTicketId}
           onRefresh={refresh}
+          onResolve={handleResolveInbox}
         />
 
         <AddRepoModal

@@ -618,7 +618,7 @@ async function handleSingleMcpRequest(
             },
             serverInfo: {
               name: "super-work",
-              version: "1.8.2",
+              version: "1.8.3",
             },
           },
         };

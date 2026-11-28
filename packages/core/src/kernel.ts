@@ -38,6 +38,7 @@ import { batchResolveInboxOp, resolveInboxItemOp } from "./kernel/inbox-resoluti
 import {
   type CreateMilestoneInput,
   type ReleaseMilestoneOptions,
+  cancelMilestoneOp,
   createMilestoneOp,
   releaseMilestoneOp,
   syncMilestonesOp,
@@ -690,6 +691,7 @@ export class SuperWorkKernel {
       saveToPlaybook?: boolean;
       arenaWinnerId?: string;
       selectedOption?: string;
+      milestoneRelease?: ReleaseMilestoneOptions;
     },
   ): Promise<{ item: InboxItem; ticket: Ticket }> {
     return resolveInboxItemOp(this.coordinatorCtx(), inboxId, decision, note, options);
@@ -887,6 +889,10 @@ export class SuperWorkKernel {
   }
 
   /** Explicit-only release (REST / CLI / Inbox signoff); never invoked by the scheduler. */
+  async cancelMilestone(id: string, reason?: string): Promise<Milestone> {
+    return cancelMilestoneOp(this.coordinatorCtx(), id, reason);
+  }
+
   async releaseMilestone(id: string, options: ReleaseMilestoneOptions = {}): Promise<Milestone> {
     return releaseMilestoneOp(this.coordinatorCtx(), id, options);
   }
